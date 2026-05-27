@@ -206,6 +206,8 @@ const productSchema = new mongoose.Schema({
   oldPrice: { type: Number, default: 0 },
   imageUrl: { type: String, default: '' },
   imagePublicId: { type: String, default: '' },
+  galleryUrls: { type: [String], default: [] },
+  galleryPublicIds: { type: [String], default: [] },
   emoji: { type: String, default: '🌹' },
   available: { type: Boolean, default: true },
   featured: { type: Boolean, default: false },
@@ -310,7 +312,7 @@ const PromoCode = mongoose.model('PromoCode', promoCodeSchema);
 const Customer = mongoose.model('Customer', customerSchema);
 const Order = mongoose.model('Order', orderSchema);
 
-function publicProduct(p) { return { _id: p._id, name: p.name, category: p.category, productType: p.productType, description: p.description, price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, emoji: p.emoji, available: p.available, featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent, minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort }; }
+function publicProduct(p) { const galleryUrls = Array.isArray(p.galleryUrls) ? p.galleryUrls.filter(Boolean).slice(0, 3) : []; const images = [...new Set([p.imageUrl, ...galleryUrls].filter(Boolean))].slice(0, 4); return { _id: p._id, name: p.name, category: p.category, productType: p.productType, description: p.description, price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, available: p.available, featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent, minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort }; }
 function syncSettingsAliases(settings) {
   const defaults = { businessLat: settings.restaurantLat ?? 38.8616, businessLng: settings.restaurantLng ?? 65.5858, businessPhone: settings.restaurantPhone || '+998 90 000 00 00', businessAddress: settings.restaurantAddress || 'Kasbi, Qashqadaryo', scheduledMinLeadDays: 4, expressMaxLeadHours: 24, expressRandomMinAmount: 100000, firstOrderDiscountAmount: 10000, cashbackPercent: 3, referralFriendDiscountAmount: 10000, referralInviterBonusAmount: 10000, bonusUseEnabled: true };
   let changed = false;
@@ -494,7 +496,6 @@ function postJson(url, payload, timeoutMs = 15000) { return new Promise((resolve
 async function telegramApi(method, payload = {}) { if (!BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN sozlanmagan.' }; try { const data = await postJson(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, payload); if (!data?.ok) console.error('Telegram API error:', method, data); return data; } catch (error) { console.error('Telegram API request failed:', method, error.message); return { ok: false, description: error.message }; } }
 
 let cachedBotIdentity = null;
-let pollingStarted = false;
 async function getTelegramBotIdentity(force = false) {
   if (!BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN sozlanmagan.' };
   if (cachedBotIdentity && !force) return cachedBotIdentity;
@@ -519,35 +520,6 @@ async function syncTelegramBotIdentity() {
   }
   console.log(`Telegram bot ulandi: @${actual} (${identity.first_name || 'no name'})`);
   return identity;
-}
-async function configureTelegramTransport() {
-  if (!BOT_TOKEN) {
-    console.warn('BOT_TOKEN sozlanmagan. Telegram bot update qabul qilmaydi.');
-    return;
-  }
-
-  if (AUTO_SET_WEBHOOK && PUBLIC_URL) {
-    const result = await telegramApi('setWebhook', {
-      url: `${PUBLIC_URL}/telegram/webhook`,
-      secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
-      allowed_updates: ['message', 'callback_query'],
-      drop_pending_updates: true,
-    });
-    if (result?.ok) console.log(`Telegram webhook ulandi: ${PUBLIC_URL}/telegram/webhook`);
-    return;
-  }
-
-  if (AUTO_SET_WEBHOOK && !PUBLIC_URL) {
-    console.warn('AUTO_SET_WEBHOOK=true, lekin PUBLIC_URL real HTTPS domen emas. Polling rejimi ishga tushiriladi.');
-  }
-
-  if (TELEGRAM_POLLING || !PUBLIC_URL) {
-    await telegramApi('deleteWebhook', { drop_pending_updates: false });
-    startPolling();
-    return;
-  }
-
-  console.warn('Telegram transport sozlanmagan: AUTO_SET_WEBHOOK=false va TELEGRAM_POLLING=false.');
 }
 async function notifyAdmin(text, photoUrl = '') { const settings = await getSettingsDoc(); const chatId = settings.adminTelegramChatId || process.env.ADMIN_TELEGRAM_CHAT_ID; if (!chatId) return; if (photoUrl) await telegramApi('sendPhoto', { chat_id: chatId, photo: photoUrl, caption: text, parse_mode: 'HTML' }); else await telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: false }); }
 async function notifyCustomer(chatId, text) { if (!chatId) return; await telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' }); }
@@ -634,8 +606,8 @@ app.patch('/api/admin/orders/:id', verifyAdminToken, asyncHandler(async (req, re
 app.get('/api/admin/customers', verifyAdminToken, asyncHandler(async (_req, res) => { const customers = await Customer.find().sort({ createdAt: -1 }).limit(300); res.json({ success: true, customers }); }));
 
 app.get('/api/admin/products', verifyAdminToken, asyncHandler(async (_req, res) => { const products = await Product.find().sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products }); }));
-app.post('/api/admin/products', verifyAdminToken, upload.single('image'), asyncHandler(async (req, res) => { const uploaded = req.file ? await uploadToCloudinary(req.file, 'giftgo/products') : null; const product = await Product.create({ name: String(req.body.name || '').trim(), category: String(req.body.category || 'Gullar').trim(), productType: String(req.body.productType || 'FLOWER'), description: String(req.body.description || '').trim(), price: normalizeNumber(req.body.price), oldPrice: normalizeNumber(req.body.oldPrice), imageUrl: uploaded?.url || '', imagePublicId: uploaded?.publicId || '', emoji: String(req.body.emoji || '🌹').trim(), available: parseBoolean(req.body.available, true), featured: parseBoolean(req.body.featured, false), promoEligible: parseBoolean(req.body.promoEligible, true), promoCode: normalizePromoCode(req.body.promoCode), promoDiscountPercent: Math.max(0, Math.min(100, normalizeNumber(req.body.promoDiscountPercent))), cashbackPercentOverride: normalizeNumber(req.body.cashbackPercentOverride), minLeadDays: normalizeNumber(req.body.minLeadDays ?? 4), expressRandomAllowed: parseBoolean(req.body.expressRandomAllowed, false), sort: normalizeNumber(req.body.sort || 100) }); res.status(201).json({ success: true, product }); }));
-app.patch('/api/admin/products/:id', verifyAdminToken, upload.single('image'), asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Mahsulot ID'); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' }); for (const f of ['name', 'category', 'description', 'emoji', 'productType']) if (req.body[f] !== undefined) product[f] = String(req.body[f]).trim(); for (const f of ['price', 'oldPrice', 'sort', 'promoDiscountPercent', 'cashbackPercentOverride', 'minLeadDays']) if (req.body[f] !== undefined) product[f] = normalizeNumber(req.body[f]); if (req.body.promoCode !== undefined) product.promoCode = normalizePromoCode(req.body.promoCode); for (const f of ['available', 'featured', 'promoEligible', 'expressRandomAllowed']) if (req.body[f] !== undefined) product[f] = parseBoolean(req.body[f], product[f]); if (req.file) { const uploaded = await uploadToCloudinary(req.file, 'giftgo/products'); product.imageUrl = uploaded.url; product.imagePublicId = uploaded.publicId; } await product.save(); res.json({ success: true, product }); }));
+app.post('/api/admin/products', verifyAdminToken, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'gallery', maxCount: 3 }]), asyncHandler(async (req, res) => { const imageFiles = [...(req.files?.image || []), ...(req.files?.gallery || [])].slice(0, 4); const uploadedImages = []; for (const file of imageFiles) uploadedImages.push(await uploadToCloudinary(file, 'giftgo/products')); const primaryImage = uploadedImages[0] || null; const galleryImages = uploadedImages.slice(1, 4); const product = await Product.create({ name: String(req.body.name || '').trim(), category: String(req.body.category || 'Gullar').trim(), productType: String(req.body.productType || 'FLOWER'), description: String(req.body.description || '').trim(), price: normalizeNumber(req.body.price), oldPrice: normalizeNumber(req.body.oldPrice), imageUrl: primaryImage?.url || '', imagePublicId: primaryImage?.publicId || '', galleryUrls: galleryImages.map((x) => x.url), galleryPublicIds: galleryImages.map((x) => x.publicId), emoji: String(req.body.emoji || '🌹').trim(), available: parseBoolean(req.body.available, true), featured: parseBoolean(req.body.featured, false), promoEligible: parseBoolean(req.body.promoEligible, true), promoCode: normalizePromoCode(req.body.promoCode), promoDiscountPercent: Math.max(0, Math.min(100, normalizeNumber(req.body.promoDiscountPercent))), cashbackPercentOverride: normalizeNumber(req.body.cashbackPercentOverride), minLeadDays: normalizeNumber(req.body.minLeadDays ?? 4), expressRandomAllowed: parseBoolean(req.body.expressRandomAllowed, false), sort: normalizeNumber(req.body.sort || 100) }); res.status(201).json({ success: true, product }); }));
+app.patch('/api/admin/products/:id', verifyAdminToken, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'gallery', maxCount: 3 }]), asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Mahsulot ID'); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' }); for (const f of ['name', 'category', 'description', 'emoji', 'productType']) if (req.body[f] !== undefined) product[f] = String(req.body[f]).trim(); for (const f of ['price', 'oldPrice', 'sort', 'promoDiscountPercent', 'cashbackPercentOverride', 'minLeadDays']) if (req.body[f] !== undefined) product[f] = normalizeNumber(req.body[f]); if (req.body.promoCode !== undefined) product.promoCode = normalizePromoCode(req.body.promoCode); for (const f of ['available', 'featured', 'promoEligible', 'expressRandomAllowed']) if (req.body[f] !== undefined) product[f] = parseBoolean(req.body[f], product[f]); const imageFiles = [...(req.files?.image || []), ...(req.files?.gallery || [])].slice(0, 4); if (imageFiles.length) { const uploadedImages = []; for (const file of imageFiles) uploadedImages.push(await uploadToCloudinary(file, 'giftgo/products')); const primaryImage = uploadedImages[0] || null; const galleryImages = uploadedImages.slice(1, 4); product.imageUrl = primaryImage?.url || ''; product.imagePublicId = primaryImage?.publicId || ''; product.galleryUrls = galleryImages.map((x) => x.url); product.galleryPublicIds = galleryImages.map((x) => x.publicId); } await product.save(); res.json({ success: true, product }); }));
 app.delete('/api/admin/products/:id', verifyAdminToken, asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Mahsulot ID'); const product = await Product.findByIdAndDelete(req.params.id); if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' }); res.json({ success: true }); }));
 
 app.get('/api/admin/promocodes', verifyAdminToken, asyncHandler(async (_req, res) => { const promos = await PromoCode.find().sort({ createdAt: -1 }).limit(200); res.json({ success: true, promos }); }));
@@ -665,15 +637,13 @@ mongoose.connect(MONGODB_URI).then(async () => {
   app.listen(PORT, async () => {
     console.log(`GiftGo Mini App listening on ${PORT}`);
     if (BOT_TOKEN) await syncTelegramBotIdentity();
-    await configureTelegramTransport();
+    if (AUTO_SET_WEBHOOK && PUBLIC_URL && BOT_TOKEN) await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
+    if (TELEGRAM_POLLING && BOT_TOKEN && !AUTO_SET_WEBHOOK) startPolling();
   });
 }).catch((error) => { console.error('MongoDB connection failed:', error); process.exit(1); });
 
 let pollingOffset = 0;
 function startPolling() {
-  if (pollingStarted) return;
-  pollingStarted = true;
-  console.log('Telegram polling ishga tushdi.');
   async function loop() {
     try {
       const data = await telegramApi('getUpdates', { offset: pollingOffset, timeout: 25, allowed_updates: ['message', 'callback_query'] });
