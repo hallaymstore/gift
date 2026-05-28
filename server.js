@@ -353,6 +353,16 @@ async function seedDefaults() {
     { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '🎸', minLeadDays: 4, sort: 10 },
     { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '✨', minLeadDays: 4, sort: 11 },
   ]);
+  const defaultServiceProducts = [
+    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '📞', featured: true, minLeadDays: 4, sort: 8 },
+    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '🎬', minLeadDays: 4, sort: 9 },
+    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '🎸', minLeadDays: 4, sort: 10 },
+    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '✨', minLeadDays: 4, sort: 11 },
+  ];
+  for (const item of defaultServiceProducts) {
+    const exists = await Product.exists({ name: item.name });
+    if (!exists) await Product.create(item);
+  }
   const promoCount = await PromoCode.countDocuments();
   if (!promoCount) await PromoCode.create({ code: 'WELCOME10', title: 'Birinchi xarid uchun 10 000 so‘m', discountType: 'FIXED', value: 10000, firstOrderOnly: true, minSubtotal: 50000, active: true });
 }
@@ -559,8 +569,9 @@ async function answerStart(chatId, fromUser = null, startArg = '') {
   if (url) buttons.push([{ text: '🎁 Mini appni ochish', web_app: { url } }]);
   if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Admin panel', web_app: { url: adminPanelUrl() } }]);
   const supportRows = [];
-  const phoneUrl = supportPhoneUrl(settings);
-  if (phoneUrl) supportRows.push({ text: '📞 Muammo bo‘yicha qo‘ng‘iroq', url: phoneUrl });
+  // Telegram inline keyboard URL tugmasi tel: linkni qabul qilmaydi.
+  // Shu sabab /start javobsiz qolmasligi uchun telefon callback orqali alertda ko‘rsatiladi.
+  supportRows.push({ text: '📞 Telefon raqam', callback_data: 'phone' });
   const tgUrl = supportTelegramUrl(settings);
   if (tgUrl) supportRows.push({ text: '💬 Telegram chat', url: tgUrl });
   if (supportRows.length) buttons.push(supportRows);
@@ -741,7 +752,12 @@ mongoose.connect(MONGODB_URI).then(async () => {
     console.log(`GiftGo Mini App listening on ${PORT}`);
     if (BOT_TOKEN) await syncTelegramBotIdentity();
     if (AUTO_SET_WEBHOOK && PUBLIC_URL && BOT_TOKEN) await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
-    if (TELEGRAM_POLLING && BOT_TOKEN && !AUTO_SET_WEBHOOK) startPolling();
+    if (TELEGRAM_POLLING && BOT_TOKEN && !AUTO_SET_WEBHOOK) {
+      // Agar oldingi deployda webhook qolib ketgan bo‘lsa, getUpdates ishlamaydi.
+      // .env o‘zgarmasdan ham /start javob berishi uchun pollingdan oldin webhook xavfsiz o‘chiriladi.
+      await telegramApi('deleteWebhook', { drop_pending_updates: false });
+      startPolling();
+    }
   });
 }).catch((error) => { console.error('MongoDB connection failed:', error); process.exit(1); });
 
