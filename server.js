@@ -157,6 +157,8 @@ const settingsSchema = new mongoose.Schema({
   logoUrl: { type: String, default: makeLogoDataUri },
   currency: { type: String, default: 'UZS' },
   businessPhone: { type: String, default: '+998 90 000 00 00' },
+  supportPhone: { type: String, default: '+998887660800' },
+  supportTelegram: { type: String, default: '@Qoryogdiyev' },
   businessAddress: { type: String, default: 'Kasbi, Qashqadaryo' },
   businessLat: { type: Number, default: 38.8616 },
   businessLng: { type: Number, default: 65.5858 },
@@ -188,19 +190,19 @@ const settingsSchema = new mongoose.Schema({
   paymentCardBank: { type: String, default: 'Click / Payme / Uzcard' },
   paymentCardNumber: { type: String, default: '8600 0000 0000 0000' },
   paymentCardHolder: { type: String, default: 'GIFTGO' },
-  paymentInstructions: { type: String, default: 'Ilova orqali to‘lov qiling yoki kartaga o‘tkazib chek rasmini yuboring. Naqd to‘lov ham mavjud.' },
+  paymentInstructions: { type: String, default: 'Buyurtma faqat oldindan to‘lov orqali qabul qilinadi. Kartaga o‘tkazma qiling, karta raqamini nusxalang va chek screenshotini yuklang. Admin tasdiqlagandan keyin buyurtma ishga tushadi.' },
   paymentClickUrl: { type: String, default: '' },
   paymentPaymeUrl: { type: String, default: '' },
   paymentOtherUrl: { type: String, default: '' },
-  cashOnDeliveryEnabled: { type: Boolean, default: true },
-  cashOnPickupEnabled: { type: Boolean, default: true },
+  cashOnDeliveryEnabled: { type: Boolean, default: false },
+  cashOnPickupEnabled: { type: Boolean, default: false },
   adminTelegramChatId: { type: String, default: '' },
 }, { timestamps: true });
 
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   category: { type: String, required: true, trim: true, default: 'Gullar' },
-  productType: { type: String, enum: ['FLOWER', 'GIFT_BOX', 'CAKE', 'SWEET', 'DRINK', 'FAST_FOOD', 'OTHER'], default: 'FLOWER' },
+  productType: { type: String, enum: ['FLOWER', 'GIFT_BOX', 'CAKE', 'SWEET', 'DRINK', 'FAST_FOOD', 'SERVICE', 'OTHER'], default: 'FLOWER' },
   description: { type: String, default: '' },
   price: { type: Number, required: true, min: 0 },
   oldPrice: { type: Number, default: 0 },
@@ -302,7 +304,12 @@ const orderSchema = new mongoose.Schema({
   paymentStatus: { type: String, enum: ['PENDING', 'APPROVED', 'REJECTED'], default: 'PENDING' },
   orderStatus: { type: String, enum: ['NEW', 'CONFIRMED', 'PREPARING', 'SHOPPING', 'ON_ROAD', 'READY', 'DONE', 'CANCELLED'], default: 'NEW' },
   note: { type: String, default: '' },
+  planNote: { type: String, default: '' },
   adminNote: { type: String, default: '' },
+  reminderFrequency: { type: String, enum: ['NONE', 'EVERY_3H', 'EVERY_6H', 'EVERY_12H', 'DAILY'], default: 'DAILY' },
+  reminderNote: { type: String, default: '' },
+  reminderNextAt: Date,
+  reminderLastSentAt: Date,
 }, { timestamps: true });
 
 const Settings = mongoose.model('Settings', settingsSchema);
@@ -314,7 +321,7 @@ const Order = mongoose.model('Order', orderSchema);
 
 function publicProduct(p) { const galleryUrls = Array.isArray(p.galleryUrls) ? p.galleryUrls.filter(Boolean).slice(0, 3) : []; const images = [...new Set([p.imageUrl, ...galleryUrls].filter(Boolean))].slice(0, 4); return { _id: p._id, name: p.name, category: p.category, productType: p.productType, description: p.description, price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, available: p.available, featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent, minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort }; }
 function syncSettingsAliases(settings) {
-  const defaults = { businessLat: settings.restaurantLat ?? 38.8616, businessLng: settings.restaurantLng ?? 65.5858, businessPhone: settings.restaurantPhone || '+998 90 000 00 00', businessAddress: settings.restaurantAddress || 'Kasbi, Qashqadaryo', scheduledMinLeadDays: 4, expressMaxLeadHours: 24, expressRandomMinAmount: 100000, firstOrderDiscountAmount: 10000, cashbackPercent: 3, referralFriendDiscountAmount: 10000, referralInviterBonusAmount: 10000, bonusUseEnabled: true };
+  const defaults = { businessLat: settings.restaurantLat ?? 38.8616, businessLng: settings.restaurantLng ?? 65.5858, businessPhone: settings.restaurantPhone || '+998 90 000 00 00', businessAddress: settings.restaurantAddress || 'Kasbi, Qashqadaryo', scheduledMinLeadDays: 4, expressMaxLeadHours: 24, expressRandomMinAmount: 100000, firstOrderDiscountAmount: 10000, cashbackPercent: 3, referralFriendDiscountAmount: 10000, referralInviterBonusAmount: 10000, bonusUseEnabled: true, supportPhone: '+998887660800', supportTelegram: '@Qoryogdiyev' };
   let changed = false;
   for (const [k, v] of Object.entries(defaults)) if (settings[k] === undefined || settings[k] === null || settings[k] === '') { settings[k] = v; changed = true; }
   if (!settings.restaurantLat && settings.businessLat) { settings.restaurantLat = settings.businessLat; changed = true; }
@@ -341,6 +348,10 @@ async function seedDefaults() {
     { name: 'Shirinlik set', category: 'Shirinliklar', productType: 'SWEET', description: 'Konfet, pechenye va shirinliklar to‘plami.', price: 90000, emoji: '🍬', minLeadDays: 2, sort: 5 },
     { name: 'Ichimliklar seti', category: 'Ichimliklar', productType: 'DRINK', description: 'Sovuq ichimliklar to‘plami.', price: 45000, emoji: '🥤', minLeadDays: 1, sort: 6 },
     { name: 'Fast food set', category: 'Fast food', productType: 'FAST_FOOD', description: 'Bayram uchun tezkor yegulik seti.', price: 120000, emoji: '🍔', minLeadDays: 1, sort: 7 },
+    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '📞', featured: true, minLeadDays: 4, sort: 8 },
+    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '🎬', minLeadDays: 4, sort: 9 },
+    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '🎸', minLeadDays: 4, sort: 10 },
+    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '✨', minLeadDays: 4, sort: 11 },
   ]);
   const promoCount = await PromoCode.countDocuments();
   if (!promoCount) await PromoCode.create({ code: 'WELCOME10', title: 'Birinchi xarid uchun 10 000 so‘m', discountType: 'FIXED', value: 10000, firstOrderOnly: true, minSubtotal: 50000, active: true });
@@ -360,6 +371,24 @@ function calculateDeliveryQuote(settings, location, fallbackService = null, type
   return { deliveryFee, distanceKm, mode: 'DISTANCE', zoneStatus, title: `Masofa bo‘yicha yetkazish (${distanceKm} km)`, baseFee, baseKm, pricePerKm, maxKm, businessLocation, mapUrl: makeMapUrl(location.lat, location.lng) };
 }
 function movementTrend(previousKm, currentKm) { if (!previousKm || !currentKm) return { trend: 'UNKNOWN', delta: 0 }; const delta = roundKm(currentKm - previousKm); if (delta <= -0.05) return { trend: 'APPROACHING', delta }; if (delta >= 0.05) return { trend: 'MOVING_AWAY', delta }; return { trend: 'STABLE', delta }; }
+
+function escapeRegExp(value) { return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function nextReminderAt(frequency, from = new Date()) {
+  const f = String(frequency || 'NONE');
+  if (f === 'EVERY_3H') return new Date(from.getTime() + 3 * 60 * 60 * 1000);
+  if (f === 'EVERY_6H') return new Date(from.getTime() + 6 * 60 * 60 * 1000);
+  if (f === 'EVERY_12H') return new Date(from.getTime() + 12 * 60 * 60 * 1000);
+  if (f === 'DAILY') return new Date(from.getTime() + 24 * 60 * 60 * 1000);
+  return null;
+}
+function supportPhoneUrl(settings) {
+  const phone = String(settings?.supportPhone || settings?.businessPhone || '+998887660800').replace(/\s+/g, '');
+  return `tel:${phone}`;
+}
+function supportTelegramUrl(settings) {
+  const username = String(settings?.supportTelegram || '@Qoryogdiyev').trim().replace(/^@/, '');
+  return username ? `https://t.me/${username}` : '';
+}
 
 async function getOrCreateCustomer(tgUser, options = {}) {
   const id = String(tgUser.id);
@@ -523,10 +552,26 @@ async function syncTelegramBotIdentity() {
 }
 async function notifyAdmin(text, photoUrl = '') { const settings = await getSettingsDoc(); const chatId = settings.adminTelegramChatId || process.env.ADMIN_TELEGRAM_CHAT_ID; if (!chatId) return; if (photoUrl) await telegramApi('sendPhoto', { chat_id: chatId, photo: photoUrl, caption: text, parse_mode: 'HTML' }); else await telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: false }); }
 async function notifyCustomer(chatId, text) { if (!chatId) return; await telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' }); }
-async function answerStart(chatId, fromUser = null, startArg = '') { const settings = await getSettingsDoc(); const url = startArg ? webAppStartUrl(startArg) : WEBAPP_URL; const buttons = []; if (url) buttons.push([{ text: '🎁 Sovg‘a platformasini ochish', web_app: { url } }]); if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Admin panel', web_app: { url: adminPanelUrl() } }]); buttons.push([{ text: '📞 Telefon', callback_data: 'phone' }]); const text = url ? `Assalomu alaykum! ${settings.brandName} mini ilovasiga xush kelibsiz. Gul, sovg‘a box, tort va boshqa buyurtmalarni xarita orqali rasmiylashtiring.` : `${settings.brandName} bot ishga tushdi, lekin PUBLIC_URL/WEBAPP_URL hali sozlanmagan.`; return telegramApi('sendMessage', { chat_id: chatId, text, reply_markup: { inline_keyboard: buttons } }); }
+async function answerStart(chatId, fromUser = null, startArg = '') {
+  const settings = await getSettingsDoc();
+  const url = startArg ? webAppStartUrl(startArg) : WEBAPP_URL;
+  const buttons = [];
+  if (url) buttons.push([{ text: '🎁 Mini appni ochish', web_app: { url } }]);
+  if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Admin panel', web_app: { url: adminPanelUrl() } }]);
+  const supportRows = [];
+  const phoneUrl = supportPhoneUrl(settings);
+  if (phoneUrl) supportRows.push({ text: '📞 Muammo bo‘yicha qo‘ng‘iroq', url: phoneUrl });
+  const tgUrl = supportTelegramUrl(settings);
+  if (tgUrl) supportRows.push({ text: '💬 Telegram chat', url: tgUrl });
+  if (supportRows.length) buttons.push(supportRows);
+  const text = url
+    ? `Assalomu alaykum! ${settings.brandName} mini ilovasiga xush kelibsiz. Buyurtmalar kamida ${settings.scheduledMinLeadDays || 4} kun oldin qabul qilinadi. To‘lov oldindan kartaga o‘tkazma + chek screenshot orqali tasdiqlanadi.`
+    : `${settings.brandName} bot ishga tushdi, lekin PUBLIC_URL/WEBAPP_URL hali sozlanmagan.`;
+  return telegramApi('sendMessage', { chat_id: chatId, text, reply_markup: { inline_keyboard: buttons } });
+}
 async function handleTelegramUpdate(update) {
   const message = update?.message || update?.edited_message; const callback = update?.callback_query;
-  if (callback?.id) { if (callback.data === 'phone') { const s = await getSettingsDoc(); await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: s.businessPhone || s.restaurantPhone || 'Telefon raqam sozlanmagan', show_alert: true }); return; } await telegramApi('answerCallbackQuery', { callback_query_id: callback.id }); return; }
+  if (callback?.id) { if (callback.data === 'phone') { const s = await getSettingsDoc(); await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: s.supportPhone || s.businessPhone || s.restaurantPhone || 'Telefon raqam sozlanmagan', show_alert: true }); return; } await telegramApi('answerCallbackQuery', { callback_query_id: callback.id }); return; }
   const chatId = message?.chat?.id; const fromUser = message?.from || null; const text = String(message?.text || '').trim(); if (!chatId) return;
   if (text.startsWith('/start')) { const startArg = text.split(/\s+/)[1] || ''; await answerStart(chatId, fromUser, startArg); return; }
   if (text.startsWith('/admin')) { if (!fromUser?.id || !isAdminTelegramId(fromUser.id)) { await telegramApi('sendMessage', { chat_id: chatId, text: `⛔ Admin panel faqat ruxsat berilgan Telegram ID uchun ochiladi.\n\n${adminAccessHelp()}\n\nID olish uchun /id yuboring.` }); return; } if (!adminPanelUrl()) { await telegramApi('sendMessage', { chat_id: chatId, text: 'Admin panel URL hali sozlanmagan. .env ichida PUBLIC_URL ni real HTTPS domen qilib kiriting.' }); return; } await telegramApi('sendMessage', { chat_id: chatId, text: 'Admin panel:', reply_markup: { inline_keyboard: [[{ text: 'Admin panelni ochish', web_app: { url: adminPanelUrl() } }]] } }); return; }
@@ -555,13 +600,9 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
   validateFulfillment({ settings, orderMode, deliveryDate, products: cart.products, subtotal: cart.subtotal, noComplaintAgreement });
   if (!/^\d{2}:\d{2}$/.test(deliveryTime)) return res.status(400).json({ success: false, message: 'Yetkazish vaqtini tanlang.' });
 
-  const rawPaymentMethod = String(req.body.paymentMethod || '').trim();
-  let paymentMethod = ['CARD_TRANSFER', 'PAYMENT_LINK', 'CASH_ON_DELIVERY', 'CASH_ON_PICKUP'].includes(rawPaymentMethod) ? rawPaymentMethod : 'CARD_TRANSFER';
-  if (type === 'PICKUP' && paymentMethod === 'CASH_ON_DELIVERY') paymentMethod = 'CASH_ON_PICKUP';
-  if (type === 'DELIVERY' && paymentMethod === 'CASH_ON_PICKUP') paymentMethod = 'CASH_ON_DELIVERY';
-  if (paymentMethod === 'CASH_ON_DELIVERY' && !parseBoolean(settings.cashOnDeliveryEnabled, true)) return res.status(400).json({ success: false, message: 'Yetkazib berganda naqd to‘lov hozircha o‘chirilgan.' });
-  if (paymentMethod === 'CASH_ON_PICKUP' && !parseBoolean(settings.cashOnPickupEnabled, true)) return res.status(400).json({ success: false, message: 'Olib ketishda naqd to‘lov hozircha o‘chirilgan.' });
-  if (paymentMethod === 'CARD_TRANSFER' && !req.file) return res.status(400).json({ success: false, message: 'Kartaga o‘tkazmada to‘lov cheki rasmini yuklang yoki boshqa to‘lov turini tanlang.' });
+  // GiftGo model: faqat oldindan karta to‘lovi + screenshot + admin tasdig‘i.
+  const paymentMethod = 'CARD_TRANSFER';
+  if (!req.file) return res.status(400).json({ success: false, message: 'Buyurtma faqat oldindan to‘lov bilan qabul qilinadi. Kartaga o‘tkazma qiling va chek screenshotini yuklang.' });
 
   let fallbackService = null; let deliveryServiceId = null;
   if (type === 'DELIVERY' && req.body.deliveryServiceId) { deliveryServiceId = ensureObjectId(req.body.deliveryServiceId, 'Yetkazib berish xizmati ID'); fallbackService = await DeliveryService.findOne({ _id: deliveryServiceId, active: true }); if (!fallbackService) return res.status(400).json({ success: false, message: 'Yetkazib berish xizmati topilmadi.' }); }
@@ -586,12 +627,12 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
   const bonusEarned = Math.floor(Math.max(0, cart.subtotal - discountAmount) * cashbackPercent / 100);
   const uploaded = req.file ? await uploadToCloudinary(req.file, 'giftgo/payments/orders') : null;
   const order = await Order.create({
-    orderNo: nextHumanNo(orderMode === 'EXPRESS_RANDOM' ? 'FAST' : 'GIFT'), userTelegramId: String(req.tgUser.id), userUsername: req.tgUser.username || '', userFullName: userFullName(req.tgUser, req.body.fullName), phone, type, orderMode, eventType: String(req.body.eventType || '').trim(), deliveryDate, deliveryTime, recipientName: String(req.body.recipientName || '').trim(), recipientPhone: String(req.body.recipientPhone || '').trim(), cardMessage: String(req.body.cardMessage || '').trim(), noComplaintAgreement, agreementText: noComplaintAgreement ? settings.expressAgreementText : '', address: String(req.body.address || '').trim(), customerLocation: customerLocation || undefined, businessLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, restaurantLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, distanceKm: quote.distanceKm || 0, lastLocationAt: customerLocation ? new Date() : undefined, liveLocationEnabled: parseBoolean(req.body.liveLocationEnabled, false), deliveryServiceId, deliveryServiceTitle: quote.title || fallbackService?.title || (type === 'PICKUP' ? 'Olib ketish' : 'Yetkazib berish'), items: cart.items, subtotal: cart.subtotal, deliveryFee: quote.deliveryFee, discountAmount, firstOrderDiscount, promoCode: promo.code, promoDiscount: promo.amount, referralDiscount, bonusUsed, bonusEarned, total, deliveryPricing: { baseFee: quote.baseFee, baseKm: quote.baseKm, pricePerKm: quote.pricePerKm, maxKm: quote.maxKm, mode: quote.mode, zoneStatus: quote.zoneStatus }, paymentMethod, paymentProvider: String(req.body.paymentProvider || '').trim(), paymentScreenshotUrl: uploaded?.url || '', paymentScreenshotPublicId: uploaded?.publicId || '', note: String(req.body.note || '').trim(),
+    orderNo: nextHumanNo(orderMode === 'EXPRESS_RANDOM' ? 'FAST' : 'GIFT'), userTelegramId: String(req.tgUser.id), userUsername: req.tgUser.username || '', userFullName: userFullName(req.tgUser, req.body.fullName), phone, type, orderMode, eventType: String(req.body.eventType || '').trim(), deliveryDate, deliveryTime, recipientName: String(req.body.recipientName || '').trim(), recipientPhone: String(req.body.recipientPhone || '').trim(), cardMessage: String(req.body.cardMessage || '').trim(), noComplaintAgreement, agreementText: noComplaintAgreement ? settings.expressAgreementText : '', address: String(req.body.address || '').trim(), customerLocation: customerLocation || undefined, businessLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, restaurantLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, distanceKm: quote.distanceKm || 0, lastLocationAt: customerLocation ? new Date() : undefined, liveLocationEnabled: parseBoolean(req.body.liveLocationEnabled, false), deliveryServiceId, deliveryServiceTitle: quote.title || fallbackService?.title || (type === 'PICKUP' ? 'Olib ketish' : 'Yetkazib berish'), items: cart.items, subtotal: cart.subtotal, deliveryFee: quote.deliveryFee, discountAmount, firstOrderDiscount, promoCode: promo.code, promoDiscount: promo.amount, referralDiscount, bonusUsed, bonusEarned, total, deliveryPricing: { baseFee: quote.baseFee, baseKm: quote.baseKm, pricePerKm: quote.pricePerKm, maxKm: quote.maxKm, mode: quote.mode, zoneStatus: quote.zoneStatus }, paymentMethod, paymentProvider: 'CARD_TRANSFER', paymentScreenshotUrl: uploaded?.url || '', paymentScreenshotPublicId: uploaded?.publicId || '', note: String(req.body.note || '').trim(), planNote: String(req.body.planNote || req.body.note || '').trim(), reminderFrequency: 'DAILY', reminderNote: 'Oldindan buyurtmani nazorat qilish', reminderNextAt: nextReminderAt('DAILY'),
   });
   if (promo.promoId) await PromoCode.updateOne({ _id: promo.promoId }, { $inc: { usedCount: 1 } });
   const locationLine = customerLocation ? `\n🗺 Masofa: ${quote.distanceKm} km\n📍 Xarita: ${quote.mapUrl}` : '';
   const randomLine = orderMode === 'EXPRESS_RANDOM' ? `\n⚡ Tezkor random: rozilik olindi` : `\n📅 Oldindan buyurtma: ${deliveryDate} ${deliveryTime}`;
-  await notifyAdmin(`🎁 <b>Yangi buyurtma</b>\n#${order.orderNo}\n👤 ${order.userFullName}\n📞 ${order.phone}\n🎯 ${order.eventType || '-'}\n🚚 ${order.deliveryServiceTitle}\n🚕 Yetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\n🎟 Chegirma: ${formatMoney(order.discountAmount, settings.currency)}\n💰 Jami: ${formatMoney(order.total, settings.currency)}${randomLine}\n💳 To‘lov: ${order.paymentMethod}${uploaded?.url ? '\n🧾 Chek biriktirilgan' : ''}${locationLine}\n📌 Holat: ${order.orderStatus} / ${order.paymentStatus}`, order.paymentScreenshotUrl);
+  await notifyAdmin(`🎁 <b>Yangi buyurtma</b>\n#${order.orderNo}\n👤 ${order.userFullName}\n📞 ${order.phone}\n🎯 ${order.eventType || '-'}\n🚚 ${order.deliveryServiceTitle}\n🚕 Yetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\n🎟 Chegirma: ${formatMoney(order.discountAmount, settings.currency)}\n💰 Jami: ${formatMoney(order.total, settings.currency)}${randomLine}\n💳 To‘lov: oldindan karta + admin tasdiq${uploaded?.url ? '\n🧾 Chek biriktirilgan' : ''}${locationLine}\n📌 Holat: ${order.orderStatus} / ${order.paymentStatus}`, order.paymentScreenshotUrl);
   res.status(201).json({ success: true, order });
 }));
 
@@ -601,8 +642,40 @@ app.get('/api/my/orders', telegramAuth, asyncHandler(async (req, res) => { const
 app.post('/api/admin/login', asyncHandler(async (req, res) => { const initData = req.body.initData || req.get('X-Telegram-Init-Data') || ''; const validated = validateTelegramInitData(initData); if (validated.ok && validated.user?.id) { const tgUser = validated.user; if (!isAdminTelegramId(tgUser.id)) return res.status(403).json({ success: false, message: adminAccessHelp(), userId: tgUser.id }); return res.json({ success: true, token: signAdminToken({ role: 'admin', tgId: tgUser.id, username: tgUser.username, name: userFullName(tgUser, 'Admin') }), admin: tgUser }); } if (ALLOW_PASSWORD_ADMIN && req.body.password === ADMIN_PASSWORD) return res.json({ success: true, token: signAdminToken({ role: 'admin', fallback: true, name: 'Password admin' }), admin: { id: 'password-admin', first_name: 'Password', last_name: 'Admin' } }); res.status(401).json({ success: false, message: validated.reason || 'Telegram admin auth kerak. Lokal test uchun ALLOW_PASSWORD_ADMIN=true qiling.', hint: adminAccessHelp() }); }));
 app.get('/api/admin/me', verifyAdminToken, asyncHandler(async (req, res) => res.json({ success: true, admin: req.admin, adminIdsConfigured: adminIdsConfigured(), adminIdsCount: ADMIN_TELEGRAM_IDS.size })));
 app.get('/api/admin/dashboard', verifyAdminToken, asyncHandler(async (_req, res) => { const [ordersTotal, ordersPending, productsTotal, customersTotal, promoTotal, revenueAgg, bonusAgg] = await Promise.all([Order.countDocuments(), Order.countDocuments({ orderStatus: { $in: ['NEW', 'CONFIRMED', 'PREPARING', 'SHOPPING', 'ON_ROAD', 'READY'] } }), Product.countDocuments(), Customer.countDocuments(), PromoCode.countDocuments(), Order.aggregate([{ $match: { paymentStatus: { $ne: 'REJECTED' }, orderStatus: { $ne: 'CANCELLED' } } }, { $group: { _id: null, total: { $sum: '$total' } } }]), Customer.aggregate([{ $group: { _id: null, total: { $sum: '$bonusBalance' } } }])]); res.json({ success: true, stats: { ordersTotal, ordersPending, productsTotal, customersTotal, promoTotal, revenue: revenueAgg[0]?.total || 0, bonusBalance: bonusAgg[0]?.total || 0 } }); }));
-app.get('/api/admin/orders', verifyAdminToken, asyncHandler(async (req, res) => { const filter = {}; if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus; if (req.query.orderStatus) filter.orderStatus = req.query.orderStatus; if (req.query.orderMode) filter.orderMode = req.query.orderMode; const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(250); res.json({ success: true, orders }); }));
-app.patch('/api/admin/orders/:id', verifyAdminToken, asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Buyurtma ID'); const allowed = ['paymentStatus', 'orderStatus', 'adminNote']; const update = {}; for (const key of allowed) if (req.body[key] !== undefined) update[key] = req.body[key]; let order = await Order.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true }); if (!order) return res.status(404).json({ success: false, message: 'Buyurtma topilmadi.' }); order = await finalizeOrderRewards(order); await notifyCustomer(order.userTelegramId, `🎁 <b>Buyurtma holati yangilandi</b>\n#${order.orderNo}\nTo‘lov: ${order.paymentStatus}\nStatus: ${order.orderStatus}\nBonus: ${formatMoney(order.bonusEarned || 0)}`); res.json({ success: true, order }); }));
+app.get('/api/admin/orders', verifyAdminToken, asyncHandler(async (req, res) => {
+  const filter = {};
+  if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus;
+  if (req.query.orderStatus) filter.orderStatus = req.query.orderStatus;
+  if (req.query.orderMode) filter.orderMode = req.query.orderMode;
+  if (req.query.type) filter.type = req.query.type;
+  if (req.query.dateFrom || req.query.dateTo) {
+    filter.deliveryDate = {};
+    if (req.query.dateFrom) filter.deliveryDate.$gte = String(req.query.dateFrom);
+    if (req.query.dateTo) filter.deliveryDate.$lte = String(req.query.dateTo);
+  }
+  if (req.query.q) {
+    const r = new RegExp(escapeRegExp(req.query.q), 'i');
+    filter.$or = [{ orderNo: r }, { userFullName: r }, { phone: r }, { recipientName: r }, { recipientPhone: r }, { address: r }, { note: r }, { planNote: r }];
+  }
+  const orders = await Order.find(filter).sort({ deliveryDate: 1, deliveryTime: 1, createdAt: -1 }).limit(300);
+  res.json({ success: true, orders });
+}));
+app.patch('/api/admin/orders/:id', verifyAdminToken, asyncHandler(async (req, res) => {
+  ensureObjectId(req.params.id, 'Buyurtma ID');
+  const allowed = ['paymentStatus', 'orderStatus', 'adminNote', 'reminderFrequency', 'reminderNote'];
+  const update = {};
+  for (const key of allowed) if (req.body[key] !== undefined) update[key] = req.body[key];
+  if (req.body.reminderFrequency !== undefined) update.reminderNextAt = nextReminderAt(req.body.reminderFrequency);
+  let order = await Order.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+  if (!order) return res.status(404).json({ success: false, message: 'Buyurtma topilmadi.' });
+  order = await finalizeOrderRewards(order);
+  await notifyCustomer(order.userTelegramId, `🎁 <b>Buyurtma holati yangilandi</b>
+#${order.orderNo}
+To‘lov: ${order.paymentStatus}
+Status: ${order.orderStatus}
+Bonus: ${formatMoney(order.bonusEarned || 0)}`);
+  res.json({ success: true, order });
+}));
 app.get('/api/admin/customers', verifyAdminToken, asyncHandler(async (_req, res) => { const customers = await Customer.find().sort({ createdAt: -1 }).limit(300); res.json({ success: true, customers }); }));
 
 app.get('/api/admin/products', verifyAdminToken, asyncHandler(async (_req, res) => { const products = await Product.find().sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products }); }));
@@ -621,7 +694,7 @@ app.patch('/api/admin/delivery-services/:id', verifyAdminToken, asyncHandler(asy
 app.delete('/api/admin/delivery-services/:id', verifyAdminToken, asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Yetkazib berish ID'); const service = await DeliveryService.findByIdAndDelete(req.params.id); if (!service) return res.status(404).json({ success: false, message: 'Xizmat topilmadi.' }); res.json({ success: true }); }));
 
 app.get('/api/admin/settings', verifyAdminToken, asyncHandler(async (_req, res) => { const settings = await getSettingsDoc(); res.json({ success: true, settings }); }));
-app.patch('/api/admin/settings', verifyAdminToken, upload.single('logo'), asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const strings = ['brandName', 'brandSubtitle', 'currency', 'businessPhone', 'businessAddress', 'restaurantPhone', 'restaurantAddress', 'botUsername', 'instagram', 'openingHours', 'paymentCardTitle', 'paymentCardBank', 'paymentCardNumber', 'paymentCardHolder', 'paymentInstructions', 'paymentClickUrl', 'paymentPaymeUrl', 'paymentOtherUrl', 'adminTelegramChatId', 'expressAgreementText']; for (const f of strings) if (req.body[f] !== undefined) settings[f] = String(req.body[f]).trim(); const nums = ['businessLat', 'businessLng', 'restaurantLat', 'restaurantLng', 'deliveryBaseFee', 'deliveryBaseKm', 'deliveryPricePerKm', 'deliveryMaxKm', 'scheduledMinLeadDays', 'expressMaxLeadHours', 'expressRandomMinAmount', 'firstOrderDiscountAmount', 'referralFriendDiscountAmount', 'referralInviterBonusAmount', 'cashbackPercent']; for (const f of nums) if (req.body[f] !== undefined) settings[f] = normalizeNumber(req.body[f]); const bools = ['deliveryAutoPricingEnabled', 'deliveryOutOfZoneEnabled', 'cashOnDeliveryEnabled', 'cashOnPickupEnabled', 'expressRandomEnabled', 'firstOrderDiscountEnabled', 'bonusUseEnabled']; for (const f of bools) if (req.body[f] !== undefined) settings[f] = parseBoolean(req.body[f], settings[f]); if (settings.businessLat) settings.restaurantLat = settings.businessLat; if (settings.businessLng) settings.restaurantLng = settings.businessLng; if (settings.businessPhone) settings.restaurantPhone = settings.businessPhone; if (settings.businessAddress) settings.restaurantAddress = settings.businessAddress; if (req.file) { const uploaded = await uploadToCloudinary(req.file, 'giftgo/brand'); settings.logoUrl = uploaded.url; } await settings.save(); res.json({ success: true, settings }); }));
+app.patch('/api/admin/settings', verifyAdminToken, upload.single('logo'), asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const strings = ['brandName', 'brandSubtitle', 'currency', 'businessPhone', 'supportPhone', 'supportTelegram', 'businessAddress', 'restaurantPhone', 'restaurantAddress', 'botUsername', 'instagram', 'openingHours', 'paymentCardTitle', 'paymentCardBank', 'paymentCardNumber', 'paymentCardHolder', 'paymentInstructions', 'paymentClickUrl', 'paymentPaymeUrl', 'paymentOtherUrl', 'adminTelegramChatId', 'expressAgreementText']; for (const f of strings) if (req.body[f] !== undefined) settings[f] = String(req.body[f]).trim(); const nums = ['businessLat', 'businessLng', 'restaurantLat', 'restaurantLng', 'deliveryBaseFee', 'deliveryBaseKm', 'deliveryPricePerKm', 'deliveryMaxKm', 'scheduledMinLeadDays', 'expressMaxLeadHours', 'expressRandomMinAmount', 'firstOrderDiscountAmount', 'referralFriendDiscountAmount', 'referralInviterBonusAmount', 'cashbackPercent']; for (const f of nums) if (req.body[f] !== undefined) settings[f] = normalizeNumber(req.body[f]); const bools = ['deliveryAutoPricingEnabled', 'deliveryOutOfZoneEnabled', 'cashOnDeliveryEnabled', 'cashOnPickupEnabled', 'expressRandomEnabled', 'firstOrderDiscountEnabled', 'bonusUseEnabled']; for (const f of bools) if (req.body[f] !== undefined) settings[f] = parseBoolean(req.body[f], settings[f]); if (settings.businessLat) settings.restaurantLat = settings.businessLat; if (settings.businessLng) settings.restaurantLng = settings.businessLng; if (settings.businessPhone) settings.restaurantPhone = settings.businessPhone; if (settings.businessAddress) settings.restaurantAddress = settings.businessAddress; if (req.file) { const uploaded = await uploadToCloudinary(req.file, 'giftgo/brand'); settings.logoUrl = uploaded.url; } await settings.save(); res.json({ success: true, settings }); }));
 app.get('/api/admin/bot/status', verifyAdminToken, asyncHandler(async (_req, res) => { const [webhookInfo, identity] = await Promise.all([telegramApi('getWebhookInfo', {}), getTelegramBotIdentity(true)]); res.json({ success: true, bot: { hasToken: Boolean(BOT_TOKEN), username: identity?.username || '', firstName: identity?.first_name || '', expectedUsername: BOT_EXPECTED_USERNAME, publicUrl: PUBLIC_URL, webAppUrl: WEBAPP_URL, autoSetWebhook: AUTO_SET_WEBHOOK, polling: TELEGRAM_POLLING, webhookSecretEnabled: Boolean(TELEGRAM_WEBHOOK_SECRET), adminIdsConfigured: adminIdsConfigured(), adminIdsCount: ADMIN_TELEGRAM_IDS.size, adminPanelUrl: adminPanelUrl(), webhookInfo } }); }));
 app.post('/api/admin/bot/setup-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { if (!PUBLIC_URL) return res.status(400).json({ success: false, message: 'PUBLIC_URL kerak.' }); const identity = await syncTelegramBotIdentity(); const result = await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); res.json({ success: Boolean(result.ok), bot: identity, result }); }));
 app.post('/api/admin/bot/delete-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { const result = await telegramApi('deleteWebhook', { drop_pending_updates: false }); res.json({ success: Boolean(result.ok), result }); }));
@@ -630,6 +703,36 @@ app.get('/telegram/webhook', (_req, res) => res.send('GiftGo Telegram webhook is
 app.post('/telegram/webhook', asyncHandler(async (req, res) => { if (TELEGRAM_WEBHOOK_SECRET && req.get('X-Telegram-Bot-Api-Secret-Token') !== TELEGRAM_WEBHOOK_SECRET) return res.status(403).json({ success: false }); await handleTelegramUpdate(req.body); res.json({ success: true }); }));
 app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+async function processAdminReminders() {
+  try {
+    if (mongoose.connection.readyState !== 1) return;
+    const due = await Order.find({
+      reminderFrequency: { $ne: 'NONE' },
+      reminderNextAt: { $lte: new Date() },
+      orderStatus: { $nin: ['DONE', 'CANCELLED'] },
+    }).sort({ reminderNextAt: 1 }).limit(20);
+    for (const order of due) {
+      const loc = order.customerLocation?.lat ? `
+📍 ${makeMapUrl(order.customerLocation.lat, order.customerLocation.lng)}` : '';
+      await notifyAdmin(`🔔 <b>Renotif</b>
+#${order.orderNo}
+📅 ${order.deliveryDate || '-'} ${order.deliveryTime || ''}
+👤 ${order.userFullName || '-'} · ${order.phone || ''}
+🎯 ${order.eventType || '-'}
+💰 ${formatMoney(order.total || 0)}
+📌 ${order.orderStatus} / ${order.paymentStatus}
+📝 ${order.reminderNote || order.adminNote || order.planNote || order.note || '-'}${loc}`);
+      order.reminderLastSentAt = new Date();
+      order.reminderNextAt = nextReminderAt(order.reminderFrequency, order.reminderLastSentAt);
+      await order.save();
+    }
+  } catch (error) {
+    console.error('Admin renotif xatosi:', error.message);
+  }
+}
+setInterval(processAdminReminders, 60 * 1000);
+
 app.use((error, _req, res, _next) => { console.error(error); res.status(error.status || 500).json({ success: false, message: error.message || 'Server xatosi' }); });
 
 mongoose.connect(MONGODB_URI).then(async () => {
