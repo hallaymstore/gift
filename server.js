@@ -75,6 +75,8 @@ function normalizeNumber(value) { const n = Number(value || 0); return Number.is
 function parseBoolean(value, fallback = false) { if (value === undefined || value === null || value === '') return fallback; return ['true', '1', 'yes', 'on', 'ha'].includes(String(value).toLowerCase()); }
 function safeJsonParse(value, fallback) { try { if (typeof value === 'string') return JSON.parse(value); return value ?? fallback; } catch { return fallback; } }
 function formatMoney(amount, currency = 'UZS') { return `${Number(amount || 0).toLocaleString('uz-UZ')} ${currency}`; }
+function orderStatusText(v) { return ({ NEW: 'Yangi', CONFIRMED: 'Tasdiqlandi', PREPARING: 'Tayyorlanmoqda', SHOPPING: 'Xarid qilinmoqda', ON_ROAD: 'Yo‘lda', READY: 'Tayyor', DONE: 'Yakunlandi', CANCELLED: 'Bekor qilindi' })[v] || v || ''; }
+function paymentStatusText(v) { return ({ PENDING: 'Kutilmoqda', APPROVED: 'Tasdiqlandi', REJECTED: 'Rad etildi' })[v] || v || ''; }
 function normalizePromoCode(code) { return String(code || '').trim().toUpperCase().replace(/\s+/g, ''); }
 function dateOnlyUTC(date) { return new Date(`${date}T00:00:00.000Z`); }
 function todayLocalISO(offsetDays = 0) { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + offsetDays); return d.toISOString().slice(0, 10); }
@@ -84,7 +86,7 @@ function nextHumanNo(prefix) { const d = new Date(); const y = String(d.getFullY
 function userFullName(user, fallback = '') { return [user?.first_name, user?.last_name].filter(Boolean).join(' ') || fallback || 'Telegram foydalanuvchi'; }
 function isAdminTelegramId(id) { return ADMIN_TELEGRAM_IDS.has(String(id || '').trim()); }
 function adminIdsConfigured() { return ADMIN_TELEGRAM_IDS.size > 0; }
-function adminAccessHelp() { return adminIdsConfigured() ? 'Bu Telegram akkaunt admin ro‘yxatida yo‘q.' : 'ADMIN_TELEGRAM_IDS .env faylida sozlanmagan. Botga /id yuborib User ID ni kiriting.'; }
+function adminAccessHelp() { return adminIdsConfigured() ? 'Bu Telegram akkaunt boshqaruvchi ro‘yxatida yo‘q.' : 'ADMIN_TELEGRAM_IDS .env faylida sozlanmagan. Botga /id yuborib Telegram raqami ni kiriting.'; }
 function adminPanelUrl() { return PUBLIC_URL ? `${PUBLIC_URL}/admin` : ''; }
 function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${WEBAPP_URL}${q}`; }
 function botStartUrl(botUsername, startParam = '') { const username = String(botUsername || '').replace(/^@/, '').trim(); if (!username) return webAppStartUrl(startParam); return `https://t.me/${username}${startParam ? `?start=${encodeURIComponent(startParam)}` : ''}`; }
@@ -138,14 +140,14 @@ function telegramAuth(req, res, next) {
 function signAdminToken(payload = {}) { const body = Buffer.from(JSON.stringify({ ...payload, exp: Date.now() + ADMIN_TOKEN_TTL_MS })).toString('base64url'); const sig = crypto.createHmac('sha256', APP_SECRET).update(body).digest('base64url'); return `${body}.${sig}`; }
 function verifyAdminToken(req, res, next) {
   const token = (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!token || !token.includes('.')) return res.status(401).json({ success: false, message: 'Admin token kerak.' });
+  if (!token || !token.includes('.')) return res.status(401).json({ success: false, message: 'Boshqaruv tokeni kerak.' });
   const [body, sig] = token.split('.');
   const expected = crypto.createHmac('sha256', APP_SECRET).update(body).digest('base64url');
-  if (sig !== expected) return res.status(401).json({ success: false, message: 'Admin token noto‘g‘ri.' });
+  if (sig !== expected) return res.status(401).json({ success: false, message: 'Boshqaruv tokeni noto‘g‘ri.' });
   const payload = safeJsonParse(Buffer.from(body, 'base64url').toString('utf8'), null);
-  if (!payload || payload.exp < Date.now()) return res.status(401).json({ success: false, message: 'Admin token muddati tugagan.' });
-  if (payload.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin huquqi yo‘q.' });
-  if (payload.tgId && !isAdminTelegramId(payload.tgId)) return res.status(403).json({ success: false, message: 'Bu admin ID endi ruxsat ro‘yxatida yo‘q.' });
+  if (!payload || payload.exp < Date.now()) return res.status(401).json({ success: false, message: 'Boshqaruv tokeni muddati tugagan.' });
+  if (payload.role !== 'admin') return res.status(403).json({ success: false, message: 'Boshqaruv huquqi yo‘q.' });
+  if (payload.tgId && !isAdminTelegramId(payload.tgId)) return res.status(403).json({ success: false, message: 'Bu boshqaruvchi raqami endi ruxsat ro‘yxatida yo‘q.' });
   if (payload.fallback && !ALLOW_PASSWORD_ADMIN) return res.status(403).json({ success: false, message: 'Parol orqali admin kirish o‘chirilgan.' });
   req.admin = payload;
   next();
@@ -190,7 +192,7 @@ const settingsSchema = new mongoose.Schema({
   paymentCardBank: { type: String, default: 'Click / Payme / Uzcard' },
   paymentCardNumber: { type: String, default: '8600 0000 0000 0000' },
   paymentCardHolder: { type: String, default: 'GIFTGO' },
-  paymentInstructions: { type: String, default: 'Buyurtma faqat oldindan to‘lov orqali qabul qilinadi. To‘lov ilovasini tanlang, pulni yuboring, keyin mini appga qaytib chek screenshotini yuklang. Admin tasdiqlagandan keyin buyurtma ishga tushadi.' },
+  paymentInstructions: { type: String, default: 'Buyurtma faqat oldindan to‘lov orqali qabul qilinadi. To‘lov ilovasini tanlang, pulni yuboring, keyin mini ilovaga qaytib chek rasmini yuklang. Boshqaruvchi tasdiqlagandan keyin buyurtma ishga tushadi.' },
   paymentPaynetUrl: { type: String, default: "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24" },
   paymentClickUrl: { type: String, default: 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD' },
   paymentUzumUrl: { type: String, default: 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9' },
@@ -573,7 +575,7 @@ function validateFulfillment({ settings, orderMode, deliveryDate, products, subt
     if (subtotal < normalizeNumber(settings.expressRandomMinAmount)) throw Object.assign(new Error(`Tezkor random buyurtma minimal summasi: ${formatMoney(settings.expressRandomMinAmount, settings.currency)}.`), { status: 400 });
     if (!noComplaintAgreement) throw Object.assign(new Error('Tezkor random gul shartiga rozilik belgisini qo‘ying.'), { status: 400 });
     const notAllowed = products.find((p) => !p.expressRandomAllowed);
-    if (notAllowed) throw Object.assign(new Error(`“${notAllowed.name}” tezkor random buyurtma uchun ruxsat etilmagan. Admin paneldan ruxsat bering yoki oldindan buyurtma tanlang.`), { status: 400 });
+    if (notAllowed) throw Object.assign(new Error(`“${notAllowed.name}” tezkor buyurtma uchun ruxsat etilmagan. Boshqaruv panelidan ruxsat bering yoki oldindan buyurtma tanlang.`), { status: 400 });
     return { requiredLeadDays: 0, diffDays };
   }
   const requiredLeadDays = Math.max(normalizeNumber(settings.scheduledMinLeadDays || 4), ...products.map((p) => normalizeNumber(p.minLeadDays || 0)));
@@ -652,7 +654,7 @@ async function answerStart(chatId, fromUser = null, startArg = '') {
   const url = startArg ? webAppStartUrl(startArg) : WEBAPP_URL;
   const buttons = [];
   if (url) buttons.push([{ text: '🎁 Mini appni ochish', web_app: { url } }]);
-  if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Admin panel', web_app: { url: adminPanelUrl() } }]);
+  if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Boshqaruv paneli', web_app: { url: adminPanelUrl() } }]);
   const supportRows = [];
   // Telegram inline keyboard URL tugmasi tel: linkni qabul qilmaydi.
   // Shu sabab /start javobsiz qolmasligi uchun telefon callback orqali alertda ko‘rsatiladi.
@@ -661,7 +663,7 @@ async function answerStart(chatId, fromUser = null, startArg = '') {
   if (tgUrl) supportRows.push({ text: '💬 Telegram chat', url: tgUrl });
   if (supportRows.length) buttons.push(supportRows);
   const text = url
-    ? `Assalomu alaykum! ${settings.brandName} mini ilovasiga xush kelibsiz. Buyurtmalar kamida ${settings.scheduledMinLeadDays || 4} kun oldin qabul qilinadi. To‘lov oldindan Paynet/Click/Uzum/Xazna orqali yuboriladi, keyin chek screenshot orqali tasdiqlanadi.`
+    ? `Assalomu alaykum! ${settings.brandName} mini ilovasiga xush kelibsiz. Buyurtmalar kamida ${settings.scheduledMinLeadDays || 4} kun oldin qabul qilinadi. To‘lov oldindan Paynet/Click/Uzum/Xazna orqali yuboriladi, keyin chek rasmi orqali tasdiqlanadi.`
     : `${settings.brandName} bot ishga tushdi, lekin PUBLIC_URL/WEBAPP_URL hali sozlanmagan.`;
   return telegramApi('sendMessage', { chat_id: chatId, text, reply_markup: { inline_keyboard: buttons } });
 }
@@ -670,12 +672,12 @@ async function handleTelegramUpdate(update) {
   if (callback?.id) { if (callback.data === 'phone') { const s = await getSettingsDoc(); await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: s.supportPhone || s.businessPhone || s.restaurantPhone || 'Telefon raqam sozlanmagan', show_alert: true }); return; } await telegramApi('answerCallbackQuery', { callback_query_id: callback.id }); return; }
   const chatId = message?.chat?.id; const fromUser = message?.from || null; const text = String(message?.text || '').trim(); if (!chatId) return;
   if (text.startsWith('/start')) { const startArg = text.split(/\s+/)[1] || ''; await answerStart(chatId, fromUser, startArg); return; }
-  if (text.startsWith('/admin')) { if (!fromUser?.id || !isAdminTelegramId(fromUser.id)) { await telegramApi('sendMessage', { chat_id: chatId, text: `⛔ Admin panel faqat ruxsat berilgan Telegram ID uchun ochiladi.\n\n${adminAccessHelp()}\n\nID olish uchun /id yuboring.` }); return; } if (!adminPanelUrl()) { await telegramApi('sendMessage', { chat_id: chatId, text: 'Admin panel URL hali sozlanmagan. .env ichida PUBLIC_URL ni real HTTPS domen qilib kiriting.' }); return; } await telegramApi('sendMessage', { chat_id: chatId, text: 'Admin panel:', reply_markup: { inline_keyboard: [[{ text: 'Admin panelni ochish', web_app: { url: adminPanelUrl() } }]] } }); return; }
-  if (text.startsWith('/id')) { await telegramApi('sendMessage', { chat_id: chatId, text: `User ID: ${fromUser?.id || 'unknown'}\nChat ID: ${chatId}\n\nAdmin panel uchun ADMIN_TELEGRAM_IDS ga User ID ni kiriting.` }); return; }
+  if (text.startsWith('/admin')) { if (!fromUser?.id || !isAdminTelegramId(fromUser.id)) { await telegramApi('sendMessage', { chat_id: chatId, text: `⛔ Boshqaruv paneli faqat ruxsat berilgan Telegram raqam uchun ochiladi.\n\n${adminAccessHelp()}\n\nID olish uchun /id yuboring.` }); return; } if (!adminPanelUrl()) { await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli havolasi hali sozlanmagan. PUBLIC_URL ni real HTTPS domen qilib kiriting.' }); return; } await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli:', reply_markup: { inline_keyboard: [[{ text: 'Boshqaruv panelini ochish', web_app: { url: adminPanelUrl() } }]] } }); return; }
+  if (text.startsWith('/id')) { await telegramApi('sendMessage', { chat_id: chatId, text: `Telegram raqami: ${fromUser?.id || 'unknown'}\nChat raqami: ${chatId}\n\nBoshqaruv paneli uchun ruxsat ro‘yxatiga Telegram raqamini kiriting.` }); return; }
   await answerStart(chatId, fromUser);
 }
 
-app.get('/api/health', (_req, res) => res.json({ success: true, app: 'GiftGo Hybrid Telegram Mini App', time: new Date().toISOString() }));
+app.get('/api/health', (_req, res) => res.json({ success: true, app: 'GiftGo gibrid Telegram mini ilova', time: new Date().toISOString() }));
 app.get('/api/settings', asyncHandler(async (_req, res) => { const settings = await getSettingsDoc(); res.json({ success: true, settings }); }));
 app.get('/api/bootstrap', asyncHandler(async (_req, res) => { const [settings, products, services] = await Promise.all([getSettingsDoc(), Product.find({ available: true }).sort({ sort: 1, createdAt: -1 }), DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 })]); const categories = [...new Set(products.map((p) => p.category))]; res.json({ success: true, settings, products: products.map(publicProduct), services, categories, minScheduledDate: todayLocalISO(settings.scheduledMinLeadDays || 4), expressMaxDate: todayLocalISO(Math.max(0, Math.ceil((settings.expressMaxLeadHours || 1) / 24) - 1)) }); }));
 app.get('/api/products', asyncHandler(async (req, res) => { const query = { available: true }; if (req.query.category) query.category = req.query.category; if (req.query.type) query.productType = req.query.type; if (req.query.q) query.$text = { $search: String(req.query.q) }; const products = await Product.find(query).sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products: products.map(publicProduct) }); }));
@@ -737,12 +739,12 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
     specialRequirements: String(req.body.serviceSpecialRequirements || '').trim(),
   };
 
-  // GiftGo model: faqat oldindan P2P ilova/link orqali to‘lov + screenshot + admin tasdig‘i.
+  // GiftGo modeli: faqat oldindan P2P ilova/havola orqali to‘lov + chek rasmi + boshqaruvchi tasdig‘i.
   const paymentMethod = 'CARD_TRANSFER';
   const allowedPaymentProviders = new Set(['PAYNET', 'CLICK', 'UZUM', 'XAZNA']);
   const paymentProvider = allowedPaymentProviders.has(String(req.body.paymentProvider || '').toUpperCase()) ? String(req.body.paymentProvider).toUpperCase() : '';
   if (!paymentProvider) return res.status(400).json({ success: false, message: 'To‘lov ilovasini tanlang: Paynet, Click, Uzum Bank yoki Xazna.' });
-  if (!req.file) return res.status(400).json({ success: false, message: 'Buyurtma faqat oldindan to‘lov bilan qabul qilinadi. To‘lov ilovasida pulni yuboring va chek screenshotini yuklang.' });
+  if (!req.file) return res.status(400).json({ success: false, message: 'Buyurtma faqat oldindan to‘lov bilan qabul qilinadi. To‘lov ilovasida pulni yuboring va chek rasmini yuklang.' });
 
   let fallbackService = null; let deliveryServiceId = null;
   if (type === 'DELIVERY' && req.body.deliveryServiceId) { deliveryServiceId = ensureObjectId(req.body.deliveryServiceId, 'Yetkazib berish xizmati ID'); fallbackService = await DeliveryService.findOne({ _id: deliveryServiceId, active: true }); if (!fallbackService) return res.status(400).json({ success: false, message: 'Yetkazib berish xizmati topilmadi.' }); }
@@ -772,14 +774,14 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
   if (promo.promoId) await PromoCode.updateOne({ _id: promo.promoId }, { $inc: { usedCount: 1 } });
   const locationLine = customerLocation ? `\n🗺 Masofa: ${quote.distanceKm} km\n📍 Xarita: ${quote.mapUrl}` : '';
   const randomLine = orderMode === 'EXPRESS_RANDOM' ? `\n⚡ Tezkor random: rozilik olindi` : `\n📅 Oldindan buyurtma: ${deliveryDate} ${deliveryTime}`;
-  await notifyAdmin(`🎁 <b>Yangi buyurtma</b>\n#${order.orderNo}\n👤 ${order.userFullName}\n📞 ${order.phone}\n🎯 ${order.eventType || '-'}\n🚚 ${order.deliveryServiceTitle}\n🚕 Yetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\n🎟 Chegirma: ${formatMoney(order.discountAmount, settings.currency)}\n💰 Jami: ${formatMoney(order.total, settings.currency)}${randomLine}\n💳 To‘lov: ${paymentProvider} orqali oldindan + admin tasdiq${uploaded?.url ? '\n🧾 Chek biriktirilgan' : ''}${locationLine}\n📌 Holat: ${order.orderStatus} / ${order.paymentStatus}`, order.paymentScreenshotUrl);
+  await notifyAdmin(`🎁 <b>Yangi buyurtma</b>\n#${order.orderNo}\n👤 ${order.userFullName}\n📞 ${order.phone}\n🎯 ${order.eventType || '-'}\n🚚 ${order.deliveryServiceTitle}\n🚕 Yetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\n🎟 Chegirma: ${formatMoney(order.discountAmount, settings.currency)}\n💰 Jami: ${formatMoney(order.total, settings.currency)}${randomLine}\n💳 To‘lov: ${paymentProvider} orqali oldindan + admin tasdiq${uploaded?.url ? '\n🧾 Chek biriktirilgan' : ''}${locationLine}\n📌 Holat: ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}`, order.paymentScreenshotUrl);
   res.status(201).json({ success: true, order });
 }));
 
 app.post('/api/orders/:id/location', telegramAuth, asyncHandler(async (req, res) => { ensureObjectId(req.params.id, 'Buyurtma ID'); const order = await Order.findOne({ _id: req.params.id, userTelegramId: String(req.tgUser.id) }); if (!order) return res.status(404).json({ success: false, message: 'Buyurtma topilmadi.' }); if (order.type !== 'DELIVERY') return res.status(400).json({ success: false, message: 'Faqat yetkazish buyurtmasida lokatsiya yangilanadi.' }); if (['DONE', 'CANCELLED'].includes(order.orderStatus)) return res.status(400).json({ success: false, message: 'Yakunlangan buyurtmada lokatsiya yangilanmaydi.' }); const settings = await getSettingsDoc(); const location = parseLocationPayload(req.body); if (!location) return res.status(400).json({ success: false, message: 'Lokatsiya koordinatalari noto‘g‘ri.' }); const previousKm = order.distanceKm || 0; const quote = calculateDeliveryQuote(settings, location, null, 'DELIVERY'); const trend = movementTrend(previousKm, quote.distanceKm); order.customerLocation = location; order.distanceKm = quote.distanceKm || 0; order.movementTrend = trend.trend; order.movementDeltaKm = trend.delta; order.lastLocationAt = new Date(); order.liveLocationEnabled = true; if (!order.businessLocationSnapshot?.lat && quote.businessLocation) order.businessLocationSnapshot = quote.businessLocation; await order.save(); res.json({ success: true, order: { _id: order._id, orderNo: order.orderNo, distanceKm: order.distanceKm, movementTrend: order.movementTrend, movementDeltaKm: order.movementDeltaKm, mapUrl: makeMapUrl(location.lat, location.lng), lastLocationAt: order.lastLocationAt } }); }));
 app.get('/api/my/orders', telegramAuth, asyncHandler(async (req, res) => { const orders = await Order.find({ userTelegramId: String(req.tgUser.id) }).sort({ createdAt: -1 }).limit(80); res.json({ success: true, orders }); }));
 
-app.post('/api/admin/login', asyncHandler(async (req, res) => { const initData = req.body.initData || req.get('X-Telegram-Init-Data') || ''; const validated = validateTelegramInitData(initData); if (validated.ok && validated.user?.id) { const tgUser = validated.user; if (!isAdminTelegramId(tgUser.id)) return res.status(403).json({ success: false, message: adminAccessHelp(), userId: tgUser.id }); return res.json({ success: true, token: signAdminToken({ role: 'admin', tgId: tgUser.id, username: tgUser.username, name: userFullName(tgUser, 'Admin') }), admin: tgUser }); } if (ALLOW_PASSWORD_ADMIN && req.body.password === ADMIN_PASSWORD) return res.json({ success: true, token: signAdminToken({ role: 'admin', fallback: true, name: 'Password admin' }), admin: { id: 'password-admin', first_name: 'Password', last_name: 'Admin' } }); res.status(401).json({ success: false, message: validated.reason || 'Telegram admin auth kerak. Lokal test uchun ALLOW_PASSWORD_ADMIN=true qiling.', hint: adminAccessHelp() }); }));
+app.post('/api/admin/login', asyncHandler(async (req, res) => { const initData = req.body.initData || req.get('X-Telegram-Init-Data') || ''; const validated = validateTelegramInitData(initData); if (validated.ok && validated.user?.id) { const tgUser = validated.user; if (!isAdminTelegramId(tgUser.id)) return res.status(403).json({ success: false, message: adminAccessHelp(), userId: tgUser.id }); return res.json({ success: true, token: signAdminToken({ role: 'admin', tgId: tgUser.id, username: tgUser.username, name: userFullName(tgUser, 'Boshqaruvchi') }), admin: tgUser }); } if (ALLOW_PASSWORD_ADMIN && req.body.password === ADMIN_PASSWORD) return res.json({ success: true, token: signAdminToken({ role: 'admin', fallback: true, name: 'Parolli boshqaruvchi' }), admin: { id: 'password-admin', first_name: 'Parol', last_name: 'Boshqaruvchi' } }); res.status(401).json({ success: false, message: validated.reason || 'Telegram orqali boshqaruvchi tasdig‘i kerak. Lokal test uchun parol orqali kirishni yoqing.', hint: adminAccessHelp() }); }));
 app.get('/api/admin/me', verifyAdminToken, asyncHandler(async (req, res) => res.json({ success: true, admin: req.admin, adminIdsConfigured: adminIdsConfigured(), adminIdsCount: ADMIN_TELEGRAM_IDS.size })));
 app.get('/api/admin/dashboard', verifyAdminToken, asyncHandler(async (_req, res) => { const [ordersTotal, ordersPending, productsTotal, customersTotal, promoTotal, revenueAgg, bonusAgg] = await Promise.all([Order.countDocuments(), Order.countDocuments({ orderStatus: { $in: ['NEW', 'CONFIRMED', 'PREPARING', 'SHOPPING', 'ON_ROAD', 'READY'] } }), Product.countDocuments(), Customer.countDocuments(), PromoCode.countDocuments(), Order.aggregate([{ $match: { paymentStatus: { $ne: 'REJECTED' }, orderStatus: { $ne: 'CANCELLED' } } }, { $group: { _id: null, total: { $sum: '$total' } } }]), Customer.aggregate([{ $group: { _id: null, total: { $sum: '$bonusBalance' } } }])]); res.json({ success: true, stats: { ordersTotal, ordersPending, productsTotal, customersTotal, promoTotal, revenue: revenueAgg[0]?.total || 0, bonusBalance: bonusAgg[0]?.total || 0 } }); }));
 app.get('/api/admin/orders', verifyAdminToken, asyncHandler(async (req, res) => {
@@ -812,8 +814,8 @@ app.patch('/api/admin/orders/:id', verifyAdminToken, asyncHandler(async (req, re
   order = await finalizeOrderRewards(order);
   await notifyCustomer(order.userTelegramId, `🎁 <b>Buyurtma holati yangilandi</b>
 #${order.orderNo}
-To‘lov: ${order.paymentStatus}
-Status: ${order.orderStatus}
+To‘lov: ${paymentStatusText(order.paymentStatus)}
+Holat: ${orderStatusText(order.orderStatus)}
 Bonus: ${formatMoney(order.bonusEarned || 0)}`);
   res.json({ success: true, order });
 }));
@@ -902,14 +904,14 @@ async function processAdminReminders() {
 👤 ${order.userFullName || '-'} · ${order.phone || ''}
 🎯 ${order.eventType || '-'}
 💰 ${formatMoney(order.total || 0)}
-📌 ${order.orderStatus} / ${order.paymentStatus}
+📌 ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}
 📝 ${order.reminderNote || order.adminNote || order.planNote || order.note || '-'}${loc}`);
       order.reminderLastSentAt = new Date();
       order.reminderNextAt = nextReminderAt(order.reminderFrequency, order.reminderLastSentAt);
       await order.save();
     }
   } catch (error) {
-    console.error('Admin renotif xatosi:', error.message);
+    console.error('Boshqaruv eslatmasi xatosi:', error.message);
   }
 }
 setInterval(processAdminReminders, 60 * 1000);
