@@ -177,9 +177,9 @@ const settingsSchema = new mongoose.Schema({
   deliveryOutOfZoneEnabled: { type: Boolean, default: true },
   scheduledMinLeadDays: { type: Number, default: 4 },
   expressRandomEnabled: { type: Boolean, default: true },
-  expressMaxLeadHours: { type: Number, default: 24 },
+  expressMaxLeadHours: { type: Number, default: 1 },
   expressRandomMinAmount: { type: Number, default: 100000 },
-  expressAgreementText: { type: String, default: 'Tezkor random gul buyurtmasida operatorlar byudjetimga mos gulni do‘kondan topib yetkazadi. Qaysi gul kelishidan qat’i nazar e’tiroz bildirmayman.' },
+  expressAgreementText: { type: String, default: 'Shakli, rangi yoki turi qanday bo‘lishidan qat’i nazar, bergan pulimga yarasha mavjud mahsulot olib kelinishiga roziman.' },
   firstOrderDiscountEnabled: { type: Boolean, default: true },
   firstOrderDiscountAmount: { type: Number, default: 10000 },
   referralFriendDiscountAmount: { type: Number, default: 10000 },
@@ -246,6 +246,11 @@ const productSchema = new mongoose.Schema({
   serviceRequirements: { type: String, default: '' },
   requiredClientInfo: { type: String, default: '' },
   serviceScriptPrompt: { type: String, default: '' },
+  serviceProviderPhone: { type: String, default: '' },
+  serviceProviderTelegram: { type: String, default: '' },
+  serviceProviderCost: { type: Number, default: 0 },
+  serviceCommissionAmount: { type: Number, default: 0 },
+  serviceProviderNote: { type: String, default: '' },
   sort: { type: Number, default: 100 },
 }, { timestamps: true });
 productSchema.index({ name: 'text', category: 'text', description: 'text' });
@@ -385,10 +390,12 @@ function publicProduct(p) {
   };
 }
 function applyProductAdminPayload(target, body = {}) {
-  const stringFields = ['shortDescription','packageIncludes','composition','unitLabel','preparationNote','careInstructions','deliveryNotes','adminInternalNote','serviceKind','serviceFormat','serviceDuration','servicePerformer','serviceLocationType','serviceIncludes','serviceRequirements','requiredClientInfo','serviceScriptPrompt'];
+  const stringFields = ['shortDescription','packageIncludes','composition','unitLabel','preparationNote','careInstructions','deliveryNotes','adminInternalNote','serviceKind','serviceFormat','serviceDuration','servicePerformer','serviceLocationType','serviceIncludes','serviceRequirements','requiredClientInfo','serviceScriptPrompt','serviceProviderPhone','serviceProviderTelegram','serviceProviderNote'];
+  const numberFields = ['serviceProviderCost','serviceCommissionAmount'];
   const listFields = ['colorOptions','sizeOptions','flavorOptions','designOptions','occasionTags','recipientTags'];
   for (const f of stringFields) if (body[f] !== undefined) target[f] = String(body[f] || '').trim();
   for (const f of listFields) if (body[f] !== undefined) target[f] = listFromText(body[f]);
+  for (const f of numberFields) if (body[f] !== undefined) target[f] = normalizeNumber(body[f]);
   if (body.stockQty !== undefined) target.stockQty = normalizeNumber(body.stockQty);
   return target;
 }
@@ -398,7 +405,7 @@ function orderContentTypeFromProducts(products = []) {
   return hasService && hasProduct ? 'HYBRID' : hasService ? 'SERVICE' : 'PRODUCT';
 }
 function syncSettingsAliases(settings) {
-  const defaults = { businessLat: settings.restaurantLat ?? 38.8616, businessLng: settings.restaurantLng ?? 65.5858, businessPhone: settings.restaurantPhone || '+998 90 000 00 00', businessAddress: settings.restaurantAddress || 'Kasbi, Qashqadaryo', scheduledMinLeadDays: 4, expressMaxLeadHours: 24, expressRandomMinAmount: 100000, firstOrderDiscountAmount: 10000, cashbackPercent: 3, referralFriendDiscountAmount: 10000, referralInviterBonusAmount: 10000, bonusUseEnabled: true, supportPhone: '+998887660800', supportTelegram: '@Qoryogdiyev', paymentPaynetUrl: "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24", paymentClickUrl: 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD', paymentUzumUrl: 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9', paymentXaznaUrl: 'https://pay.xazna.uz/p2p/e07e655f-886e-4942-b325-846d8a0c2ce9' };
+  const defaults = { businessLat: settings.restaurantLat ?? 38.8616, businessLng: settings.restaurantLng ?? 65.5858, businessPhone: settings.restaurantPhone || '+998 90 000 00 00', businessAddress: settings.restaurantAddress || 'Kasbi, Qashqadaryo', scheduledMinLeadDays: 4, expressMaxLeadHours: 1, expressRandomMinAmount: 100000, firstOrderDiscountAmount: 10000, cashbackPercent: 3, referralFriendDiscountAmount: 10000, referralInviterBonusAmount: 10000, bonusUseEnabled: true, supportPhone: '+998887660800', supportTelegram: '@Qoryogdiyev', paymentPaynetUrl: "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24", paymentClickUrl: 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD', paymentUzumUrl: 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9', paymentXaznaUrl: 'https://pay.xazna.uz/p2p/e07e655f-886e-4942-b325-846d8a0c2ce9' };
   let changed = false;
   for (const [k, v] of Object.entries(defaults)) if (settings[k] === undefined || settings[k] === null || settings[k] === '') { settings[k] = v; changed = true; }
   if (!settings.restaurantLat && settings.businessLat) { settings.restaurantLat = settings.businessLat; changed = true; }
@@ -418,7 +425,7 @@ async function seedDefaults() {
   ]);
   const productCount = await Product.countDocuments();
   if (!productCount) await Product.insertMany([
-    { name: 'Tezkor random gul buketi', category: 'Gullar', productType: 'FLOWER', description: '1 kun ichida byudjetga mos random buket. Gul turi kafolatlanmaydi.', price: settings.expressRandomMinAmount || 100000, emoji: '🌹', featured: true, expressRandomAllowed: true, minLeadDays: 0, sort: 1 },
+    { name: 'Tezkor random gul buketi', category: 'Gullar', productType: 'FLOWER', description: '1 soat ichida byudjetga mos random sovg‘a/gul. Shakl va tur mavjud holatga qarab tanlanadi.', price: settings.expressRandomMinAmount || 100000, emoji: '🌹', featured: true, expressRandomAllowed: true, minLeadDays: 0, sort: 1 },
     { name: 'Romantik buket', category: 'Gullar', productType: 'FLOWER', description: 'Oldindan buyurtma asosida chiroyli buket.', price: 180000, emoji: '💐', featured: true, minLeadDays: 4, sort: 2 },
     { name: 'Premium sovg‘a box', category: 'Sovg‘a box', productType: 'GIFT_BOX', description: 'Shirinlik, ichimlik, otkritka va dekor bilan.', price: 220000, emoji: '🎁', featured: true, minLeadDays: 4, sort: 3 },
     { name: 'Tug‘ilgan kun torti', category: 'Tortlar', productType: 'CAKE', description: 'Buyurtma asosida tort. Matn va dizaynni izohda yozing.', price: 250000, emoji: '🎂', minLeadDays: 4, sort: 4 },
@@ -560,8 +567,9 @@ function validateFulfillment({ settings, orderMode, deliveryDate, products, subt
   const selected = dateOnlyUTC(deliveryDate); const today = dateOnlyUTC(todayLocalISO(0)); const diffDays = Math.floor((selected - today) / 86400000);
   if (orderMode === 'EXPRESS_RANDOM') {
     if (!parseBoolean(settings.expressRandomEnabled, true)) throw Object.assign(new Error('Tezkor random buyurtma hozircha o‘chirilgan.'), { status: 400 });
-    const maxDays = Math.ceil(Math.max(1, normalizeNumber(settings.expressMaxLeadHours || 24)) / 24);
-    if (diffDays < 0 || diffDays > maxDays) throw Object.assign(new Error(`Tezkor random buyurtma faqat ${maxDays} kun ichida qabul qilinadi.`), { status: 400 });
+    const maxHours = Math.max(1, normalizeNumber(settings.expressMaxLeadHours || 1));
+    const maxDays = Math.max(0, Math.ceil(maxHours / 24) - 1);
+    if (diffDays < 0 || diffDays > maxDays) throw Object.assign(new Error(`Tezkor random buyurtma faqat ${maxHours} soat ichida qabul qilinadi.`), { status: 400 });
     if (subtotal < normalizeNumber(settings.expressRandomMinAmount)) throw Object.assign(new Error(`Tezkor random buyurtma minimal summasi: ${formatMoney(settings.expressRandomMinAmount, settings.currency)}.`), { status: 400 });
     if (!noComplaintAgreement) throw Object.assign(new Error('Tezkor random gul shartiga rozilik belgisini qo‘ying.'), { status: 400 });
     const notAllowed = products.find((p) => !p.expressRandomAllowed);
@@ -669,7 +677,7 @@ async function handleTelegramUpdate(update) {
 
 app.get('/api/health', (_req, res) => res.json({ success: true, app: 'GiftGo Hybrid Telegram Mini App', time: new Date().toISOString() }));
 app.get('/api/settings', asyncHandler(async (_req, res) => { const settings = await getSettingsDoc(); res.json({ success: true, settings }); }));
-app.get('/api/bootstrap', asyncHandler(async (_req, res) => { const [settings, products, services] = await Promise.all([getSettingsDoc(), Product.find({ available: true }).sort({ sort: 1, createdAt: -1 }), DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 })]); const categories = [...new Set(products.map((p) => p.category))]; res.json({ success: true, settings, products: products.map(publicProduct), services, categories, minScheduledDate: todayLocalISO(settings.scheduledMinLeadDays || 4), expressMaxDate: todayLocalISO(Math.ceil((settings.expressMaxLeadHours || 24) / 24)) }); }));
+app.get('/api/bootstrap', asyncHandler(async (_req, res) => { const [settings, products, services] = await Promise.all([getSettingsDoc(), Product.find({ available: true }).sort({ sort: 1, createdAt: -1 }), DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 })]); const categories = [...new Set(products.map((p) => p.category))]; res.json({ success: true, settings, products: products.map(publicProduct), services, categories, minScheduledDate: todayLocalISO(settings.scheduledMinLeadDays || 4), expressMaxDate: todayLocalISO(Math.max(0, Math.ceil((settings.expressMaxLeadHours || 1) / 24) - 1)) }); }));
 app.get('/api/products', asyncHandler(async (req, res) => { const query = { available: true }; if (req.query.category) query.category = req.query.category; if (req.query.type) query.productType = req.query.type; if (req.query.q) query.$text = { $search: String(req.query.q) }; const products = await Product.find(query).sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products: products.map(publicProduct) }); }));
 app.get('/api/delivery-services', asyncHandler(async (_req, res) => { const services = await DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 }); res.json({ success: true, services }); }));
 app.post('/api/delivery/quote', asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const type = req.body.type === 'PICKUP' ? 'PICKUP' : 'DELIVERY'; const location = parseLocationPayload(req.body); let fallbackService = null; if (req.body.deliveryServiceId && mongoose.Types.ObjectId.isValid(String(req.body.deliveryServiceId))) fallbackService = await DeliveryService.findOne({ _id: req.body.deliveryServiceId, active: true }); const quote = calculateDeliveryQuote(settings, location, fallbackService, type); res.json({ success: true, quote }); }));
