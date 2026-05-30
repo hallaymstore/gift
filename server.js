@@ -215,7 +215,8 @@ const productSchema = new mongoose.Schema({
   imagePublicId: { type: String, default: '' },
   galleryUrls: { type: [String], default: [] },
   galleryPublicIds: { type: [String], default: [] },
-  emoji: { type: String, default: '🌹' },
+  emoji: { type: String, default: '' },
+  variants: [{ label: { type: String, default: '' }, color: { type: String, default: '' }, size: { type: String, default: '' }, sku: { type: String, default: '' }, price: { type: Number, default: 0 }, oldPrice: { type: Number, default: 0 }, stockQty: { type: Number, default: 0 } }],
   available: { type: Boolean, default: true },
   featured: { type: Boolean, default: false },
   promoEligible: { type: Boolean, default: true },
@@ -329,7 +330,7 @@ const orderSchema = new mongoose.Schema({
   liveLocationEnabled: { type: Boolean, default: false },
   deliveryServiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'DeliveryService' },
   deliveryServiceTitle: String,
-  items: [{ productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' }, name: String, price: Number, qty: Number, subtotal: Number, productType: String, category: String }],
+  items: [{ productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' }, name: String, price: Number, qty: Number, subtotal: Number, productType: String, category: String, variantSku: String, variantLabel: String, selectedColor: String, selectedSize: String }],
   subtotal: { type: Number, default: 0 },
   deliveryFee: { type: Number, default: 0 },
   discountAmount: { type: Number, default: 0 },
@@ -365,10 +366,45 @@ const PromoCode = mongoose.model('PromoCode', promoCodeSchema);
 const Customer = mongoose.model('Customer', customerSchema);
 const Order = mongoose.model('Order', orderSchema);
 
+const reviewSchema = new mongoose.Schema({
+  productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true, index: true },
+  userTelegramId: { type: String, required: true, index: true },
+  fullName: { type: String, default: '' },
+  rating: { type: Number, required: true, min: 1, max: 5 },
+  comment: { type: String, default: '' },
+  adminReply: { type: String, default: '' },
+  active: { type: Boolean, default: true },
+}, { timestamps: true });
+reviewSchema.index({ productId: 1, userTelegramId: 1 }, { unique: true });
+const Review = mongoose.model('Review', reviewSchema);
+
+
 function listFromText(value) {
   if (Array.isArray(value)) return value.map((x) => String(x || '').trim()).filter(Boolean);
   return String(value || '').split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean);
 }
+
+function parseVariantsText(value) {
+  const rows = String(value || '').split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  return rows.map((row, idx) => {
+    const parts = row.split('|').map((x) => x.trim());
+    const [label, color, size, price, oldPrice, stockQty, sku] = parts;
+    return {
+      label: label || [color, size].filter(Boolean).join(' / ') || `Variant ${idx + 1}`,
+      color: color || '',
+      size: size || '',
+      price: normalizeNumber(price),
+      oldPrice: normalizeNumber(oldPrice),
+      stockQty: normalizeNumber(stockQty),
+      sku: String(sku || `${(label || color || size || 'variant').toLowerCase().replace(/\s+/g, '-')}-${idx + 1}`).slice(0, 60),
+    };
+  }).filter((v) => v.label && v.price > 0);
+}
+async function getProductRatingSummary(productId) {
+  const rows = await Review.aggregate([{ $match: { productId: new mongoose.Types.ObjectId(String(productId)), active: true } }, { $group: { _id: '$productId', avgRating: { $avg: '$rating' }, reviewCount: { $sum: 1 } } }]);
+  return rows[0] ? { avgRating: Number(rows[0].avgRating || 0).toFixed(1), reviewCount: Number(rows[0].reviewCount || 0) } : { avgRating: '0.0', reviewCount: 0 };
+}
+
 function parsePrefixedLocation(body = {}, prefix = '') {
   const lat = normalizeCoord(body[`${prefix}Lat`], -90, 90);
   const lng = normalizeCoord(body[`${prefix}Lng`], -180, 180);
@@ -386,7 +422,7 @@ function publicProduct(p) {
     preparationNote: p.preparationNote, careInstructions: p.careInstructions, deliveryNotes: p.deliveryNotes,
     serviceKind: p.serviceKind, serviceFormat: p.serviceFormat, serviceDuration: p.serviceDuration, servicePerformer: p.servicePerformer,
     serviceLocationType: p.serviceLocationType, serviceIncludes: p.serviceIncludes, serviceRequirements: p.serviceRequirements, requiredClientInfo: p.requiredClientInfo, serviceScriptPrompt: p.serviceScriptPrompt,
-    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, available: p.available,
+    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, variants: (p.variants || []).map((v) => ({ label: v.label, color: v.color, size: v.size, sku: v.sku, price: v.price, oldPrice: v.oldPrice, stockQty: v.stockQty })), available: p.available,
     featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent,
     minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort
   };
@@ -399,6 +435,7 @@ function applyProductAdminPayload(target, body = {}) {
   for (const f of listFields) if (body[f] !== undefined) target[f] = listFromText(body[f]);
   for (const f of numberFields) if (body[f] !== undefined) target[f] = normalizeNumber(body[f]);
   if (body.stockQty !== undefined) target.stockQty = normalizeNumber(body.stockQty);
+  if (body.variantsText !== undefined) target.variants = parseVariantsText(body.variantsText);
   return target;
 }
 function orderContentTypeFromProducts(products = []) {
@@ -506,6 +543,7 @@ async function getOrCreateCustomer(tgUser, options = {}) {
   await customer.save();
   return customer;
 }
+
 async function parseCartItems(itemsPayload) {
   if (!Array.isArray(itemsPayload) || !itemsPayload.length) { const err = new Error('Savat bo‘sh.'); err.status = 400; throw err; }
   const ids = itemsPayload.map((item) => ensureObjectId(item.productId, 'Mahsulot ID'));
@@ -515,10 +553,14 @@ async function parseCartItems(itemsPayload) {
     const product = productMap.get(String(item.productId));
     if (!product) { const err = new Error('Savatda mavjud bo‘lmagan mahsulot bor.'); err.status = 400; throw err; }
     const qty = Math.max(1, Math.min(99, Math.floor(Number(item.qty || 1))));
-    return { product, item: { productId: product._id, name: product.name, price: product.price, qty, subtotal: product.price * qty, productType: product.productType, category: product.category } };
+    const variants = Array.isArray(product.variants) ? product.variants : [];
+    const chosen = variants.find((v) => (item.variantSku && String(v.sku || '') === String(item.variantSku)) || (item.variantLabel && String(v.label || '') === String(item.variantLabel)));
+    const unitPrice = chosen?.price > 0 ? Number(chosen.price) : Number(product.price || 0);
+    return { product, item: { productId: product._id, name: product.name, price: unitPrice, qty, subtotal: unitPrice * qty, productType: product.productType, category: product.category, variantSku: chosen?.sku || String(item.variantSku || ''), variantLabel: chosen?.label || String(item.variantLabel || ''), selectedColor: String(item.selectedColor || chosen?.color || ''), selectedSize: String(item.selectedSize || chosen?.size || '') } };
   });
   return { items: items.map((x) => x.item), products: items.map((x) => x.product), subtotal: items.reduce((sum, x) => sum + x.item.subtotal, 0) };
 }
+
 async function isFirstOrder(userTelegramId) { const count = await Order.countDocuments({ userTelegramId: String(userTelegramId), orderStatus: { $ne: 'CANCELLED' } }); return count === 0; }
 function calculateProductPromo(code, items, products) {
   if (!code) return { amount: 0, title: '' };
@@ -681,6 +723,39 @@ app.get('/api/health', (_req, res) => res.json({ success: true, app: 'GiftGo gib
 app.get('/api/settings', asyncHandler(async (_req, res) => { const settings = await getSettingsDoc(); res.json({ success: true, settings }); }));
 app.get('/api/bootstrap', asyncHandler(async (_req, res) => { const [settings, products, services] = await Promise.all([getSettingsDoc(), Product.find({ available: true }).sort({ sort: 1, createdAt: -1 }), DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 })]); const categories = [...new Set(products.map((p) => p.category))]; res.json({ success: true, settings, products: products.map(publicProduct), services, categories, minScheduledDate: todayLocalISO(settings.scheduledMinLeadDays || 4), expressMaxDate: todayLocalISO(Math.max(0, Math.ceil((settings.expressMaxLeadHours || 1) / 24) - 1)) }); }));
 app.get('/api/products', asyncHandler(async (req, res) => { const query = { available: true }; if (req.query.category) query.category = req.query.category; if (req.query.type) query.productType = req.query.type; if (req.query.q) query.$text = { $search: String(req.query.q) }; const products = await Product.find(query).sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products: products.map(publicProduct) }); }));
+
+app.get('/api/products/:id', asyncHandler(async (req, res) => {
+  ensureObjectId(req.params.id, 'Mahsulot ID');
+  const product = await Product.findOne({ _id: req.params.id, available: true });
+  if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' });
+  const summary = await getProductRatingSummary(product._id);
+  res.json({ success: true, product: { ...publicProduct(product), ...summary } });
+}));
+app.get('/api/products/:id/reviews', asyncHandler(async (req, res) => {
+  ensureObjectId(req.params.id, 'Mahsulot ID');
+  const reviews = await Review.find({ productId: req.params.id, active: true }).sort({ createdAt: -1 }).limit(50);
+  const summary = await getProductRatingSummary(req.params.id);
+  res.json({ success: true, reviews, ...summary });
+}));
+app.post('/api/products/:id/reviews', telegramAuth, asyncHandler(async (req, res) => {
+  ensureObjectId(req.params.id, 'Mahsulot ID');
+  const product = await Product.findOne({ _id: req.params.id, available: true });
+  if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' });
+  const rating = Math.max(1, Math.min(5, Math.floor(Number(req.body.rating || 0))));
+  if (!rating) return res.status(400).json({ success: false, message: 'Bahoni tanlang.' });
+  const comment = String(req.body.comment || '').trim().slice(0, 1000);
+  const existing = await Review.findOne({ productId: req.params.id, userTelegramId: String(req.tgUser.id) });
+  let review;
+  if (existing) {
+    existing.rating = rating; existing.comment = comment; existing.fullName = userFullName(req.tgUser, req.body.fullName); existing.active = true;
+    review = await existing.save();
+  } else {
+    review = await Review.create({ productId: req.params.id, userTelegramId: String(req.tgUser.id), fullName: userFullName(req.tgUser, req.body.fullName), rating, comment, active: true });
+  }
+  const summary = await getProductRatingSummary(req.params.id);
+  res.json({ success: true, review, ...summary });
+}));
+
 app.get('/api/delivery-services', asyncHandler(async (_req, res) => { const services = await DeliveryService.find({ active: true }).sort({ sort: 1, price: 1 }); res.json({ success: true, services }); }));
 app.post('/api/delivery/quote', asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const type = req.body.type === 'PICKUP' ? 'PICKUP' : 'DELIVERY'; const location = parseLocationPayload(req.body); let fallbackService = null; if (req.body.deliveryServiceId && mongoose.Types.ObjectId.isValid(String(req.body.deliveryServiceId))) fallbackService = await DeliveryService.findOne({ _id: req.body.deliveryServiceId, active: true }); const quote = calculateDeliveryQuote(settings, location, fallbackService, type); res.json({ success: true, quote }); }));
 app.get('/api/customer/me', telegramAuth, asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const startParam = req.tgRaw?.start_param || req.query.startParam || ''; const customer = await getOrCreateCustomer(req.tgUser, { startParam }); const shareUrl = botStartUrl(settings.botUsername, customer.referralCode); res.json({ success: true, customer, shareUrl, shareText: `GiftGo orqali gul va sovg‘a buyurtma qiling. Mening referral havolam: ${shareUrl}` }); }));
@@ -833,7 +908,7 @@ app.post('/api/admin/products', verifyAdminToken, upload.fields([{ name: 'image'
     productType: String(req.body.productType || 'FLOWER'), description: String(req.body.description || '').trim(),
     price: normalizeNumber(req.body.price), oldPrice: normalizeNumber(req.body.oldPrice),
     imageUrl: primaryImage?.url || '', imagePublicId: primaryImage?.publicId || '', galleryUrls: galleryImages.map((x) => x.url), galleryPublicIds: galleryImages.map((x) => x.publicId),
-    emoji: String(req.body.emoji || (req.body.productType === 'SERVICE' ? '🎤' : '🌹')).trim(), available: parseBoolean(req.body.available, true), featured: parseBoolean(req.body.featured, false),
+    emoji: String(req.body.emoji || '').trim(), available: parseBoolean(req.body.available, true), featured: parseBoolean(req.body.featured, false),
     promoEligible: parseBoolean(req.body.promoEligible, true), promoCode: normalizePromoCode(req.body.promoCode), promoDiscountPercent: Math.max(0, Math.min(100, normalizeNumber(req.body.promoDiscountPercent))),
     cashbackPercentOverride: normalizeNumber(req.body.cashbackPercentOverride), minLeadDays: normalizeNumber(req.body.minLeadDays ?? 4), expressRandomAllowed: parseBoolean(req.body.expressRandomAllowed, false), sort: normalizeNumber(req.body.sort || 100),
   };
@@ -878,6 +953,24 @@ app.delete('/api/admin/delivery-services/:id', verifyAdminToken, asyncHandler(as
 
 app.get('/api/admin/settings', verifyAdminToken, asyncHandler(async (_req, res) => { const settings = await getSettingsDoc(); res.json({ success: true, settings }); }));
 app.patch('/api/admin/settings', verifyAdminToken, upload.single('logo'), asyncHandler(async (req, res) => { const settings = await getSettingsDoc(); const strings = ['brandName', 'brandSubtitle', 'currency', 'businessPhone', 'supportPhone', 'supportTelegram', 'businessAddress', 'restaurantPhone', 'restaurantAddress', 'botUsername', 'instagram', 'openingHours', 'paymentCardTitle', 'paymentCardBank', 'paymentCardNumber', 'paymentCardHolder', 'paymentInstructions', 'paymentPaynetUrl', 'paymentClickUrl', 'paymentUzumUrl', 'paymentXaznaUrl', 'paymentPaymeUrl', 'paymentOtherUrl', 'adminTelegramChatId', 'expressAgreementText']; for (const f of strings) if (req.body[f] !== undefined) settings[f] = String(req.body[f]).trim(); const nums = ['businessLat', 'businessLng', 'restaurantLat', 'restaurantLng', 'deliveryBaseFee', 'deliveryBaseKm', 'deliveryPricePerKm', 'deliveryMaxKm', 'scheduledMinLeadDays', 'expressMaxLeadHours', 'expressRandomMinAmount', 'firstOrderDiscountAmount', 'referralFriendDiscountAmount', 'referralInviterBonusAmount', 'cashbackPercent']; for (const f of nums) if (req.body[f] !== undefined) settings[f] = normalizeNumber(req.body[f]); const bools = ['deliveryAutoPricingEnabled', 'deliveryOutOfZoneEnabled', 'cashOnDeliveryEnabled', 'cashOnPickupEnabled', 'expressRandomEnabled', 'firstOrderDiscountEnabled', 'bonusUseEnabled']; for (const f of bools) if (req.body[f] !== undefined) settings[f] = parseBoolean(req.body[f], settings[f]); if (settings.businessLat) settings.restaurantLat = settings.businessLat; if (settings.businessLng) settings.restaurantLng = settings.businessLng; if (settings.businessPhone) settings.restaurantPhone = settings.businessPhone; if (settings.businessAddress) settings.restaurantAddress = settings.businessAddress; if (req.file) { const uploaded = await uploadToCloudinary(req.file, 'giftgo/brand'); settings.logoUrl = uploaded.url; } await settings.save(); res.json({ success: true, settings }); }));
+
+app.get('/api/admin/reviews', verifyAdminToken, asyncHandler(async (_req, res) => {
+  const reviews = await Review.find({ active: true }).sort({ createdAt: -1 }).limit(200).lean();
+  const productIds = [...new Set(reviews.map((r) => String(r.productId)).filter(Boolean))];
+  const products = await Product.find({ _id: { $in: productIds } }).select('name').lean();
+  const productMap = new Map(products.map((p) => [String(p._id), p.name]));
+  res.json({ success: true, reviews: reviews.map((r) => ({ ...r, productName: productMap.get(String(r.productId)) || 'Mahsulot' })) });
+}));
+app.patch('/api/admin/reviews/:id', verifyAdminToken, asyncHandler(async (req, res) => {
+  ensureObjectId(req.params.id, 'Sharh ID');
+  const review = await Review.findById(req.params.id);
+  if (!review) return res.status(404).json({ success: false, message: 'Sharh topilmadi.' });
+  if (req.body.adminReply !== undefined) review.adminReply = String(req.body.adminReply || '').trim().slice(0, 1000);
+  if (req.body.active !== undefined) review.active = parseBoolean(req.body.active, review.active);
+  await review.save();
+  res.json({ success: true, review });
+}));
+
 app.get('/api/admin/bot/status', verifyAdminToken, asyncHandler(async (_req, res) => { const [webhookInfo, identity] = await Promise.all([telegramApi('getWebhookInfo', {}), getTelegramBotIdentity(true)]); res.json({ success: true, bot: { hasToken: Boolean(BOT_TOKEN), username: identity?.username || '', firstName: identity?.first_name || '', expectedUsername: BOT_EXPECTED_USERNAME, publicUrl: PUBLIC_URL, webAppUrl: WEBAPP_URL, autoSetWebhook: AUTO_SET_WEBHOOK, polling: TELEGRAM_POLLING, webhookSecretEnabled: Boolean(TELEGRAM_WEBHOOK_SECRET), adminIdsConfigured: adminIdsConfigured(), adminIdsCount: ADMIN_TELEGRAM_IDS.size, adminPanelUrl: adminPanelUrl(), webhookInfo } }); }));
 app.post('/api/admin/bot/setup-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { if (!PUBLIC_URL) return res.status(400).json({ success: false, message: 'PUBLIC_URL kerak.' }); const identity = await syncTelegramBotIdentity(); const result = await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); res.json({ success: Boolean(result.ok), bot: identity, result }); }));
 app.post('/api/admin/bot/delete-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { const result = await telegramApi('deleteWebhook', { drop_pending_updates: false }); res.json({ success: Boolean(result.ok), result }); }));
