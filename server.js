@@ -216,7 +216,7 @@ const productSchema = new mongoose.Schema({
   galleryUrls: { type: [String], default: [] },
   galleryPublicIds: { type: [String], default: [] },
   emoji: { type: String, default: '' },
-  variants: [{ label: { type: String, default: '' }, color: { type: String, default: '' }, size: { type: String, default: '' }, sku: { type: String, default: '' }, price: { type: Number, default: 0 }, oldPrice: { type: Number, default: 0 }, stockQty: { type: Number, default: 0 } }],
+  variants: [{ label: { type: String, default: '' }, color: { type: String, default: '' }, size: { type: String, default: '' }, sku: { type: String, default: '' }, price: { type: Number, default: 0 }, oldPrice: { type: Number, default: 0 }, stockQty: { type: Number, default: 0 }, imageUrl: { type: String, default: '' }, imagePublicId: { type: String, default: '' } }],
   available: { type: Boolean, default: true },
   featured: { type: Boolean, default: false },
   promoEligible: { type: Boolean, default: true },
@@ -388,7 +388,7 @@ function parseVariantsText(value) {
   const rows = String(value || '').split(/\n+/).map((x) => x.trim()).filter(Boolean);
   return rows.map((row, idx) => {
     const parts = row.split('|').map((x) => x.trim());
-    const [label, color, size, price, oldPrice, stockQty, sku] = parts;
+    const [label, color, size, price, oldPrice, stockQty, sku, imageUrl] = parts;
     return {
       label: label || [color, size].filter(Boolean).join(' / ') || `Variant ${idx + 1}`,
       color: color || '',
@@ -397,8 +397,33 @@ function parseVariantsText(value) {
       oldPrice: normalizeNumber(oldPrice),
       stockQty: normalizeNumber(stockQty),
       sku: String(sku || `${(label || color || size || 'variant').toLowerCase().replace(/\s+/g, '-')}-${idx + 1}`).slice(0, 60),
+      imageUrl: String(imageUrl || '').trim(),
+      imagePublicId: '',
     };
-  }).filter((v) => v.label && v.price > 0);
+  }).filter((v) => v.label);
+}
+function filesByField(files = [], fieldName) {
+  if (!Array.isArray(files)) return [];
+  return files.filter((file) => file.fieldname === fieldName);
+}
+function uniqueProductImages(productLike = {}) {
+  const variants = Array.isArray(productLike.variants) ? productLike.variants : [];
+  return [...new Set([
+    productLike.imageUrl,
+    ...((productLike.galleryUrls || []).filter(Boolean)),
+    ...variants.map((v) => v.imageUrl).filter(Boolean),
+  ].filter(Boolean))].slice(0, 8);
+}
+async function attachVariantImages(variants = [], files = []) {
+  if (!Array.isArray(variants) || !variants.length || !Array.isArray(files) || !files.length) return variants;
+  for (let i = 0; i < variants.length; i += 1) {
+    const file = files.find((f) => f.fieldname === `variantImage_${i}`) || files[i];
+    if (!file) continue;
+    const uploaded = await uploadToCloudinary(file, 'giftgo/products/variants');
+    variants[i].imageUrl = uploaded.url;
+    variants[i].imagePublicId = uploaded.publicId;
+  }
+  return variants;
 }
 async function getProductRatingSummary(productId) {
   const rows = await Review.aggregate([{ $match: { productId: new mongoose.Types.ObjectId(String(productId)), active: true } }, { $group: { _id: '$productId', avgRating: { $avg: '$rating' }, reviewCount: { $sum: 1 } } }]);
@@ -413,7 +438,7 @@ function parsePrefixedLocation(body = {}, prefix = '') {
 }
 function publicProduct(p) {
   const galleryUrls = Array.isArray(p.galleryUrls) ? p.galleryUrls.filter(Boolean).slice(0, 3) : [];
-  const images = [...new Set([p.imageUrl, ...galleryUrls].filter(Boolean))].slice(0, 4);
+  const images = uniqueProductImages({ imageUrl: p.imageUrl, galleryUrls, variants: p.variants || [] });
   return {
     _id: p._id, name: p.name, category: p.category, productType: p.productType, description: p.description,
     shortDescription: p.shortDescription, packageIncludes: p.packageIncludes, composition: p.composition,
@@ -422,7 +447,7 @@ function publicProduct(p) {
     preparationNote: p.preparationNote, careInstructions: p.careInstructions, deliveryNotes: p.deliveryNotes,
     serviceKind: p.serviceKind, serviceFormat: p.serviceFormat, serviceDuration: p.serviceDuration, servicePerformer: p.servicePerformer,
     serviceLocationType: p.serviceLocationType, serviceIncludes: p.serviceIncludes, serviceRequirements: p.serviceRequirements, requiredClientInfo: p.requiredClientInfo, serviceScriptPrompt: p.serviceScriptPrompt,
-    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, variants: (p.variants || []).map((v) => ({ label: v.label, color: v.color, size: v.size, sku: v.sku, price: v.price, oldPrice: v.oldPrice, stockQty: v.stockQty })), available: p.available,
+    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, variants: (p.variants || []).map((v) => ({ label: v.label, color: v.color, size: v.size, sku: v.sku, price: v.price, oldPrice: v.oldPrice, stockQty: v.stockQty, imageUrl: v.imageUrl || '' })), available: p.available,
     featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent,
     minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort
   };
@@ -464,23 +489,23 @@ async function seedDefaults() {
   ]);
   const productCount = await Product.countDocuments();
   if (!productCount) await Product.insertMany([
-    { name: 'Tezkor random gul buketi', category: 'Gullar', productType: 'FLOWER', description: '1 soat ichida byudjetga mos random sovg‘a/gul. Shakl va tur mavjud holatga qarab tanlanadi.', price: settings.expressRandomMinAmount || 100000, emoji: '🌹', featured: true, expressRandomAllowed: true, minLeadDays: 0, sort: 1 },
-    { name: 'Romantik buket', category: 'Gullar', productType: 'FLOWER', description: 'Oldindan buyurtma asosida chiroyli buket.', price: 180000, emoji: '💐', featured: true, minLeadDays: 4, sort: 2 },
-    { name: 'Premium sovg‘a box', category: 'Sovg‘a box', productType: 'GIFT_BOX', description: 'Shirinlik, ichimlik, otkritka va dekor bilan.', price: 220000, emoji: '🎁', featured: true, minLeadDays: 4, sort: 3 },
-    { name: 'Tug‘ilgan kun torti', category: 'Tortlar', productType: 'CAKE', description: 'Buyurtma asosida tort. Matn va dizaynni izohda yozing.', price: 250000, emoji: '🎂', minLeadDays: 4, sort: 4 },
-    { name: 'Shirinlik set', category: 'Shirinliklar', productType: 'SWEET', description: 'Konfet, pechenye va shirinliklar to‘plami.', price: 90000, emoji: '🍬', minLeadDays: 2, sort: 5 },
-    { name: 'Ichimliklar seti', category: 'Ichimliklar', productType: 'DRINK', description: 'Sovuq ichimliklar to‘plami.', price: 45000, emoji: '🥤', minLeadDays: 1, sort: 6 },
-    { name: 'Fast food set', category: 'Fast food', productType: 'FAST_FOOD', description: 'Bayram uchun tezkor yegulik seti.', price: 120000, emoji: '🍔', minLeadDays: 1, sort: 7 },
-    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '📞', featured: true, minLeadDays: 4, sort: 8 },
-    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '🎬', minLeadDays: 4, sort: 9 },
-    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '🎸', minLeadDays: 4, sort: 10 },
-    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '✨', minLeadDays: 4, sort: 11 },
+    { name: 'Tezkor random gul buketi', category: 'Gullar', productType: 'FLOWER', description: '1 soat ichida byudjetga mos random sovg‘a/gul. Shakl va tur mavjud holatga qarab tanlanadi.', price: settings.expressRandomMinAmount || 100000, emoji: '', featured: true, expressRandomAllowed: true, minLeadDays: 0, sort: 1 },
+    { name: 'Romantik buket', category: 'Gullar', productType: 'FLOWER', description: 'Oldindan buyurtma asosida chiroyli buket.', price: 180000, emoji: '', featured: true, minLeadDays: 4, sort: 2 },
+    { name: 'Premium sovg‘a box', category: 'Sovg‘a box', productType: 'GIFT_BOX', description: 'Shirinlik, ichimlik, otkritka va dekor bilan.', price: 220000, emoji: '', featured: true, minLeadDays: 4, sort: 3 },
+    { name: 'Tug‘ilgan kun torti', category: 'Tortlar', productType: 'CAKE', description: 'Buyurtma asosida tort. Matn va dizaynni izohda yozing.', price: 250000, emoji: '', minLeadDays: 4, sort: 4 },
+    { name: 'Shirinlik set', category: 'Shirinliklar', productType: 'SWEET', description: 'Konfet, pechenye va shirinliklar to‘plami.', price: 90000, emoji: '', minLeadDays: 2, sort: 5 },
+    { name: 'Ichimliklar seti', category: 'Ichimliklar', productType: 'DRINK', description: 'Sovuq ichimliklar to‘plami.', price: 45000, emoji: '', minLeadDays: 1, sort: 6 },
+    { name: 'Fast food set', category: 'Fast food', productType: 'FAST_FOOD', description: 'Bayram uchun tezkor yegulik seti.', price: 120000, emoji: '', minLeadDays: 1, sort: 7 },
+    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '', featured: true, minLeadDays: 4, sort: 8 },
+    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '', minLeadDays: 4, sort: 9 },
+    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '', minLeadDays: 4, sort: 10 },
+    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '', minLeadDays: 4, sort: 11 },
   ]);
   const defaultServiceProducts = [
-    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '📞', featured: true, minLeadDays: 4, sort: 8 },
-    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '🎬', minLeadDays: 4, sort: 9 },
-    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '🎸', minLeadDays: 4, sort: 10 },
-    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '✨', minLeadDays: 4, sort: 11 },
+    { name: 'Telefon orqali tabrik', category: 'Xizmatlar', productType: 'SERVICE', description: 'Operator yoki ijrochi qo‘ng‘iroq qilib tabriklaydi. Matn va vaqtni reja izohida yozing.', price: 70000, emoji: '', featured: true, minLeadDays: 4, sort: 8 },
+    { name: 'Audio/video tabrik montaji', category: 'Xizmatlar', productType: 'SERVICE', description: 'Rasm, video va ovozdan chiroyli tabrik montaji. Materiallarni izohda kelishiladi.', price: 150000, emoji: '', minLeadDays: 4, sort: 9 },
+    { name: 'Gitara bilan qo‘shiqchi', category: 'Xizmatlar', productType: 'SERVICE', description: 'Oldindan kelishilgan manzil va vaqtda jonli tabrik xizmati.', price: 350000, emoji: '', minLeadDays: 4, sort: 10 },
+    { name: 'Dekorativ yozuv', category: 'Xizmatlar', productType: 'SERVICE', description: 'Onajonim, Otajonim, Happy Birthday kabi dekor yozuvlari.', price: 120000, emoji: '', minLeadDays: 4, sort: 11 },
   ];
   for (const item of defaultServiceProducts) {
     const exists = await Product.exists({ name: item.name });
@@ -695,14 +720,14 @@ async function answerStart(chatId, fromUser = null, startArg = '') {
   const settings = await getSettingsDoc();
   const url = startArg ? webAppStartUrl(startArg) : WEBAPP_URL;
   const buttons = [];
-  if (url) buttons.push([{ text: '🎁 Mini appni ochish', web_app: { url } }]);
-  if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: '🛡 Boshqaruv paneli', web_app: { url: adminPanelUrl() } }]);
+  if (url) buttons.push([{ text: 'Mini appni ochish', web_app: { url } }]);
+  if (fromUser?.id && isAdminTelegramId(fromUser.id) && adminPanelUrl()) buttons.push([{ text: 'Boshqaruv paneli', web_app: { url: adminPanelUrl() } }]);
   const supportRows = [];
   // Telegram inline keyboard URL tugmasi tel: linkni qabul qilmaydi.
   // Shu sabab /start javobsiz qolmasligi uchun telefon callback orqali alertda ko‘rsatiladi.
-  supportRows.push({ text: '📞 Telefon raqam', callback_data: 'phone' });
+  supportRows.push({ text: 'Telefon raqam', callback_data: 'phone' });
   const tgUrl = supportTelegramUrl(settings);
-  if (tgUrl) supportRows.push({ text: '💬 Telegram chat', url: tgUrl });
+  if (tgUrl) supportRows.push({ text: 'Telegram chat', url: tgUrl });
   if (supportRows.length) buttons.push(supportRows);
   const text = url
     ? `Assalomu alaykum! ${settings.brandName} mini ilovasiga xush kelibsiz. Buyurtmalar kamida ${settings.scheduledMinLeadDays || 4} kun oldin qabul qilinadi. To‘lov oldindan Paynet/Click/Uzum/Xazna orqali yuboriladi, keyin chek rasmi orqali tasdiqlanadi.`
@@ -714,7 +739,7 @@ async function handleTelegramUpdate(update) {
   if (callback?.id) { if (callback.data === 'phone') { const s = await getSettingsDoc(); await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: s.supportPhone || s.businessPhone || s.restaurantPhone || 'Telefon raqam sozlanmagan', show_alert: true }); return; } await telegramApi('answerCallbackQuery', { callback_query_id: callback.id }); return; }
   const chatId = message?.chat?.id; const fromUser = message?.from || null; const text = String(message?.text || '').trim(); if (!chatId) return;
   if (text.startsWith('/start')) { const startArg = text.split(/\s+/)[1] || ''; await answerStart(chatId, fromUser, startArg); return; }
-  if (text.startsWith('/admin')) { if (!fromUser?.id || !isAdminTelegramId(fromUser.id)) { await telegramApi('sendMessage', { chat_id: chatId, text: `⛔ Boshqaruv paneli faqat ruxsat berilgan Telegram raqam uchun ochiladi.\n\n${adminAccessHelp()}\n\nID olish uchun /id yuboring.` }); return; } if (!adminPanelUrl()) { await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli havolasi hali sozlanmagan. PUBLIC_URL ni real HTTPS domen qilib kiriting.' }); return; } await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli:', reply_markup: { inline_keyboard: [[{ text: 'Boshqaruv panelini ochish', web_app: { url: adminPanelUrl() } }]] } }); return; }
+  if (text.startsWith('/admin')) { if (!fromUser?.id || !isAdminTelegramId(fromUser.id)) { await telegramApi('sendMessage', { chat_id: chatId, text: `Boshqaruv paneli faqat ruxsat berilgan Telegram raqam uchun ochiladi.\n\n${adminAccessHelp()}\n\nID olish uchun /id yuboring.` }); return; } if (!adminPanelUrl()) { await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli havolasi hali sozlanmagan. PUBLIC_URL ni real HTTPS domen qilib kiriting.' }); return; } await telegramApi('sendMessage', { chat_id: chatId, text: 'Boshqaruv paneli:', reply_markup: { inline_keyboard: [[{ text: 'Boshqaruv panelini ochish', web_app: { url: adminPanelUrl() } }]] } }); return; }
   if (text.startsWith('/id')) { await telegramApi('sendMessage', { chat_id: chatId, text: `Telegram raqami: ${fromUser?.id || 'unknown'}\nChat raqami: ${chatId}\n\nBoshqaruv paneli uchun ruxsat ro‘yxatiga Telegram raqamini kiriting.` }); return; }
   await answerStart(chatId, fromUser);
 }
@@ -847,9 +872,9 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
     orderNo: nextHumanNo(orderMode === 'EXPRESS_RANDOM' ? 'FAST' : 'GIFT'), userTelegramId: String(req.tgUser.id), userUsername: req.tgUser.username || '', userFullName: userFullName(req.tgUser, req.body.fullName), phone, type, orderContentType, orderMode, eventType: String(req.body.eventType || '').trim(), deliveryDate, deliveryTime, recipientName: recipientInfo.fullName || String(req.body.recipientName || '').trim(), recipientPhone: recipientInfo.phone || String(req.body.recipientPhone || '').trim(), buyerInfo, recipientInfo, productDetails, serviceDetails, cardMessage: String(req.body.cardMessage || '').trim(), noComplaintAgreement, agreementText: noComplaintAgreement ? settings.expressAgreementText : '', address: String(req.body.address || '').trim(), customerLocation: customerLocation || undefined, businessLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, restaurantLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, distanceKm: quote.distanceKm || 0, lastLocationAt: customerLocation ? new Date() : undefined, liveLocationEnabled: parseBoolean(req.body.liveLocationEnabled, false), deliveryServiceId, deliveryServiceTitle: quote.title || fallbackService?.title || (type === 'PICKUP' ? 'Olib ketish' : 'Yetkazib berish'), items: cart.items, subtotal: cart.subtotal, deliveryFee: quote.deliveryFee, discountAmount, firstOrderDiscount, promoCode: promo.code, promoDiscount: promo.amount, referralDiscount, bonusUsed, bonusEarned, total, deliveryPricing: { baseFee: quote.baseFee, baseKm: quote.baseKm, pricePerKm: quote.pricePerKm, maxKm: quote.maxKm, mode: quote.mode, zoneStatus: quote.zoneStatus }, paymentMethod, paymentProvider, paymentScreenshotUrl: uploaded?.url || '', paymentScreenshotPublicId: uploaded?.publicId || '', note: String(req.body.note || '').trim(), planNote: String(req.body.planNote || req.body.note || '').trim(), reminderFrequency: 'DAILY', reminderNote: 'Oldindan buyurtmani nazorat qilish', reminderNextAt: nextReminderAt('DAILY'),
   });
   if (promo.promoId) await PromoCode.updateOne({ _id: promo.promoId }, { $inc: { usedCount: 1 } });
-  const locationLine = customerLocation ? `\n🗺 Masofa: ${quote.distanceKm} km\n📍 Xarita: ${quote.mapUrl}` : '';
-  const randomLine = orderMode === 'EXPRESS_RANDOM' ? `\n⚡ Tezkor random: rozilik olindi` : `\n📅 Oldindan buyurtma: ${deliveryDate} ${deliveryTime}`;
-  await notifyAdmin(`🎁 <b>Yangi buyurtma</b>\n#${order.orderNo}\n👤 ${order.userFullName}\n📞 ${order.phone}\n🎯 ${order.eventType || '-'}\n🚚 ${order.deliveryServiceTitle}\n🚕 Yetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\n🎟 Chegirma: ${formatMoney(order.discountAmount, settings.currency)}\n💰 Jami: ${formatMoney(order.total, settings.currency)}${randomLine}\n💳 To‘lov: ${paymentProvider} orqali oldindan + admin tasdiq${uploaded?.url ? '\n🧾 Chek biriktirilgan' : ''}${locationLine}\n📌 Holat: ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}`, order.paymentScreenshotUrl);
+  const locationLine = customerLocation ? `\nMasofa: ${quote.distanceKm} km\nXarita: ${quote.mapUrl}` : '';
+  const randomLine = orderMode === 'EXPRESS_RANDOM' ? `\nTezkor random: rozilik olindi` : `\nOldindan buyurtma: ${deliveryDate} ${deliveryTime}`;
+  await notifyAdmin(`<b>Yangi buyurtma</b>\n#${order.orderNo}\nMijoz: ${order.userFullName}\nTelefon: ${order.phone}\nSabab: ${order.eventType || '-'}\nXizmat: ${order.deliveryServiceTitle}\nYetkazish: ${formatMoney(order.deliveryFee, settings.currency)}\nChegirma: ${formatMoney(order.discountAmount, settings.currency)}\nJami: ${formatMoney(order.total, settings.currency)}${randomLine}\nTo‘lov: ${paymentProvider} orqali oldindan + admin tasdiq${uploaded?.url ? '\nChek biriktirilgan' : ''}${locationLine}\nHolat: ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}`, order.paymentScreenshotUrl);
   res.status(201).json({ success: true, order });
 }));
 
@@ -887,7 +912,7 @@ app.patch('/api/admin/orders/:id', verifyAdminToken, asyncHandler(async (req, re
   let order = await Order.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
   if (!order) return res.status(404).json({ success: false, message: 'Buyurtma topilmadi.' });
   order = await finalizeOrderRewards(order);
-  await notifyCustomer(order.userTelegramId, `🎁 <b>Buyurtma holati yangilandi</b>
+  await notifyCustomer(order.userTelegramId, `<b>Buyurtma holati yangilandi</b>
 #${order.orderNo}
 To‘lov: ${paymentStatusText(order.paymentStatus)}
 Holat: ${orderStatusText(order.orderStatus)}
@@ -897,8 +922,9 @@ Bonus: ${formatMoney(order.bonusEarned || 0)}`);
 app.get('/api/admin/customers', verifyAdminToken, asyncHandler(async (_req, res) => { const customers = await Customer.find().sort({ createdAt: -1 }).limit(300); res.json({ success: true, customers }); }));
 
 app.get('/api/admin/products', verifyAdminToken, asyncHandler(async (_req, res) => { const products = await Product.find().sort({ sort: 1, createdAt: -1 }); res.json({ success: true, products }); }));
-app.post('/api/admin/products', verifyAdminToken, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'gallery', maxCount: 3 }]), asyncHandler(async (req, res) => {
-  const imageFiles = [...(req.files?.image || []), ...(req.files?.gallery || [])].slice(0, 4);
+app.post('/api/admin/products', verifyAdminToken, upload.any(), asyncHandler(async (req, res) => {
+  const imageFiles = [...filesByField(req.files, 'image'), ...filesByField(req.files, 'gallery')].slice(0, 4);
+  const variantImageFiles = (req.files || []).filter((file) => /^variantImage_\d+$/.test(file.fieldname) || file.fieldname === 'variantImages').slice(0, 30);
   const uploadedImages = [];
   for (const file of imageFiles) uploadedImages.push(await uploadToCloudinary(file, 'giftgo/products'));
   const primaryImage = uploadedImages[0] || null;
@@ -913,10 +939,11 @@ app.post('/api/admin/products', verifyAdminToken, upload.fields([{ name: 'image'
     cashbackPercentOverride: normalizeNumber(req.body.cashbackPercentOverride), minLeadDays: normalizeNumber(req.body.minLeadDays ?? 4), expressRandomAllowed: parseBoolean(req.body.expressRandomAllowed, false), sort: normalizeNumber(req.body.sort || 100),
   };
   applyProductAdminPayload(productData, req.body);
+  await attachVariantImages(productData.variants, variantImageFiles);
   const product = await Product.create(productData);
   res.status(201).json({ success: true, product });
 }));
-app.patch('/api/admin/products/:id', verifyAdminToken, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'gallery', maxCount: 3 }]), asyncHandler(async (req, res) => {
+app.patch('/api/admin/products/:id', verifyAdminToken, upload.any(), asyncHandler(async (req, res) => {
   ensureObjectId(req.params.id, 'Mahsulot ID');
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ success: false, message: 'Mahsulot topilmadi.' });
@@ -925,7 +952,8 @@ app.patch('/api/admin/products/:id', verifyAdminToken, upload.fields([{ name: 'i
   if (req.body.promoCode !== undefined) product.promoCode = normalizePromoCode(req.body.promoCode);
   for (const f of ['available', 'featured', 'promoEligible', 'expressRandomAllowed']) if (req.body[f] !== undefined) product[f] = parseBoolean(req.body[f], product[f]);
   applyProductAdminPayload(product, req.body);
-  const imageFiles = [...(req.files?.image || []), ...(req.files?.gallery || [])].slice(0, 4);
+  await attachVariantImages(product.variants, (req.files || []).filter((file) => /^variantImage_\d+$/.test(file.fieldname) || file.fieldname === 'variantImages').slice(0, 30));
+  const imageFiles = [...filesByField(req.files, 'image'), ...filesByField(req.files, 'gallery')].slice(0, 4);
   if (imageFiles.length) {
     const uploadedImages = [];
     for (const file of imageFiles) uploadedImages.push(await uploadToCloudinary(file, 'giftgo/products'));
@@ -990,15 +1018,15 @@ async function processAdminReminders() {
     }).sort({ reminderNextAt: 1 }).limit(20);
     for (const order of due) {
       const loc = order.customerLocation?.lat ? `
-📍 ${makeMapUrl(order.customerLocation.lat, order.customerLocation.lng)}` : '';
-      await notifyAdmin(`🔔 <b>Renotif</b>
+${makeMapUrl(order.customerLocation.lat, order.customerLocation.lng)}` : '';
+      await notifyAdmin(`<b>Renotif</b>
 #${order.orderNo}
-📅 ${order.deliveryDate || '-'} ${order.deliveryTime || ''}
-👤 ${order.userFullName || '-'} · ${order.phone || ''}
-🎯 ${order.eventType || '-'}
-💰 ${formatMoney(order.total || 0)}
-📌 ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}
-📝 ${order.reminderNote || order.adminNote || order.planNote || order.note || '-'}${loc}`);
+Sana: ${order.deliveryDate || '-'} ${order.deliveryTime || ''}
+Mijoz: ${order.userFullName || '-'} · ${order.phone || ''}
+Sabab: ${order.eventType || '-'}
+Jami: ${formatMoney(order.total || 0)}
+Holat: ${orderStatusText(order.orderStatus)} / ${paymentStatusText(order.paymentStatus)}
+Izoh: ${order.reminderNote || order.adminNote || order.planNote || order.note || '-'}${loc}`);
       order.reminderLastSentAt = new Date();
       order.reminderNextAt = nextReminderAt(order.reminderFrequency, order.reminderLastSentAt);
       await order.save();
