@@ -217,6 +217,7 @@ const productSchema = new mongoose.Schema({
   galleryPublicIds: { type: [String], default: [] },
   emoji: { type: String, default: '' },
   variants: [{ label: { type: String, default: '' }, color: { type: String, default: '' }, size: { type: String, default: '' }, sku: { type: String, default: '' }, price: { type: Number, default: 0 }, oldPrice: { type: Number, default: 0 }, stockQty: { type: Number, default: 0 }, imageUrl: { type: String, default: '' }, imagePublicId: { type: String, default: '' } }],
+  customRequestFields: [{ key: { type: String, default: '' }, label: { type: String, default: '' }, description: { type: String, default: '' }, placeholder: { type: String, default: '' }, type: { type: String, default: 'TEXT' }, required: { type: Boolean, default: false } }],
   available: { type: Boolean, default: true },
   featured: { type: Boolean, default: false },
   promoEligible: { type: Boolean, default: true },
@@ -316,6 +317,7 @@ const orderSchema = new mongoose.Schema({
   },
   productDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
   serviceDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
+  customFieldAnswers: { type: [mongoose.Schema.Types.Mixed], default: [] },
   cardMessage: { type: String, default: '' },
   noComplaintAgreement: { type: Boolean, default: false },
   agreementText: { type: String, default: '' },
@@ -402,6 +404,55 @@ function parseVariantsText(value) {
     };
   }).filter((v) => v.label);
 }
+function parseCustomFields(value) {
+  const raw = safeJsonParse(value, []);
+  const items = Array.isArray(raw) ? raw : [];
+  return items.map((item, idx) => {
+    const label = String(item?.label || '').trim();
+    const keyBase = String(item?.key || label || `field-${idx + 1}`).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    if (!label) return null;
+    const type = String(item?.type || 'TEXT').trim().toUpperCase();
+    const allowed = new Set(['TEXT','TEXTAREA','PHONE','NUMBER','DATE','TIME','ADDRESS']);
+    return {
+      key: keyBase || `field-${idx + 1}`,
+      label,
+      description: String(item?.description || '').trim(),
+      placeholder: String(item?.placeholder || '').trim(),
+      type: allowed.has(type) ? type : 'TEXT',
+      required: Boolean(item?.required),
+    };
+  }).filter(Boolean);
+}
+function extractOrderCustomFieldAnswers(value, products = []) {
+  const submitted = Array.isArray(value) ? value : safeJsonParse(value, []);
+  const byKey = new Map((Array.isArray(submitted) ? submitted : []).map((item) => [String(item?.orderKey || item?.key || '').trim(), String(item?.value || '').trim()]));
+  const answers = [];
+  for (const product of products || []) {
+    const fields = Array.isArray(product.customRequestFields) ? product.customRequestFields : [];
+    for (const field of fields) {
+      const orderKey = `${String(product._id)}__${String(field.key || '').trim()}`;
+      const value = String(byKey.get(orderKey) || '').trim();
+      if (field.required && !value) {
+        const err = new Error(`"${product.name}" uchun "${field.label}" maydonini to‘ldiring.`);
+        err.status = 400;
+        throw err;
+      }
+      answers.push({
+        productId: String(product._id),
+        productName: String(product.name || ''),
+        orderKey,
+        key: String(field.key || ''),
+        label: String(field.label || ''),
+        description: String(field.description || ''),
+        placeholder: String(field.placeholder || ''),
+        type: String(field.type || 'TEXT'),
+        required: Boolean(field.required),
+        value,
+      });
+    }
+  }
+  return answers.filter((item) => item.label);
+}
 function filesByField(files = [], fieldName) {
   if (!Array.isArray(files)) return [];
   return files.filter((file) => file.fieldname === fieldName);
@@ -447,7 +498,7 @@ function publicProduct(p) {
     preparationNote: p.preparationNote, careInstructions: p.careInstructions, deliveryNotes: p.deliveryNotes,
     serviceKind: p.serviceKind, serviceFormat: p.serviceFormat, serviceDuration: p.serviceDuration, servicePerformer: p.servicePerformer,
     serviceLocationType: p.serviceLocationType, serviceIncludes: p.serviceIncludes, serviceRequirements: p.serviceRequirements, requiredClientInfo: p.requiredClientInfo, serviceScriptPrompt: p.serviceScriptPrompt,
-    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, variants: (p.variants || []).map((v) => ({ label: v.label, color: v.color, size: v.size, sku: v.sku, price: v.price, oldPrice: v.oldPrice, stockQty: v.stockQty, imageUrl: v.imageUrl || '' })), available: p.available,
+    price: p.price, oldPrice: p.oldPrice, imageUrl: p.imageUrl, galleryUrls, images, emoji: p.emoji, variants: (p.variants || []).map((v) => ({ label: v.label, color: v.color, size: v.size, sku: v.sku, price: v.price, oldPrice: v.oldPrice, stockQty: v.stockQty, imageUrl: v.imageUrl || '' })), customRequestFields: (p.customRequestFields || []).map((f) => ({ key: f.key, label: f.label, description: f.description, placeholder: f.placeholder, type: f.type, required: !!f.required })), available: p.available,
     featured: p.featured, promoEligible: p.promoEligible, promoCode: p.promoCode, promoDiscountPercent: p.promoDiscountPercent,
     minLeadDays: p.minLeadDays, expressRandomAllowed: p.expressRandomAllowed, sort: p.sort
   };
@@ -461,6 +512,7 @@ function applyProductAdminPayload(target, body = {}) {
   for (const f of numberFields) if (body[f] !== undefined) target[f] = normalizeNumber(body[f]);
   if (body.stockQty !== undefined) target.stockQty = normalizeNumber(body.stockQty);
   if (body.variantsText !== undefined) target.variants = parseVariantsText(body.variantsText);
+  if (body.customFieldsJson !== undefined) target.customRequestFields = parseCustomFields(body.customFieldsJson);
   return target;
 }
 function orderContentTypeFromProducts(products = []) {
@@ -838,6 +890,7 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
     surpriseMode: parseBoolean(req.body.serviceSecretMode, false), placeNote: String(req.body.servicePlaceNote || '').trim(),
     specialRequirements: String(req.body.serviceSpecialRequirements || '').trim(),
   };
+  const customFieldAnswers = extractOrderCustomFieldAnswers(req.body.customFieldAnswers, cart.products);
 
   // GiftGo modeli: faqat oldindan P2P ilova/havola orqali to‘lov + chek rasmi + boshqaruvchi tasdig‘i.
   const paymentMethod = 'CARD_TRANSFER';
@@ -869,7 +922,7 @@ app.post('/api/orders', upload.single('screenshot'), telegramAuth, asyncHandler(
   const bonusEarned = Math.floor(Math.max(0, cart.subtotal - discountAmount) * cashbackPercent / 100);
   const uploaded = req.file ? await uploadToCloudinary(req.file, 'giftgo/payments/orders') : null;
   const order = await Order.create({
-    orderNo: nextHumanNo(orderMode === 'EXPRESS_RANDOM' ? 'FAST' : 'GIFT'), userTelegramId: String(req.tgUser.id), userUsername: req.tgUser.username || '', userFullName: userFullName(req.tgUser, req.body.fullName), phone, type, orderContentType, orderMode, eventType: String(req.body.eventType || '').trim(), deliveryDate, deliveryTime, recipientName: recipientInfo.fullName || String(req.body.recipientName || '').trim(), recipientPhone: recipientInfo.phone || String(req.body.recipientPhone || '').trim(), buyerInfo, recipientInfo, productDetails, serviceDetails, cardMessage: String(req.body.cardMessage || '').trim(), noComplaintAgreement, agreementText: noComplaintAgreement ? settings.expressAgreementText : '', address: String(req.body.address || '').trim(), customerLocation: customerLocation || undefined, businessLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, restaurantLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, distanceKm: quote.distanceKm || 0, lastLocationAt: customerLocation ? new Date() : undefined, liveLocationEnabled: parseBoolean(req.body.liveLocationEnabled, false), deliveryServiceId, deliveryServiceTitle: quote.title || fallbackService?.title || (type === 'PICKUP' ? 'Olib ketish' : 'Yetkazib berish'), items: cart.items, subtotal: cart.subtotal, deliveryFee: quote.deliveryFee, discountAmount, firstOrderDiscount, promoCode: promo.code, promoDiscount: promo.amount, referralDiscount, bonusUsed, bonusEarned, total, deliveryPricing: { baseFee: quote.baseFee, baseKm: quote.baseKm, pricePerKm: quote.pricePerKm, maxKm: quote.maxKm, mode: quote.mode, zoneStatus: quote.zoneStatus }, paymentMethod, paymentProvider, paymentScreenshotUrl: uploaded?.url || '', paymentScreenshotPublicId: uploaded?.publicId || '', note: String(req.body.note || '').trim(), planNote: String(req.body.planNote || req.body.note || '').trim(), reminderFrequency: 'DAILY', reminderNote: 'Oldindan buyurtmani nazorat qilish', reminderNextAt: nextReminderAt('DAILY'),
+    orderNo: nextHumanNo(orderMode === 'EXPRESS_RANDOM' ? 'FAST' : 'GIFT'), userTelegramId: String(req.tgUser.id), userUsername: req.tgUser.username || '', userFullName: userFullName(req.tgUser, req.body.fullName), phone, type, orderContentType, orderMode, eventType: String(req.body.eventType || '').trim(), deliveryDate, deliveryTime, recipientName: recipientInfo.fullName || String(req.body.recipientName || '').trim(), recipientPhone: recipientInfo.phone || String(req.body.recipientPhone || '').trim(), buyerInfo, recipientInfo, productDetails, serviceDetails, customFieldAnswers, cardMessage: String(req.body.cardMessage || '').trim(), noComplaintAgreement, agreementText: noComplaintAgreement ? settings.expressAgreementText : '', address: String(req.body.address || '').trim(), customerLocation: customerLocation || undefined, businessLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, restaurantLocationSnapshot: quote.businessLocation || getBusinessLocation(settings) || undefined, distanceKm: quote.distanceKm || 0, lastLocationAt: customerLocation ? new Date() : undefined, liveLocationEnabled: parseBoolean(req.body.liveLocationEnabled, false), deliveryServiceId, deliveryServiceTitle: quote.title || fallbackService?.title || (type === 'PICKUP' ? 'Olib ketish' : 'Yetkazib berish'), items: cart.items, subtotal: cart.subtotal, deliveryFee: quote.deliveryFee, discountAmount, firstOrderDiscount, promoCode: promo.code, promoDiscount: promo.amount, referralDiscount, bonusUsed, bonusEarned, total, deliveryPricing: { baseFee: quote.baseFee, baseKm: quote.baseKm, pricePerKm: quote.pricePerKm, maxKm: quote.maxKm, mode: quote.mode, zoneStatus: quote.zoneStatus }, paymentMethod, paymentProvider, paymentScreenshotUrl: uploaded?.url || '', paymentScreenshotPublicId: uploaded?.publicId || '', note: String(req.body.note || '').trim(), planNote: String(req.body.planNote || req.body.note || '').trim(), reminderFrequency: 'DAILY', reminderNote: 'Oldindan buyurtmani nazorat qilish', reminderNextAt: nextReminderAt('DAILY'),
   });
   if (promo.promoId) await PromoCode.updateOne({ _id: promo.promoId }, { $inc: { usedCount: 1 } });
   const locationLine = customerLocation ? `\nMasofa: ${quote.distanceKm} km\nXarita: ${quote.mapUrl}` : '';
