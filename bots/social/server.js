@@ -56,6 +56,7 @@ function normalizeTelegramUsername(value) {
 }
 const ADMIN_TELEGRAM_USERNAME = normalizeTelegramUsername(firstEnv('SOCIAL_ADMIN_TELEGRAM_USERNAME', 'ADMIN_TELEGRAM_USERNAME', 'ADMIN_USERNAME'));
 const ADMIN_TELEGRAM_URL = cleanPublicUrl(firstEnv('SOCIAL_ADMIN_TELEGRAM_URL', 'ADMIN_TELEGRAM_URL')) || (ADMIN_TELEGRAM_USERNAME ? `https://t.me/${ADMIN_TELEGRAM_USERNAME}` : '');
+const GROUP_CHAT_URL = cleanPublicUrl(firstEnv('SOCIAL_GROUP_CHAT_URL', 'GROUP_CHAT_URL', 'SOCIAL_TRADE_CHAT_URL')) || ADMIN_TELEGRAM_URL;
 const BRAND_NAME = firstEnv('SOCIAL_BRAND_NAME', 'BRAND_NAME') || 'Garant Market';
 const BRAND_SUBTITLE = firstEnv('SOCIAL_BRAND_SUBTITLE', 'BRAND_SUBTITLE') || 'Ijtimoiy tarmoq hisoblari savdosi va garant bitimlar';
 
@@ -168,6 +169,12 @@ const requestSchema = new mongoose.Schema({
   telegramUsername: { type: String, default: '' },
   telegramFullName: { type: String, default: '' },
   transferMethod: { type: String, default: '' },
+  contactName: { type: String, default: '' },
+  contactPhone: { type: String, default: '' },
+  contactTelegram: { type: String, default: '' },
+  referralCode: { type: String, default: '', index: true },
+  referredBy: { type: String, default: '', index: true },
+  startParam: { type: String, default: '' },
   proofImages: [{ url: String, publicId: String, local: Boolean }],
   extra: { type: mongoose.Schema.Types.Mixed, default: {} },
   note: { type: String, default: '' },
@@ -179,19 +186,25 @@ const SocialService = mongoose.model('SocialService', serviceSchema);
 const SocialRequest = mongoose.model('SocialRequest', requestSchema);
 
 const DEFAULT_SERVICES = [
-  { title: 'YouTube kanal savdosi', category: 'accounts', platform: 'youtube', badge: 'Eng talabgir', description: 'YouTube kanalni sotish, sotib olish yoki garant orqali xavfsiz bitim qilish.', priceFrom: 0, sort: 10, requiredFields: ['Kanal havolasi', 'Obunachi soni', 'Monetizatsiya holati', 'Narx'] },
-  { title: 'Instagram akkaunt savdosi', category: 'accounts', platform: 'instagram', badge: 'Tezkor', description: 'Instagram sahifa/akkaunt savdosi: auditoriya, niche, statistika va kelishuv nazorati.', priceFrom: 0, sort: 20, requiredFields: ['Profil username', 'Follower soni', 'Faollik', 'Narx'] },
-  { title: 'TikTok akkaunt savdosi', category: 'accounts', platform: 'tiktok', badge: 'Trend', description: 'TikTok akkauntlarni tekshirib, egasi roziligi bilan savdoga chiqarish.', priceFrom: 0, sort: 30, requiredFields: ['Profil link', 'Follower', 'Niche', 'Narx'] },
-  { title: 'Telegram kanal/guruh savdosi', category: 'accounts', platform: 'telegram', badge: 'Kanal', description: 'Telegram kanal, guruh yoki reklama kanallari bo‘yicha garantli savdo.', priceFrom: 0, sort: 40, requiredFields: ['Kanal linki', 'Aʼzo soni', 'Statistika', 'Narx'] },
-  { title: 'PUBG Mobile hisob savdosi', category: 'gaming', platform: 'pubg', badge: 'Gaming', description: 'PUBG Mobile hisoblari uchun maʼlumotlarni yig‘ish va garantli kelishuvga yuborish.', priceFrom: 0, sort: 50, requiredFields: ['Hisob ID', 'Level', 'Skinlar', 'Narx'] },
-  { title: 'Garant bitim xizmati', category: 'guarantee', platform: 'all', badge: 'Xavfsiz', description: 'Sotuvchi va xaridor o‘rtasida admin nazorati, dalillar, to‘lov va topshirish bosqichlari.', priceFrom: 0, sort: 5, requiredFields: ['Sotuvchi', 'Xaridor', 'Bitim summasi', 'Hisob havolasi'] },
-  { title: 'Reklama joylashtirish kanallari', category: 'promotion', platform: 'ads', badge: 'Reklama', description: 'Reklama kanallari, post joylash va hamkorlik bo‘yicha buyurtma qabul qilish.', priceFrom: 0, sort: 60, requiredFields: ['Kanal turi', 'Auditoriya', 'Muddat', 'Byudjet'] },
-  { title: 'Hisob tekshirish va maslahat', category: 'support', platform: 'all', badge: 'Tekshiruv', description: 'Akkaunt ko‘rsatkichlari, xavfsizlik va savdoga tayyorgarlik bo‘yicha admin bilan maslahat.', priceFrom: 0, sort: 70, requiredFields: ['Hisob turi', 'Muammo', 'Kontakt'] },
+  { title: 'Garant bitim xizmati', category: 'guarantee', platform: 'all', badge: 'Xavfsiz', description: 'Sotuvchi va xaridor uchun admin nazoratidagi garant bitim.', priceFrom: 0, sort: 5, requiredFields: ['Hisob havolasi', 'Bitim summasi', 'Kontakt'] },
+  { title: 'YouTube kanal savdosi', category: 'accounts', platform: 'youtube', badge: 'Talabgir', description: 'YouTube kanal sotish yoki sotib olish uchun tekshiruv va garant.', priceFrom: 0, sort: 10, requiredFields: ['Kanal havolasi', 'Obunachi', 'Narx'] },
+  { title: 'Instagram akkaunt savdosi', category: 'accounts', platform: 'instagram', badge: 'Tezkor', description: 'Instagram profil/sahifa savdosi uchun qisqa so‘rov va admin aloqa.', priceFrom: 0, sort: 20, requiredFields: ['Username', 'Follower', 'Narx'] },
+  { title: 'TikTok akkaunt savdosi', category: 'accounts', platform: 'tiktok', badge: 'Trend', description: 'TikTok akkaunt, auditoriya va aktivlik bo‘yicha savdo so‘rovi.', priceFrom: 0, sort: 30, requiredFields: ['Profil link', 'Follower', 'Narx'] },
+  { title: 'Telegram kanal/guruh savdosi', category: 'accounts', platform: 'telegram', badge: 'Kanal', description: 'Telegram kanal, guruh yoki reklama kanalini garant orqali savdo qilish.', priceFrom: 0, sort: 40, requiredFields: ['Kanal linki', 'Aʼzo', 'Narx'] },
+  { title: 'PUBG Mobile hisob savdosi', category: 'gaming', platform: 'pubg', badge: 'Gaming', description: 'PUBG hisob ID, level va skinlar bo‘yicha garantli kelishuv.', priceFrom: 0, sort: 50, requiredFields: ['Hisob ID', 'Level', 'Narx'] },
+  { title: 'Reklama kanallari savdosi', category: 'promotion', platform: 'ads', badge: 'Reklama', description: 'Reklama kanal sotish/sotib olish yoki post joylash bo‘yicha buyurtma.', priceFrom: 0, sort: 60, requiredFields: ['Kanal turi', 'Auditoriya', 'Byudjet'] },
+  { title: 'Hisob tekshirish va maslahat', category: 'support', platform: 'all', badge: 'Tekshiruv', description: 'Akkaunt xavfsizligi, ko‘rsatkichlari va savdoga tayyorligini tekshirish.', priceFrom: 0, sort: 70, requiredFields: ['Hisob turi', 'Muammo', 'Kontakt'] },
 ];
 
 async function seedDefaults() {
-  const count = await SocialService.countDocuments();
-  if (count === 0) await SocialService.insertMany(DEFAULT_SERVICES);
+  const ops = DEFAULT_SERVICES.map((service) => ({
+    updateOne: {
+      filter: { title: service.title },
+      update: { $setOnInsert: service, $set: { sort: service.sort, active: true } },
+      upsert: true,
+    },
+  }));
+  if (ops.length) await SocialService.bulkWrite(ops, { ordered: false });
 }
 
 function adminTokenPayload() { return `${Date.now() + ADMIN_TOKEN_TTL_MS}:${crypto.randomBytes(10).toString('hex')}`; }
@@ -266,6 +279,8 @@ function compactRequestMessage(doc) {
     doc.accountUsername || doc.accountLink ? `Hisob: ${escapeHtml(doc.accountUsername || doc.accountLink)}` : '',
     doc.audienceSize ? `Auditoriya: ${escapeHtml(doc.audienceSize)}` : '',
     doc.price ? `Summa: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
+    doc.contactTelegram || doc.contactPhone ? `Aloqa: ${escapeHtml(doc.contactName || '')} ${escapeHtml(doc.contactTelegram || doc.contactPhone || '')}` : '',
+    doc.referralCode ? `Referral: <code>${escapeHtml(doc.referralCode)}</code>` : '',
     doc.sellerTelegram || doc.sellerPhone ? `Sotuvchi: ${escapeHtml(doc.sellerName || '')} ${escapeHtml(doc.sellerTelegram || doc.sellerPhone || '')}` : '',
     doc.buyerTelegram || doc.buyerPhone ? `Xaridor: ${escapeHtml(doc.buyerName || '')} ${escapeHtml(doc.buyerTelegram || doc.buyerPhone || '')}` : '',
     doc.telegramUsername ? `Telegram: @${escapeHtml(doc.telegramUsername)}` : '',
@@ -279,6 +294,7 @@ async function notifyAdmins(doc) {
   if (!ADMIN_TELEGRAM_IDS.size) return;
   const inline_keyboard = [];
   if (adminPanelUrl()) inline_keyboard.push([{ text: 'Admin panelni ochish', url: adminPanelUrl() }]);
+  if (GROUP_CHAT_URL) inline_keyboard.push([{ text: 'Savdo chatini ochish', url: GROUP_CHAT_URL }]);
   for (const id of ADMIN_TELEGRAM_IDS) {
     await sendTelegramMessage(id, compactRequestMessage(doc), inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {});
   }
@@ -294,9 +310,10 @@ app.get('/api/config', (_req, res) => {
     webAppUrl: WEBAPP_URL,
     adminTelegramUrl: ADMIN_TELEGRAM_URL,
     adminTelegramUsername: ADMIN_TELEGRAM_USERNAME,
+    groupChatUrl: GROUP_CHAT_URL,
     botUsername: BOT_EXPECTED_USERNAME,
     currency: DEFAULT_CURRENCY,
-    legalNote: 'Faqat qonuniy, egasining roziligi bor hisoblar va platforma qoidalariga zid bo‘lmagan kelishuvlar qabul qilinadi.',
+    legalNote: 'Faqat egasining roziligi bor hisoblar qabul qilinadi. Parol, SMS kod va 2FA kodlarni formaga yozmang.',
   });
 });
 
@@ -316,9 +333,16 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
   const proofImages = [];
   for (const file of files) proofImages.push(await uploadToCloudinary(file, 'social-garant/proofs'));
 
+  const requestType = body.requestType || 'GUARANT_DEAL';
+  const contactName = String(body.contactName || '').trim();
+  const contactPhone = String(body.contactPhone || '').trim();
+  const contactTelegram = String(body.contactTelegram || '').trim();
+  const referralCode = String(body.referralCode || body.referredBy || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+  const startParam = String(body.startParam || '').trim().slice(0, 80);
+
   const doc = await SocialRequest.create({
     requestNo: randomCode('SG'),
-    requestType: body.requestType || 'GUARANT_DEAL',
+    requestType,
     platform: body.platform || service?.platform || 'other',
     serviceId: service?._id || null,
     serviceTitle: service?.title || body.serviceTitle || '',
@@ -332,18 +356,24 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
     country: body.country || '',
     price: normalizeNumber(body.price),
     currency: body.currency || DEFAULT_CURRENCY,
-    sellerName: body.sellerName || '',
-    sellerPhone: body.sellerPhone || '',
-    sellerTelegram: body.sellerTelegram || '',
-    buyerName: body.buyerName || '',
-    buyerPhone: body.buyerPhone || '',
-    buyerTelegram: body.buyerTelegram || '',
+    sellerName: body.sellerName || (requestType !== 'BUY_ACCOUNT' ? contactName : ''),
+    sellerPhone: body.sellerPhone || (requestType !== 'BUY_ACCOUNT' ? contactPhone : ''),
+    sellerTelegram: body.sellerTelegram || (requestType !== 'BUY_ACCOUNT' ? contactTelegram : ''),
+    buyerName: body.buyerName || (requestType === 'BUY_ACCOUNT' ? contactName : ''),
+    buyerPhone: body.buyerPhone || (requestType === 'BUY_ACCOUNT' ? contactPhone : ''),
+    buyerTelegram: body.buyerTelegram || (requestType === 'BUY_ACCOUNT' ? contactTelegram : ''),
     telegramUserId: tgUser?.id ? String(tgUser.id) : (body.telegramUserId || ''),
     telegramUsername: tgUser?.username || body.telegramUsername || '',
     telegramFullName: tgUser ? userFullName(tgUser) : (body.telegramFullName || ''),
     transferMethod: body.transferMethod || '',
+    contactName,
+    contactPhone,
+    contactTelegram,
+    referralCode,
+    referredBy: referralCode,
+    startParam,
     proofImages,
-    extra: safeJsonParse(body.extra, {}),
+    extra: { ...safeJsonParse(body.extra, {}), startParam },
     note: body.note || '',
   });
 
@@ -446,10 +476,16 @@ app.post('/telegram/webhook', asyncHandler(async (req, res) => {
     return res.json({ ok: true });
   }
   if (text.startsWith('/start') || text === '/menu') {
+    const startParam = text.startsWith('/start') ? text.replace(/^\/start(@\w+)?\s*/i, '').trim() : '';
     const buttons = [];
-    if (webAppStartUrl()) buttons.push([{ text: '🛡 Garant Marketni ochish', web_app: { url: webAppStartUrl() } }]);
+    if (webAppStartUrl(startParam)) buttons.push([{ text: 'Garant Marketni ochish', web_app: { url: webAppStartUrl(startParam) } }]);
+    if (GROUP_CHAT_URL) buttons.push([{ text: 'Savdo guruhi/chati', url: GROUP_CHAT_URL }]);
     if (ADMIN_TELEGRAM_URL) buttons.push([{ text: 'Admin bilan bog‘lanish', url: ADMIN_TELEGRAM_URL }]);
-    await sendTelegramMessage(chatId, `<b>${escapeHtml(BRAND_NAME)}</b>\n\n${escapeHtml(BRAND_SUBTITLE)}\n\nIjtimoiy tarmoq hisoblari savdosi, garant bitim va xizmatlar uchun mini ilovani oching.`, buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {});
+    await sendTelegramMessage(chatId, `<b>${escapeHtml(BRAND_NAME)}</b>
+
+${escapeHtml(BRAND_SUBTITLE)}
+
+Ijtimoiy tarmoq hisoblari savdosi, garant bitim va xizmatlar uchun mini ilovani oching.`, buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {});
     return res.json({ ok: true });
   }
   await sendTelegramMessage(chatId, `Mini ilovani ochish uchun /start yuboring. Admin ID kerak bo‘lsa /id yuboring.`);
