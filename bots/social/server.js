@@ -3,6 +3,7 @@
 require('dotenv').config();
 
 const path = require('path');
+const fs = require('fs');
 const https = require('https');
 const crypto = require('crypto');
 const express = require('express');
@@ -170,6 +171,7 @@ const serviceSchema = new mongoose.Schema({
   currency: { type: String, default: DEFAULT_CURRENCY },
   requiredFields: [{ type: String, trim: true }],
   customFields: [formFieldSchema],
+  images: [imageSchema],
   active: { type: Boolean, default: true },
   sort: { type: Number, default: 100 },
 }, { timestamps: true });
@@ -274,6 +276,103 @@ const DEFAULT_SERVICES = [
   { title: 'Reklama kanallari savdosi', category: 'promotion', platform: 'ads', badge: 'Reklama', description: 'Reklama kanal sotish/sotib olish yoki post joylash bo‘yicha buyurtma.', priceFrom: 0, sort: 60, requiredFields: ['Kanal turi', 'Auditoriya', 'Byudjet'] },
   { title: 'Hisob tekshirish va maslahat', category: 'support', platform: 'all', badge: 'Tekshiruv', description: 'Akkaunt xavfsizligi, ko‘rsatkichlari va savdoga tayyorligini tekshirish.', priceFrom: 0, sort: 70, requiredFields: ['Hisob turi', 'Muammo', 'Kontakt'] },
 ];
+
+
+const DEFAULT_SETTINGS = {
+  referralBonus: 0,
+  referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.',
+  tradeChatUrl: GROUP_CHAT_URL || '',
+  marketplaceTitle: 'Marketplace',
+};
+
+const LOCAL_STORE_DIR = process.env.SOCIAL_LOCAL_STORE_DIR || path.join(__dirname, '.data');
+const LOCAL_STORE_FILE = process.env.SOCIAL_LOCAL_STORE_FILE || path.join(LOCAL_STORE_DIR, 'social-store.json');
+let localStoreCache = null;
+
+function nowIso() { return new Date().toISOString(); }
+function deepClone(value) { return JSON.parse(JSON.stringify(value)); }
+function localId(prefix) { return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`; }
+function withLocalDates(doc) { const now = nowIso(); return { ...doc, createdAt: doc.createdAt || now, updatedAt: now }; }
+function localDefaultServices() {
+  return DEFAULT_SERVICES.slice().sort((a, b) => (a.sort || 100) - (b.sort || 100)).map((service, index) => ({
+    ...deepClone(service),
+    _id: `local-service-${index + 1}`,
+    active: true,
+    images: service.images || [],
+    currency: service.currency || DEFAULT_CURRENCY,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  }));
+}
+function ensureLocalStore() {
+  if (localStoreCache) return localStoreCache;
+  try { fs.mkdirSync(LOCAL_STORE_DIR, { recursive: true }); } catch {}
+  try {
+    if (fs.existsSync(LOCAL_STORE_FILE)) localStoreCache = JSON.parse(fs.readFileSync(LOCAL_STORE_FILE, 'utf8'));
+  } catch (error) {
+    console.error('Local social store read failed:', error.message);
+  }
+  if (!localStoreCache || typeof localStoreCache !== 'object') localStoreCache = {};
+  if (!Array.isArray(localStoreCache.services)) localStoreCache.services = localDefaultServices();
+  if (!Array.isArray(localStoreCache.marketplace)) localStoreCache.marketplace = [];
+  if (!Array.isArray(localStoreCache.requests)) localStoreCache.requests = [];
+  if (!Array.isArray(localStoreCache.users)) localStoreCache.users = [];
+  if (!localStoreCache.settings || typeof localStoreCache.settings !== 'object') localStoreCache.settings = { ...DEFAULT_SETTINGS };
+  saveLocalStore();
+  return localStoreCache;
+}
+function saveLocalStore() {
+  try {
+    fs.mkdirSync(LOCAL_STORE_DIR, { recursive: true });
+    fs.writeFileSync(LOCAL_STORE_FILE, JSON.stringify(localStoreCache || {}, null, 2));
+  } catch (error) {
+    console.error('Local social store write failed:', error.message);
+  }
+}
+function localCollection(name) { return ensureLocalStore()[name] || []; }
+function sortItems(items) {
+  return items.slice().sort((a, b) => (Number(a.sort || 100) - Number(b.sort || 100)) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+function localCreate(name, prefix, data) {
+  const store = ensureLocalStore();
+  const doc = withLocalDates({ ...deepClone(data), _id: localId(prefix) });
+  store[name].push(doc);
+  saveLocalStore();
+  return deepClone(doc);
+}
+function localUpdate(name, id, patch) {
+  const list = localCollection(name);
+  const index = list.findIndex((x) => String(x._id) === String(id));
+  if (index < 0) return null;
+  list[index] = { ...list[index], ...deepClone(patch), updatedAt: nowIso() };
+  saveLocalStore();
+  return deepClone(list[index]);
+}
+function localDelete(name, id) {
+  const store = ensureLocalStore();
+  const before = store[name].length;
+  store[name] = store[name].filter((x) => String(x._id) !== String(id));
+  saveLocalStore();
+  return before !== store[name].length;
+}
+function localById(name, id) { return deepClone(localCollection(name).find((x) => String(x._id) === String(id)) || null); }
+function localStats() {
+  const store = ensureLocalStore();
+  return {
+    total: store.requests.length,
+    fresh: store.requests.filter((x) => x.status === 'NEW').length,
+    inGarant: store.requests.filter((x) => x.status === 'IN_GUARANT').length,
+    done: store.requests.filter((x) => x.status === 'DONE').length,
+    services: store.services.filter((x) => x.active !== false).length,
+    users: store.users.length,
+    marketplace: store.marketplace.filter((x) => x.approved !== false && x.status !== 'HIDDEN').length,
+    sold: store.marketplace.filter((x) => x.status === 'SOLD').length,
+    referrals: store.users.filter((x) => x.referredBy).length,
+  };
+}
+function localDbInfo() {
+  return { fallbackStorage: !isDbReady(), localStoreFile: LOCAL_STORE_FILE };
+}
 
 async function seedDefaults() {
   const ops = DEFAULT_SERVICES.map((service) => ({
@@ -417,9 +516,9 @@ function normalizeImageUrls(value) {
   return String(value || '').split(/\n|,/).map((url) => url.trim()).filter((url) => /^https?:\/\//i.test(url)).slice(0, 8).map((url) => ({ url, publicId: '', local: false }));
 }
 async function getSettingsLean() {
-  if (!isDbReady()) return { referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL, marketplaceTitle: 'Marketplace' };
+  if (!isDbReady()) return { ...DEFAULT_SETTINGS, ...(ensureLocalStore().settings || {}) };
   const settings = await SocialSettings.findOne({ key: 'main' }).lean();
-  return settings || { referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL, marketplaceTitle: 'Marketplace' };
+  return settings || { ...DEFAULT_SETTINGS };
 }
 async function recordVisitor(initData, startParam = '') {
   const tg = validateTelegramInitData(initData);
@@ -443,6 +542,18 @@ async function recordVisitor(initData, startParam = '') {
       { $set: payload, $inc: { visits: 1 }, $setOnInsert: { firstSeen: new Date(), bonusBalance: 0 } },
       { upsert: true, new: true, lean: true }
     );
+  } else {
+    const store = ensureLocalStore();
+    const index = store.users.findIndex((x) => String(x.telegramUserId) === telegramUserId);
+    if (index >= 0) {
+      store.users[index] = { ...store.users[index], ...payload, visits: Number(store.users[index].visits || 0) + 1, updatedAt: nowIso() };
+      user = store.users[index];
+    } else {
+      user = withLocalDates({ _id: localId('user'), ...payload, firstSeen: nowIso(), visits: 1, bonusBalance: 0, bonusNote: '' });
+      store.users.push(user);
+    }
+    saveLocalStore();
+    user = deepClone(user);
   }
   return { user, isAdmin: isAdminTelegramId(telegramUserId) };
 }
@@ -478,7 +589,12 @@ app.post('/api/track-user', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/marketplace', asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.json({ success: true, items: [], database: dbStatus(), fallback: true });
+  if (!isDbReady()) {
+    let items = localCollection('marketplace').filter((x) => x.approved !== false && x.status !== 'HIDDEN');
+    if (req.query.platform) items = items.filter((x) => x.platform === req.query.platform);
+    if (req.query.status) items = items.filter((x) => x.status === req.query.status);
+    return res.json({ success: true, items: sortItems(items).slice(0, 250), database: dbStatus(), local: localDbInfo() });
+  }
   const filter = { approved: true, status: { $ne: 'HIDDEN' } };
   if (req.query.platform) filter.platform = req.query.platform;
   if (req.query.status) filter.status = req.query.status;
@@ -487,7 +603,11 @@ app.get('/api/marketplace', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/marketplace/:id', asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  if (!isDbReady()) {
+    const item = localById('marketplace', req.params.id);
+    if (!item || item.approved === false || item.status === 'HIDDEN') return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.', database: dbStatus(), local: localDbInfo() });
+    return res.json({ success: true, item, database: dbStatus(), local: localDbInfo() });
+  }
   ensureObjectId(req.params.id);
   const item = await MarketplaceItem.findOne({ _id: req.params.id, approved: true, status: { $ne: 'HIDDEN' } }).lean();
   if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.' });
@@ -496,17 +616,8 @@ app.get('/api/marketplace/:id', asyncHandler(async (req, res) => {
 
 app.get('/api/catalog', asyncHandler(async (_req, res) => {
   if (!isDbReady()) {
-    const services = DEFAULT_SERVICES
-      .slice()
-      .sort((a, b) => (a.sort || 100) - (b.sort || 100))
-      .map((service, index) => ({
-        ...service,
-        _id: `fallback-${index + 1}`,
-        active: true,
-        currency: service.currency || DEFAULT_CURRENCY,
-        dbFallback: true,
-      }));
-    return res.json({ success: true, services, database: dbStatus(), fallback: true });
+    const services = sortItems(localCollection('services').filter((service) => service.active !== false));
+    return res.json({ success: true, services, database: dbStatus(), local: localDbInfo() });
   }
   const services = await SocialService.find({ active: true }).sort({ sort: 1, createdAt: -1 }).lean();
   res.json({ success: true, services, database: dbStatus() });
@@ -572,16 +683,21 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
     doc = await SocialRequest.create(payload);
     stored = true;
   } else {
-    doc = { ...payload, _id: payload.requestNo, status: 'NEW', createdAt: new Date().toISOString(), dbFallback: true };
+    doc = localCreate('requests', 'req', { ...payload, status: 'NEW' });
+    stored = true;
   }
 
   notifyAdmins(doc).catch((error) => console.error('Admin notification failed:', error.message));
-  res.status(201).json({ success: true, message: stored ? 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.' : 'So‘rov admin Telegramiga yuborildi. Maʼlumotlar bazasi ulanmagan bo‘lsa, Render env MONGODB_URI ni tekshiring.', request: doc, stored, database: dbStatus() });
+  res.status(201).json({ success: true, message: 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.', request: doc, stored, database: dbStatus(), local: isDbReady() ? undefined : localDbInfo() });
 }));
 
 app.get('/api/requests/my', asyncHandler(async (req, res) => {
   const telegramUserId = String(req.query.telegramUserId || '').trim();
-  if (!telegramUserId || !isDbReady()) return res.json({ success: true, requests: [], database: dbStatus() });
+  if (!telegramUserId) return res.json({ success: true, requests: [], database: dbStatus() });
+  if (!isDbReady()) {
+    const requests = localCollection('requests').filter((x) => String(x.telegramUserId) === telegramUserId).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 30);
+    return res.json({ success: true, requests, database: dbStatus(), local: localDbInfo() });
+  }
   const requests = await SocialRequest.find({ telegramUserId }).sort({ createdAt: -1 }).limit(30).lean();
   res.json({ success: true, requests, database: dbStatus() });
 }));
@@ -597,7 +713,7 @@ app.post('/api/admin/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) return res.json({ success: true, stats: { total: 0, fresh: 0, inGarant: 0, done: 0, services: DEFAULT_SERVICES.length, users: 0, marketplace: 0, sold: 0, referrals: 0 }, database: dbStatus(), fallback: true });
+  if (!isDbReady()) return res.json({ success: true, stats: localStats(), database: dbStatus(), local: localDbInfo() });
   const [total, fresh, inGarant, done, services, users, marketplace, sold, referrals] = await Promise.all([
     SocialRequest.countDocuments(),
     SocialRequest.countDocuments({ status: 'NEW' }),
@@ -614,17 +730,18 @@ app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
 
 app.get('/api/admin/services', requireAdmin, asyncHandler(async (_req, res) => {
   if (!isDbReady()) {
-    const services = DEFAULT_SERVICES.slice().sort((a, b) => (a.sort || 100) - (b.sort || 100)).map((service, index) => ({ ...service, _id: `fallback-${index + 1}`, active: true, currency: service.currency || DEFAULT_CURRENCY, dbFallback: true }));
-    return res.json({ success: true, services, database: dbStatus(), fallback: true });
+    const services = sortItems(localCollection('services'));
+    return res.json({ success: true, services, database: dbStatus(), local: localDbInfo() });
   }
   const services = await SocialService.find().sort({ sort: 1, createdAt: -1 }).lean();
   res.json({ success: true, services, database: dbStatus() });
 }));
 
-app.post('/api/admin/services', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
+app.post('/api/admin/services', requireAdmin, upload.array('images', 6), asyncHandler(async (req, res) => {
   const body = req.body || {};
-  const service = await SocialService.create({
+  const images = normalizeImageUrls(body.imageUrls);
+  for (const file of (req.files || [])) images.push(await uploadToCloudinary(file, 'social-garant/services'));
+  const payload = {
     title: body.title,
     category: body.category || 'accounts',
     platform: body.platform || 'other',
@@ -634,15 +751,19 @@ app.post('/api/admin/services', requireAdmin, asyncHandler(async (req, res) => {
     currency: body.currency || DEFAULT_CURRENCY,
     requiredFields: Array.isArray(body.requiredFields) ? body.requiredFields : String(body.requiredFields || '').split('\n').map((x) => x.trim()).filter(Boolean),
     customFields: normalizeCustomFields(body.customFields || body.managedInputs || body.requiredFields),
+    images,
     active: parseBoolean(body.active, true),
     sort: normalizeNumber(body.sort) || 100,
-  });
+  };
+  if (!isDbReady()) {
+    const service = localCreate('services', 'service', payload);
+    return res.status(201).json({ success: true, service, database: dbStatus(), local: localDbInfo() });
+  }
+  const service = await SocialService.create(payload);
   res.status(201).json({ success: true, service });
 }));
 
 app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
-  ensureObjectId(req.params.id);
   const body = req.body || {};
   const patch = { ...body };
   if ('priceFrom' in patch) patch.priceFrom = normalizeNumber(patch.priceFrom);
@@ -651,19 +772,34 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
   if ('requiredFields' in patch && !Array.isArray(patch.requiredFields)) patch.requiredFields = String(patch.requiredFields || '').split('\n').map((x) => x.trim()).filter(Boolean);
   if ('customFields' in patch || 'managedInputs' in patch) patch.customFields = normalizeCustomFields(patch.customFields || patch.managedInputs || patch.requiredFields || '');
   delete patch.managedInputs;
+  if (!isDbReady()) {
+    const service = localUpdate('services', req.params.id, patch);
+    if (!service) return res.status(404).json({ success: false, message: 'Xizmat topilmadi.', database: dbStatus(), local: localDbInfo() });
+    return res.json({ success: true, service, database: dbStatus(), local: localDbInfo() });
+  }
+  ensureObjectId(req.params.id);
   const service = await SocialService.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, service });
 }));
 
 app.delete('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
+  if (!isDbReady()) {
+    localDelete('services', req.params.id);
+    return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
+  }
   ensureObjectId(req.params.id);
   await SocialService.findByIdAndDelete(req.params.id);
   res.json({ success: true });
 }));
 
 app.get('/api/admin/requests', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.json({ success: true, requests: [], database: dbStatus(), fallback: true });
+  if (!isDbReady()) {
+    let requests = localCollection('requests');
+    if (req.query.status) requests = requests.filter((x) => x.status === req.query.status);
+    if (req.query.platform) requests = requests.filter((x) => x.platform === req.query.platform);
+    requests = requests.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 250);
+    return res.json({ success: true, requests, database: dbStatus(), local: localDbInfo() });
+  }
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
   if (req.query.platform) filter.platform = req.query.platform;
@@ -672,17 +808,24 @@ app.get('/api/admin/requests', requireAdmin, asyncHandler(async (req, res) => {
 }));
 
 app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
-  ensureObjectId(req.params.id);
   const patch = {};
   for (const key of ['status', 'adminNote']) if (key in req.body) patch[key] = req.body[key];
+  if (!isDbReady()) {
+    const doc = localUpdate('requests', req.params.id, patch);
+    if (!doc) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.', database: dbStatus(), local: localDbInfo() });
+    return res.json({ success: true, request: doc, database: dbStatus(), local: localDbInfo() });
+  }
+  ensureObjectId(req.params.id);
   const doc = await SocialRequest.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, request: doc });
 }));
 
 
 app.get('/api/admin/users', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) return res.json({ success: true, users: [], database: dbStatus(), fallback: true });
+  if (!isDbReady()) {
+    const users = localCollection('users').slice().sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || ''))).slice(0, 500);
+    return res.json({ success: true, users, database: dbStatus(), local: localDbInfo() });
+  }
   const users = await SocialVisitor.find().sort({ lastSeen: -1 }).limit(500).lean();
   res.json({ success: true, users, database: dbStatus() });
 }));
@@ -693,7 +836,6 @@ app.get('/api/admin/settings', requireAdmin, asyncHandler(async (_req, res) => {
 }));
 
 app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
   const body = req.body || {};
   const patch = {
     referralBonus: normalizeNumber(body.referralBonus),
@@ -701,12 +843,23 @@ app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => 
     tradeChatUrl: String(body.tradeChatUrl || '').trim(),
     marketplaceTitle: String(body.marketplaceTitle || '').trim() || 'Marketplace',
   };
+  if (!isDbReady()) {
+    const store = ensureLocalStore();
+    store.settings = { ...(store.settings || DEFAULT_SETTINGS), ...patch, updatedAt: nowIso() };
+    saveLocalStore();
+    return res.json({ success: true, settings: store.settings, database: dbStatus(), local: localDbInfo() });
+  }
   const settings = await SocialSettings.findOneAndUpdate({ key: 'main' }, { $set: patch, $setOnInsert: { key: 'main' } }, { upsert: true, new: true, lean: true });
   res.json({ success: true, settings });
 }));
 
 app.get('/api/admin/marketplace', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.json({ success: true, items: [], database: dbStatus(), fallback: true });
+  if (!isDbReady()) {
+    let items = localCollection('marketplace');
+    if (req.query.status) items = items.filter((x) => x.status === req.query.status);
+    if (req.query.platform) items = items.filter((x) => x.platform === req.query.platform);
+    return res.json({ success: true, items: sortItems(items).slice(0, 500), database: dbStatus(), local: localDbInfo() });
+  }
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
   if (req.query.platform) filter.platform = req.query.platform;
@@ -715,11 +868,10 @@ app.get('/api/admin/marketplace', requireAdmin, asyncHandler(async (req, res) =>
 }));
 
 app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
   const body = req.body || {};
   const images = normalizeImageUrls(body.imageUrls);
   for (const file of (req.files || [])) images.push(await uploadToCloudinary(file, 'social-garant/marketplace'));
-  const item = await MarketplaceItem.create({
+  const payload = {
     title: body.title,
     platform: body.platform || 'other',
     category: body.category || 'accounts',
@@ -738,32 +890,69 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyn
     status: body.status || 'AVAILABLE',
     approved: parseBoolean(body.approved, true),
     sort: normalizeNumber(body.sort) || 100,
-  });
+  };
+  if (!isDbReady()) {
+    const item = localCreate('marketplace', 'market', payload);
+    return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
+  }
+  const item = await MarketplaceItem.create(payload);
   res.status(201).json({ success: true, item });
 }));
 
 app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
-  ensureObjectId(req.params.id);
   const body = req.body || {};
   const patch = { ...body };
   for (const key of ['price', 'oldPrice', 'sort']) if (key in patch) patch[key] = normalizeNumber(patch[key]);
   if ('approved' in patch) patch.approved = parseBoolean(patch.approved, true);
   if ('imageUrls' in patch) { patch.images = normalizeImageUrls(patch.imageUrls); delete patch.imageUrls; }
   if (patch.status === 'SOLD') patch.soldAt = new Date();
+  if (!isDbReady()) {
+    const item = localUpdate('marketplace', req.params.id, patch);
+    if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.', database: dbStatus(), local: localDbInfo() });
+    return res.json({ success: true, item, database: dbStatus(), local: localDbInfo() });
+  }
+  ensureObjectId(req.params.id);
   const item = await MarketplaceItem.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, item });
 }));
 
 app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  if (!isDbReady()) {
+    localDelete('marketplace', req.params.id);
+    return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
+  }
   ensureObjectId(req.params.id);
   await MarketplaceItem.findByIdAndDelete(req.params.id);
   res.json({ success: true });
 }));
 
 app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  if (!isDbReady()) {
+    const r = localById('requests', req.params.id);
+    if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.', database: dbStatus(), local: localDbInfo() });
+    const item = localCreate('marketplace', 'market', {
+      title: req.body?.title || r.serviceTitle || `${r.platform} hisob`,
+      platform: r.platform || 'other',
+      category: r.requestType === 'SERVICE_ORDER' ? 'other' : 'accounts',
+      badge: 'Tasdiqlangan',
+      description: req.body?.description || r.note || `${r.accountUsername || r.accountLink || 'Hisob'} bo‘yicha admin tasdiqlagan eʼlon.`,
+      accountLink: r.accountLink || '',
+      accountUsername: r.accountUsername || '',
+      audienceSize: r.audienceSize || '',
+      niche: r.niche || '',
+      country: r.country || '',
+      monetization: r.monetization || '',
+      price: r.price || 0,
+      currency: r.currency || DEFAULT_CURRENCY,
+      images: r.proofImages || [],
+      sourceRequestId: r._id,
+      approved: true,
+      status: 'AVAILABLE',
+      sort: 100,
+    });
+    localUpdate('requests', r._id, { status: 'IN_GUARANT', adminNote: `${r.adminNote || ''}\nMarketplacega chiqarildi: ${item._id}`.trim() });
+    return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
+  }
   ensureObjectId(req.params.id);
   const r = await SocialRequest.findById(req.params.id).lean();
   if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.' });
