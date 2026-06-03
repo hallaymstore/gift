@@ -13,6 +13,8 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v2: cloudinary } = require('cloudinary');
 
+mongoose.set('bufferCommands', false);
+
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/social_garant_market';
@@ -59,6 +61,19 @@ const ADMIN_TELEGRAM_URL = cleanPublicUrl(firstEnv('SOCIAL_ADMIN_TELEGRAM_URL', 
 const GROUP_CHAT_URL = cleanPublicUrl(firstEnv('SOCIAL_GROUP_CHAT_URL', 'GROUP_CHAT_URL', 'SOCIAL_TRADE_CHAT_URL')) || ADMIN_TELEGRAM_URL;
 const BRAND_NAME = firstEnv('SOCIAL_BRAND_NAME', 'BRAND_NAME') || 'Garant Market';
 const BRAND_SUBTITLE = firstEnv('SOCIAL_BRAND_SUBTITLE', 'BRAND_SUBTITLE') || 'Ijtimoiy tarmoq hisoblari savdosi va garant bitimlar';
+
+let databaseReady = false;
+let databaseError = '';
+let databaseConnecting = false;
+let httpServerStarted = false;
+function isDbReady() { return mongoose.connection.readyState === 1 && databaseReady; }
+function dbStatus() {
+  return {
+    ready: isDbReady(),
+    state: ['disconnected', 'connected', 'connecting', 'disconnecting'][mongoose.connection.readyState] || String(mongoose.connection.readyState),
+    error: databaseError || '',
+  };
+}
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -300,7 +315,7 @@ async function notifyAdmins(doc) {
   }
 }
 
-app.get('/api/health', (_req, res) => res.json({ success: true, app: 'social-garant-market', time: new Date().toISOString() }));
+app.get('/api/health', (_req, res) => res.json({ success: true, app: 'social-garant-market', time: new Date().toISOString(), database: dbStatus() }));
 
 app.get('/api/config', (_req, res) => {
   res.json({
@@ -318,8 +333,21 @@ app.get('/api/config', (_req, res) => {
 });
 
 app.get('/api/catalog', asyncHandler(async (_req, res) => {
+  if (!isDbReady()) {
+    const services = DEFAULT_SERVICES
+      .slice()
+      .sort((a, b) => (a.sort || 100) - (b.sort || 100))
+      .map((service, index) => ({
+        ...service,
+        _id: `fallback-${index + 1}`,
+        active: true,
+        currency: service.currency || DEFAULT_CURRENCY,
+        dbFallback: true,
+      }));
+    return res.json({ success: true, services, database: dbStatus(), fallback: true });
+  }
   const services = await SocialService.find({ active: true }).sort({ sort: 1, createdAt: -1 }).lean();
-  res.json({ success: true, services });
+  res.json({ success: true, services, database: dbStatus() });
 }));
 
 app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (req, res) => {
@@ -328,7 +356,7 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
   const tg = validateTelegramInitData(initData);
   const tgUser = tg.ok ? tg.user : null;
   const serviceId = body.serviceId && mongoose.Types.ObjectId.isValid(String(body.serviceId)) ? body.serviceId : null;
-  const service = serviceId ? await SocialService.findById(serviceId).lean() : null;
+  const service = serviceId && isDbReady() ? await SocialService.findById(serviceId).lean() : null;
   const files = req.files || [];
   const proofImages = [];
   for (const file of files) proofImages.push(await uploadToCloudinary(file, 'social-garant/proofs'));
@@ -339,8 +367,7 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
   const contactTelegram = String(body.contactTelegram || '').trim();
   const referralCode = String(body.referralCode || body.referredBy || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
   const startParam = String(body.startParam || '').trim().slice(0, 80);
-
-  const doc = await SocialRequest.create({
+  const payload = {
     requestNo: randomCode('SG'),
     requestType,
     platform: body.platform || service?.platform || 'other',
@@ -375,17 +402,26 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
     proofImages,
     extra: { ...safeJsonParse(body.extra, {}), startParam },
     note: body.note || '',
-  });
+  };
+
+  let doc = payload;
+  let stored = false;
+  if (isDbReady()) {
+    doc = await SocialRequest.create(payload);
+    stored = true;
+  } else {
+    doc = { ...payload, _id: payload.requestNo, status: 'NEW', createdAt: new Date().toISOString(), dbFallback: true };
+  }
 
   notifyAdmins(doc).catch((error) => console.error('Admin notification failed:', error.message));
-  res.status(201).json({ success: true, message: 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.', request: doc });
+  res.status(201).json({ success: true, message: stored ? 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.' : 'So‘rov admin Telegramiga yuborildi. Maʼlumotlar bazasi ulanmagan bo‘lsa, Render env MONGODB_URI ni tekshiring.', request: doc, stored, database: dbStatus() });
 }));
 
 app.get('/api/requests/my', asyncHandler(async (req, res) => {
   const telegramUserId = String(req.query.telegramUserId || '').trim();
-  if (!telegramUserId) return res.json({ success: true, requests: [] });
+  if (!telegramUserId || !isDbReady()) return res.json({ success: true, requests: [], database: dbStatus() });
   const requests = await SocialRequest.find({ telegramUserId }).sort({ createdAt: -1 }).limit(30).lean();
-  res.json({ success: true, requests });
+  res.json({ success: true, requests, database: dbStatus() });
 }));
 
 app.post('/api/admin/login', asyncHandler(async (req, res) => {
@@ -399,6 +435,7 @@ app.post('/api/admin/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
+  if (!isDbReady()) return res.json({ success: true, stats: { total: 0, fresh: 0, inGarant: 0, done: 0, services: DEFAULT_SERVICES.length }, database: dbStatus(), fallback: true });
   const [total, fresh, inGarant, done, services] = await Promise.all([
     SocialRequest.countDocuments(),
     SocialRequest.countDocuments({ status: 'NEW' }),
@@ -406,15 +443,20 @@ app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
     SocialRequest.countDocuments({ status: 'DONE' }),
     SocialService.countDocuments({ active: true }),
   ]);
-  res.json({ success: true, stats: { total, fresh, inGarant, done, services } });
+  res.json({ success: true, stats: { total, fresh, inGarant, done, services }, database: dbStatus() });
 }));
 
 app.get('/api/admin/services', requireAdmin, asyncHandler(async (_req, res) => {
+  if (!isDbReady()) {
+    const services = DEFAULT_SERVICES.slice().sort((a, b) => (a.sort || 100) - (b.sort || 100)).map((service, index) => ({ ...service, _id: `fallback-${index + 1}`, active: true, currency: service.currency || DEFAULT_CURRENCY, dbFallback: true }));
+    return res.json({ success: true, services, database: dbStatus(), fallback: true });
+  }
   const services = await SocialService.find().sort({ sort: 1, createdAt: -1 }).lean();
-  res.json({ success: true, services });
+  res.json({ success: true, services, database: dbStatus() });
 }));
 
 app.post('/api/admin/services', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
   const body = req.body || {};
   const service = await SocialService.create({
     title: body.title,
@@ -432,6 +474,7 @@ app.post('/api/admin/services', requireAdmin, asyncHandler(async (req, res) => {
 }));
 
 app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
   ensureObjectId(req.params.id);
   const body = req.body || {};
   const patch = { ...body };
@@ -444,20 +487,23 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
 }));
 
 app.delete('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
   ensureObjectId(req.params.id);
   await SocialService.findByIdAndDelete(req.params.id);
   res.json({ success: true });
 }));
 
 app.get('/api/admin/requests', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.json({ success: true, requests: [], database: dbStatus(), fallback: true });
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
   if (req.query.platform) filter.platform = req.query.platform;
   const requests = await SocialRequest.find(filter).sort({ createdAt: -1 }).limit(250).lean();
-  res.json({ success: true, requests });
+  res.json({ success: true, requests, database: dbStatus() });
 }));
 
 app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan. Render env MONGODB_URI ni tekshiring.', database: dbStatus() });
   ensureObjectId(req.params.id);
   const patch = {};
   for (const key of ['status', 'adminNote']) if (key in req.body) patch[key] = req.body[key];
@@ -509,15 +555,46 @@ app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.h
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  const status = error.status || error.statusCode || 500;
-  res.status(status).json({ success: false, message: error.message || 'Server xatoligi.' });
+  const status = error.status || error.statusCode || (String(error.message || '').toLowerCase().includes('mongo') ? 503 : 500);
+  res.status(status).json({ success: false, message: error.message || 'Server xatoligi.', database: dbStatus() });
 });
 
-async function boot() {
-  await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 15000 });
-  await seedDefaults();
+async function connectMongoWithRetry() {
+  if (databaseConnecting || isDbReady()) return;
+  databaseConnecting = true;
+  try {
+    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 12000, autoIndex: true });
+    databaseReady = true;
+    databaseError = '';
+    await seedDefaults();
+    console.log(`${BRAND_NAME} MongoDB connected`);
+  } catch (error) {
+    databaseReady = false;
+    databaseError = error?.message || String(error);
+    console.error(`${BRAND_NAME} MongoDB connection failed:`, databaseError);
+    setTimeout(connectMongoWithRetry, Number(process.env.MONGO_RETRY_MS || 10000)).unref();
+  } finally {
+    databaseConnecting = false;
+  }
+}
+
+mongoose.connection.on('connected', () => { databaseReady = true; databaseError = ''; });
+mongoose.connection.on('disconnected', () => {
+  databaseReady = false;
+  databaseError = databaseError || 'MongoDB disconnected';
+  setTimeout(connectMongoWithRetry, Number(process.env.MONGO_RETRY_MS || 10000)).unref();
+});
+mongoose.connection.on('error', (error) => {
+  databaseReady = false;
+  databaseError = error?.message || String(error);
+});
+
+function boot() {
+  if (httpServerStarted) return;
+  httpServerStarted = true;
   app.listen(PORT, '0.0.0.0', async () => {
     console.log(`${BRAND_NAME} server listening on ${PORT}`);
+    connectMongoWithRetry();
     if (AUTO_SET_WEBHOOK && BOT_TOKEN && PUBLIC_URL) {
       try {
         const result = await telegramApi('setWebhook', {
@@ -532,7 +609,4 @@ async function boot() {
     if (TELEGRAM_POLLING) console.warn('TELEGRAM_POLLING=true sozlangan, lekin bu bot Render uchun webhook rejimida ishlaydi.');
   });
 }
-boot().catch((error) => {
-  console.error('Boot error:', error);
-  process.exit(1);
-});
+boot();
