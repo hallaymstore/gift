@@ -145,6 +145,21 @@ function validateTelegramInitData(initData) {
   return { ok: true, user: safeJsonParse(params.get('user'), null), raw: Object.fromEntries(params.entries()) };
 }
 
+const formFieldSchema = new mongoose.Schema({
+  key: { type: String, default: '', trim: true },
+  label: { type: String, default: '', trim: true },
+  type: { type: String, default: 'text', enum: ['text', 'number', 'select', 'textarea', 'url', 'tel'] },
+  required: { type: Boolean, default: false },
+  placeholder: { type: String, default: '', trim: true },
+  options: [{ type: String, trim: true }],
+}, { _id: false });
+
+const imageSchema = new mongoose.Schema({
+  url: String,
+  publicId: String,
+  local: Boolean,
+}, { _id: false });
+
 const serviceSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
   category: { type: String, default: 'accounts', enum: ['accounts', 'guarantee', 'promotion', 'gaming', 'support', 'other'] },
@@ -154,6 +169,7 @@ const serviceSchema = new mongoose.Schema({
   priceFrom: { type: Number, default: 0 },
   currency: { type: String, default: DEFAULT_CURRENCY },
   requiredFields: [{ type: String, trim: true }],
+  customFields: [formFieldSchema],
   active: { type: Boolean, default: true },
   sort: { type: Number, default: 100 },
 }, { timestamps: true });
@@ -190,15 +206,63 @@ const requestSchema = new mongoose.Schema({
   referralCode: { type: String, default: '', index: true },
   referredBy: { type: String, default: '', index: true },
   startParam: { type: String, default: '' },
-  proofImages: [{ url: String, publicId: String, local: Boolean }],
+  proofImages: [imageSchema],
   extra: { type: mongoose.Schema.Types.Mixed, default: {} },
   note: { type: String, default: '' },
   status: { type: String, enum: ['NEW', 'REVIEWING', 'WAITING_PAYMENT', 'IN_GUARANT', 'DONE', 'CANCELLED'], default: 'NEW', index: true },
   adminNote: { type: String, default: '' },
 }, { timestamps: true });
 
+const marketplaceItemSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true },
+  platform: { type: String, default: 'other', index: true },
+  category: { type: String, default: 'accounts', index: true },
+  badge: { type: String, default: '', trim: true },
+  description: { type: String, default: '', trim: true },
+  accountLink: { type: String, default: '', trim: true },
+  accountUsername: { type: String, default: '', trim: true },
+  audienceSize: { type: String, default: '', trim: true },
+  niche: { type: String, default: '', trim: true },
+  country: { type: String, default: '', trim: true },
+  monetization: { type: String, default: '', trim: true },
+  price: { type: Number, default: 0 },
+  oldPrice: { type: Number, default: 0 },
+  currency: { type: String, default: DEFAULT_CURRENCY },
+  images: [imageSchema],
+  sourceRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'SocialRequest', default: null },
+  approved: { type: Boolean, default: true, index: true },
+  status: { type: String, enum: ['AVAILABLE', 'RESERVED', 'SOLD', 'HIDDEN'], default: 'AVAILABLE', index: true },
+  soldAt: { type: Date, default: null },
+  soldNote: { type: String, default: '' },
+  sort: { type: Number, default: 100 },
+}, { timestamps: true });
+
+const visitorSchema = new mongoose.Schema({
+  telegramUserId: { type: String, unique: true, sparse: true, index: true },
+  username: { type: String, default: '', index: true },
+  fullName: { type: String, default: '' },
+  referralCode: { type: String, default: '', unique: true, sparse: true, index: true },
+  referredBy: { type: String, default: '', index: true },
+  firstSeen: { type: Date, default: Date.now },
+  lastSeen: { type: Date, default: Date.now },
+  visits: { type: Number, default: 0 },
+  bonusBalance: { type: Number, default: 0 },
+  bonusNote: { type: String, default: '' },
+}, { timestamps: true });
+
+const settingsSchema = new mongoose.Schema({
+  key: { type: String, unique: true, index: true },
+  referralBonus: { type: Number, default: 0 },
+  referralBonusText: { type: String, default: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.' },
+  tradeChatUrl: { type: String, default: '' },
+  marketplaceTitle: { type: String, default: 'Marketplace' },
+}, { timestamps: true });
+
 const SocialService = mongoose.model('SocialService', serviceSchema);
 const SocialRequest = mongoose.model('SocialRequest', requestSchema);
+const MarketplaceItem = mongoose.model('MarketplaceItem', marketplaceItemSchema);
+const SocialVisitor = mongoose.model('SocialVisitor', visitorSchema);
+const SocialSettings = mongoose.model('SocialSettings', settingsSchema);
 
 const DEFAULT_SERVICES = [
   { title: 'Garant bitim xizmati', category: 'guarantee', platform: 'all', badge: 'Xavfsiz', description: 'Sotuvchi va xaridor uchun admin nazoratidagi garant bitim.', priceFrom: 0, sort: 5, requiredFields: ['Hisob havolasi', 'Bitim summasi', 'Kontakt'] },
@@ -220,6 +284,7 @@ async function seedDefaults() {
     },
   }));
   if (ops.length) await SocialService.bulkWrite(ops, { ordered: false });
+  await SocialSettings.updateOne({ key: 'main' }, { $setOnInsert: { key: 'main', referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL || '', marketplaceTitle: 'Marketplace' } }, { upsert: true });
 }
 
 function adminTokenPayload() { return `${Date.now() + ADMIN_TOKEN_TTL_MS}:${crypto.randomBytes(10).toString('hex')}`; }
@@ -261,7 +326,10 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
   return telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
 }
 function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${WEBAPP_URL}${q}`; }
-function adminPanelUrl() { return PUBLIC_URL ? `${PUBLIC_URL}/admin` : ''; }
+function adminPanelUrl() {
+  const base = (WEBAPP_URL || PUBLIC_URL || '').replace(/\/+$/, '');
+  return base ? `${base}/admin` : '';
+}
 
 async function ensureBotMenuButton() {
   if (!BOT_TOKEN || !WEBAPP_URL) return;
@@ -308,11 +376,75 @@ function compactRequestMessage(doc) {
 async function notifyAdmins(doc) {
   if (!ADMIN_TELEGRAM_IDS.size) return;
   const inline_keyboard = [];
-  if (adminPanelUrl()) inline_keyboard.push([{ text: 'Admin panelni ochish', url: adminPanelUrl() }]);
+  if (adminPanelUrl()) inline_keyboard.push([{ text: 'Admin panelni ochish', web_app: { url: adminPanelUrl() } }]);
   if (GROUP_CHAT_URL) inline_keyboard.push([{ text: 'Savdo chatini ochish', url: GROUP_CHAT_URL }]);
   for (const id of ADMIN_TELEGRAM_IDS) {
     await sendTelegramMessage(id, compactRequestMessage(doc), inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {});
   }
+}
+
+
+function slugKey(label, fallback = 'field') {
+  const key = String(label || '').toLowerCase().replace(/['‘’`]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 36);
+  return key || `${fallback}_${crypto.randomBytes(2).toString('hex')}`;
+}
+function normalizeCustomFields(value) {
+  if (Array.isArray(value)) {
+    return value.map((field) => ({
+      key: slugKey(field.key || field.label),
+      label: String(field.label || field.key || '').trim(),
+      type: ['text', 'number', 'select', 'textarea', 'url', 'tel'].includes(String(field.type || '').toLowerCase()) ? String(field.type).toLowerCase() : 'text',
+      required: parseBoolean(field.required, false),
+      placeholder: String(field.placeholder || '').trim(),
+      options: Array.isArray(field.options) ? field.options.map((x) => String(x).trim()).filter(Boolean) : String(field.options || '').split(',').map((x) => x.trim()).filter(Boolean),
+    })).filter((field) => field.label);
+  }
+  return String(value || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parts = line.split('|').map((x) => x.trim());
+    const label = parts[0] || '';
+    const type = ['text', 'number', 'select', 'textarea', 'url', 'tel'].includes((parts[1] || '').toLowerCase()) ? parts[1].toLowerCase() : 'text';
+    return {
+      key: slugKey(label),
+      label,
+      type,
+      required: ['1', 'true', 'ha', 'required', 'yes'].includes(String(parts[2] || '').toLowerCase()),
+      placeholder: parts[3] || '',
+      options: (parts[4] || '').split(',').map((x) => x.trim()).filter(Boolean),
+    };
+  });
+}
+function normalizeImageUrls(value) {
+  return String(value || '').split(/\n|,/).map((url) => url.trim()).filter((url) => /^https?:\/\//i.test(url)).slice(0, 8).map((url) => ({ url, publicId: '', local: false }));
+}
+async function getSettingsLean() {
+  if (!isDbReady()) return { referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL, marketplaceTitle: 'Marketplace' };
+  const settings = await SocialSettings.findOne({ key: 'main' }).lean();
+  return settings || { referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL, marketplaceTitle: 'Marketplace' };
+}
+async function recordVisitor(initData, startParam = '') {
+  const tg = validateTelegramInitData(initData);
+  if (!tg.ok || !tg.user?.id) return { user: null, isAdmin: false, reason: tg.reason };
+  const tgUser = tg.user;
+  const telegramUserId = String(tgUser.id);
+  const referralCode = `U${telegramUserId}`;
+  const referredBy = String(startParam || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+  const payload = {
+    telegramUserId,
+    username: tgUser.username || '',
+    fullName: userFullName(tgUser),
+    referralCode,
+    lastSeen: new Date(),
+  };
+  if (referredBy && referredBy !== referralCode) payload.referredBy = referredBy;
+  let user = { telegramUserId, username: tgUser.username || '', fullName: userFullName(tgUser), referralCode, referredBy, visits: 1 };
+  if (isDbReady()) {
+    user = await SocialVisitor.findOneAndUpdate(
+      { telegramUserId },
+      { $set: payload, $inc: { visits: 1 }, $setOnInsert: { firstSeen: new Date(), bonusBalance: 0 } },
+      { upsert: true, new: true, lean: true }
+    );
+  }
+  return { user, isAdmin: isAdminTelegramId(telegramUserId) };
 }
 
 app.get('/api/health', (_req, res) => res.json({ success: true, app: 'social-garant-market', time: new Date().toISOString(), database: dbStatus() }));
@@ -331,6 +463,36 @@ app.get('/api/config', (_req, res) => {
     legalNote: 'Faqat egasining roziligi bor hisoblar qabul qilinadi. Parol, SMS kod va 2FA kodlarni formaga yozmang.',
   });
 });
+
+
+app.get('/api/settings', asyncHandler(async (_req, res) => {
+  const settings = await getSettingsLean();
+  res.json({ success: true, settings, database: dbStatus() });
+}));
+
+app.post('/api/track-user', asyncHandler(async (req, res) => {
+  const initData = req.body?.initData || req.get('X-Telegram-Init-Data') || '';
+  const startParam = req.body?.startParam || '';
+  const result = await recordVisitor(initData, startParam);
+  res.json({ success: true, ...result, database: dbStatus() });
+}));
+
+app.get('/api/marketplace', asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.json({ success: true, items: [], database: dbStatus(), fallback: true });
+  const filter = { approved: true, status: { $ne: 'HIDDEN' } };
+  if (req.query.platform) filter.platform = req.query.platform;
+  if (req.query.status) filter.status = req.query.status;
+  const items = await MarketplaceItem.find(filter).sort({ status: 1, sort: 1, createdAt: -1 }).limit(250).lean();
+  res.json({ success: true, items, database: dbStatus() });
+}));
+
+app.get('/api/marketplace/:id', asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  ensureObjectId(req.params.id);
+  const item = await MarketplaceItem.findOne({ _id: req.params.id, approved: true, status: { $ne: 'HIDDEN' } }).lean();
+  if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.' });
+  res.json({ success: true, item });
+}));
 
 app.get('/api/catalog', asyncHandler(async (_req, res) => {
   if (!isDbReady()) {
@@ -400,7 +562,7 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
     referredBy: referralCode,
     startParam,
     proofImages,
-    extra: { ...safeJsonParse(body.extra, {}), startParam },
+    extra: { ...safeJsonParse(body.extra, {}), dynamicFields: safeJsonParse(body.dynamicFields, {}), marketplaceItemId: body.marketplaceItemId || '', startParam },
     note: body.note || '',
   };
 
@@ -435,15 +597,19 @@ app.post('/api/admin/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) return res.json({ success: true, stats: { total: 0, fresh: 0, inGarant: 0, done: 0, services: DEFAULT_SERVICES.length }, database: dbStatus(), fallback: true });
-  const [total, fresh, inGarant, done, services] = await Promise.all([
+  if (!isDbReady()) return res.json({ success: true, stats: { total: 0, fresh: 0, inGarant: 0, done: 0, services: DEFAULT_SERVICES.length, users: 0, marketplace: 0, sold: 0, referrals: 0 }, database: dbStatus(), fallback: true });
+  const [total, fresh, inGarant, done, services, users, marketplace, sold, referrals] = await Promise.all([
     SocialRequest.countDocuments(),
     SocialRequest.countDocuments({ status: 'NEW' }),
     SocialRequest.countDocuments({ status: 'IN_GUARANT' }),
     SocialRequest.countDocuments({ status: 'DONE' }),
     SocialService.countDocuments({ active: true }),
+    SocialVisitor.countDocuments(),
+    MarketplaceItem.countDocuments({ approved: true, status: { $ne: 'HIDDEN' } }),
+    MarketplaceItem.countDocuments({ status: 'SOLD' }),
+    SocialVisitor.countDocuments({ referredBy: { $nin: ['', null] } }),
   ]);
-  res.json({ success: true, stats: { total, fresh, inGarant, done, services }, database: dbStatus() });
+  res.json({ success: true, stats: { total, fresh, inGarant, done, services, users, marketplace, sold, referrals }, database: dbStatus() });
 }));
 
 app.get('/api/admin/services', requireAdmin, asyncHandler(async (_req, res) => {
@@ -467,6 +633,7 @@ app.post('/api/admin/services', requireAdmin, asyncHandler(async (req, res) => {
     priceFrom: normalizeNumber(body.priceFrom),
     currency: body.currency || DEFAULT_CURRENCY,
     requiredFields: Array.isArray(body.requiredFields) ? body.requiredFields : String(body.requiredFields || '').split('\n').map((x) => x.trim()).filter(Boolean),
+    customFields: normalizeCustomFields(body.customFields || body.managedInputs || body.requiredFields),
     active: parseBoolean(body.active, true),
     sort: normalizeNumber(body.sort) || 100,
   });
@@ -482,6 +649,8 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
   if ('sort' in patch) patch.sort = normalizeNumber(patch.sort);
   if ('active' in patch) patch.active = parseBoolean(patch.active, true);
   if ('requiredFields' in patch && !Array.isArray(patch.requiredFields)) patch.requiredFields = String(patch.requiredFields || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  if ('customFields' in patch || 'managedInputs' in patch) patch.customFields = normalizeCustomFields(patch.customFields || patch.managedInputs || patch.requiredFields || '');
+  delete patch.managedInputs;
   const service = await SocialService.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, service });
 }));
@@ -511,6 +680,117 @@ app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res)
   res.json({ success: true, request: doc });
 }));
 
+
+app.get('/api/admin/users', requireAdmin, asyncHandler(async (_req, res) => {
+  if (!isDbReady()) return res.json({ success: true, users: [], database: dbStatus(), fallback: true });
+  const users = await SocialVisitor.find().sort({ lastSeen: -1 }).limit(500).lean();
+  res.json({ success: true, users, database: dbStatus() });
+}));
+
+app.get('/api/admin/settings', requireAdmin, asyncHandler(async (_req, res) => {
+  const settings = await getSettingsLean();
+  res.json({ success: true, settings, database: dbStatus() });
+}));
+
+app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  const body = req.body || {};
+  const patch = {
+    referralBonus: normalizeNumber(body.referralBonus),
+    referralBonusText: String(body.referralBonusText || '').trim() || 'Referral bonus shartlarini admin belgilaydi.',
+    tradeChatUrl: String(body.tradeChatUrl || '').trim(),
+    marketplaceTitle: String(body.marketplaceTitle || '').trim() || 'Marketplace',
+  };
+  const settings = await SocialSettings.findOneAndUpdate({ key: 'main' }, { $set: patch, $setOnInsert: { key: 'main' } }, { upsert: true, new: true, lean: true });
+  res.json({ success: true, settings });
+}));
+
+app.get('/api/admin/marketplace', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.json({ success: true, items: [], database: dbStatus(), fallback: true });
+  const filter = {};
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.platform) filter.platform = req.query.platform;
+  const items = await MarketplaceItem.find(filter).sort({ sort: 1, createdAt: -1 }).limit(500).lean();
+  res.json({ success: true, items, database: dbStatus() });
+}));
+
+app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  const body = req.body || {};
+  const images = normalizeImageUrls(body.imageUrls);
+  for (const file of (req.files || [])) images.push(await uploadToCloudinary(file, 'social-garant/marketplace'));
+  const item = await MarketplaceItem.create({
+    title: body.title,
+    platform: body.platform || 'other',
+    category: body.category || 'accounts',
+    badge: body.badge || '',
+    description: body.description || '',
+    accountLink: body.accountLink || '',
+    accountUsername: body.accountUsername || '',
+    audienceSize: body.audienceSize || '',
+    niche: body.niche || '',
+    country: body.country || '',
+    monetization: body.monetization || '',
+    price: normalizeNumber(body.price),
+    oldPrice: normalizeNumber(body.oldPrice),
+    currency: body.currency || DEFAULT_CURRENCY,
+    images,
+    status: body.status || 'AVAILABLE',
+    approved: parseBoolean(body.approved, true),
+    sort: normalizeNumber(body.sort) || 100,
+  });
+  res.status(201).json({ success: true, item });
+}));
+
+app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  ensureObjectId(req.params.id);
+  const body = req.body || {};
+  const patch = { ...body };
+  for (const key of ['price', 'oldPrice', 'sort']) if (key in patch) patch[key] = normalizeNumber(patch[key]);
+  if ('approved' in patch) patch.approved = parseBoolean(patch.approved, true);
+  if ('imageUrls' in patch) { patch.images = normalizeImageUrls(patch.imageUrls); delete patch.imageUrls; }
+  if (patch.status === 'SOLD') patch.soldAt = new Date();
+  const item = await MarketplaceItem.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
+  res.json({ success: true, item });
+}));
+
+app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  ensureObjectId(req.params.id);
+  await MarketplaceItem.findByIdAndDelete(req.params.id);
+  res.json({ success: true });
+}));
+
+app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandler(async (req, res) => {
+  if (!isDbReady()) return res.status(503).json({ success: false, message: 'Maʼlumotlar bazasi ulanmagan.', database: dbStatus() });
+  ensureObjectId(req.params.id);
+  const r = await SocialRequest.findById(req.params.id).lean();
+  if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.' });
+  const item = await MarketplaceItem.create({
+    title: req.body?.title || r.serviceTitle || `${r.platform} hisob`,
+    platform: r.platform || 'other',
+    category: r.requestType === 'SERVICE_ORDER' ? 'other' : 'accounts',
+    badge: 'Tasdiqlangan',
+    description: req.body?.description || r.note || `${r.accountUsername || r.accountLink || 'Hisob'} bo‘yicha admin tasdiqlagan eʼlon.`,
+    accountLink: r.accountLink || '',
+    accountUsername: r.accountUsername || '',
+    audienceSize: r.audienceSize || '',
+    niche: r.niche || '',
+    country: r.country || '',
+    monetization: r.monetization || '',
+    price: r.price || 0,
+    currency: r.currency || DEFAULT_CURRENCY,
+    images: r.proofImages || [],
+    sourceRequestId: r._id,
+    approved: true,
+    status: 'AVAILABLE',
+    sort: 100,
+  });
+  await SocialRequest.findByIdAndUpdate(r._id, { status: 'IN_GUARANT', adminNote: `${r.adminNote || ''}\nMarketplacega chiqarildi: ${item._id}`.trim() });
+  res.status(201).json({ success: true, item });
+}));
+
 app.post('/telegram/webhook', asyncHandler(async (req, res) => {
   if (TELEGRAM_WEBHOOK_SECRET && req.get('X-Telegram-Bot-Api-Secret-Token') !== TELEGRAM_WEBHOOK_SECRET) return res.status(401).json({ ok: false });
   const msg = req.body?.message;
@@ -524,6 +804,7 @@ app.post('/telegram/webhook', asyncHandler(async (req, res) => {
   if (text.startsWith('/start') || text === '/menu') {
     const startParam = text.startsWith('/start') ? text.replace(/^\/start(@\w+)?\s*/i, '').trim() : '';
     const buttons = [];
+    if (isAdminTelegramId(chatId) && adminPanelUrl()) buttons.push([{ text: 'Admin panel', web_app: { url: adminPanelUrl() } }]);
     if (webAppStartUrl(startParam)) buttons.push([{ text: 'Garant Marketni ochish', web_app: { url: webAppStartUrl(startParam) } }]);
     if (GROUP_CHAT_URL) buttons.push([{ text: 'Savdo guruhi/chati', url: GROUP_CHAT_URL }]);
     if (ADMIN_TELEGRAM_URL) buttons.push([{ text: 'Admin bilan bog‘lanish', url: ADMIN_TELEGRAM_URL }]);
