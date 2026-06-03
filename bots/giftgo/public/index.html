@@ -261,11 +261,12 @@
 (() => {
   const tg = window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
   const $ = id => document.getElementById(id);
+  function apiUrl(url){const u=String(url||'');if(!u.startsWith('/'))return u;const first=location.pathname.split('/').filter(Boolean)[0]||'';return `${location.origin}${first?`/${first}`:''}${u}`;}
   const demoUserId = localStorage.getItem('gift_demo_user_id') || (()=>{const v='demo-'+Math.random().toString(16).slice(2);localStorage.setItem('gift_demo_user_id',v);return v;})();
   const startParam = new URLSearchParams(location.search).get('startapp') || '';
   const state = {settings:{},products:[],categories:[],services:[],cart:JSON.parse(localStorage.getItem('gift_cart')||'[]'),category:'ALL',customer:null,promo:null,customerLocation:null,quote:null,map:null,userMarker:null,businessMarker:null,liveWatchId:null,currentProduct:null,currentRating:0,currentReviews:[],detailSlideIndex:0,detailSlideTimer:null,detailTouchStartX:0,detailFullIndex:0,pendingCustomFieldDraft:{}};
   function headers(json=true){const h={}; if(json)h['Content-Type']='application/json'; if(tg?.initData)h['X-Telegram-Init-Data']=tg.initData; else h['X-Demo-User-Id']=demoUserId; return h;}
-  async function api(url,opt={}){opt.headers={...headers(!(opt.body instanceof FormData)),...(opt.headers||{})}; if(opt.body instanceof FormData){delete opt.headers['Content-Type']; if(!tg?.initData)opt.body.append('demoUserId',demoUserId); if(startParam)opt.body.append('startParam',startParam);} const r=await fetch(url,opt); const d=await r.json().catch(()=>({success:false,message:'Server javobi noto‘g‘ri'})); if(!r.ok||d.success===false)throw new Error(d.message||'Xatolik'); return d;}
+  async function api(url,opt={}){opt.headers={...headers(!(opt.body instanceof FormData)),...(opt.headers||{})}; if(opt.body instanceof FormData){delete opt.headers['Content-Type']; if(!tg?.initData)opt.body.append('demoUserId',demoUserId); if(startParam)opt.body.append('startParam',startParam);} const r=await fetch(apiUrl(url),opt); const d=await r.json().catch(()=>({success:false,message:'Server javobi noto‘g‘ri'})); if(!r.ok||d.success===false)throw new Error(d.message||'Xatolik'); return d;}
   function toast(msg,ms=3200){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),ms)}
   function money(n){return `${Number(n||0).toLocaleString('uz-UZ')} ${state.settings.currency||'UZS'}`}
   function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}

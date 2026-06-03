@@ -119,7 +119,8 @@
   <script>
     const tg = window.Telegram?.WebApp;
     if (tg) { tg.ready(); tg.expand(); }
-    const API = new URL('./api/', location.href).toString();
+    const firstPath = location.pathname.split('/').filter(Boolean)[0] || '';
+    const API = `${location.origin}${firstPath ? `/${firstPath}` : ''}/api/`;
     let config = {}; let services = []; let selectedType = 'SELL_ACCOUNT';
     const $ = (id) => document.getElementById(id);
     function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3200); }

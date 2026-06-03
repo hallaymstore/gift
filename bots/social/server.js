@@ -235,6 +235,17 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
 function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${WEBAPP_URL}${q}`; }
 function adminPanelUrl() { return PUBLIC_URL ? `${PUBLIC_URL}/admin` : ''; }
 
+async function ensureBotMenuButton() {
+  if (!BOT_TOKEN || !WEBAPP_URL) return;
+  try {
+    await telegramApi('setChatMenuButton', {
+      menu_button: { type: 'web_app', text: 'Garant Market', web_app: { url: WEBAPP_URL } }
+    });
+  } catch (error) {
+    console.error('Telegram menu button error:', error.message);
+  }
+}
+
 function requestTypeText(type) {
   return ({ SELL_ACCOUNT: 'Akkaunt sotish', BUY_ACCOUNT: 'Akkaunt sotib olish', GUARANT_DEAL: 'Garant bitim', SERVICE_ORDER: 'Xizmat buyurtmasi' })[type] || type;
 }
@@ -453,6 +464,7 @@ app.get('/telegram/set-webhook', asyncHandler(async (_req, res) => {
     secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
     allowed_updates: ['message'],
   });
+  await ensureBotMenuButton();
   res.json({ success: Boolean(result?.ok), result });
 }));
 
@@ -478,6 +490,7 @@ async function boot() {
           allowed_updates: ['message'],
         });
         console.log('Telegram webhook:', result?.ok ? 'set' : JSON.stringify(result));
+        await ensureBotMenuButton();
       } catch (error) { console.error('Telegram webhook error:', error.message); }
     }
     if (TELEGRAM_POLLING) console.warn('TELEGRAM_POLLING=true sozlangan, lekin bu bot Render uchun webhook rejimida ishlaydi.');

@@ -48,7 +48,8 @@
 
 <script>
   const tg = window.Telegram?.WebApp; if(tg){tg.ready();tg.expand();}
-  const API = new URL('./api/', location.href).toString();
+  const firstPath = location.pathname.split('/').filter(Boolean)[0] || '';
+  const API = `${location.origin}${firstPath ? `/${firstPath}` : ''}/api/`;
   let token = localStorage.getItem('socialAdminToken') || '';
   const $ = id => document.getElementById(id);
   const esc = s => String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));

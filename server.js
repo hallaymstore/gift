@@ -28,6 +28,22 @@ function detectPublicUrl() {
 
 const PUBLIC_ROOT_URL = cleanPublicUrl(process.env.PUBLIC_URL) || cleanPublicUrl(detectPublicUrl());
 
+function joinUrlPath(root, basePath, trailingSlash = false) {
+  const base = String(basePath || '').replace(/\/+$/, '');
+  if (!root) return '';
+  const url = `${String(root).replace(/\/+$/, '')}${base}`;
+  return trailingSlash ? `${url}/` : url;
+}
+
+function safeTargetPath(originalUrl, basePath) {
+  const raw = String(originalUrl || '/');
+  const base = String(basePath || '').replace(/\/+$/, '');
+  let rest = raw.startsWith(base) ? raw.slice(base.length) : raw;
+  if (!rest || rest === '?' || rest.startsWith('?')) rest = `/${rest.startsWith('?') ? rest : ''}`;
+  if (!rest.startsWith('/')) rest = `/${rest}`;
+  return rest;
+}
+
 function prefixed(prefix, name, fallback = undefined) {
   const value = process.env[`${prefix}_${name}`];
   if (value !== undefined && value !== '') return value;
@@ -60,8 +76,11 @@ function makeBotEnv(bot) {
   const env = { ...process.env };
   env.PORT = String(bot.port);
   env.NODE_ENV = process.env.NODE_ENV || 'production';
-  env.PUBLIC_URL = PUBLIC_ROOT_URL ? `${PUBLIC_ROOT_URL}${bot.basePath}` : prefixed(bot.prefix, 'PUBLIC_URL', process.env.PUBLIC_URL || '');
-  env.WEBAPP_URL = prefixed(bot.prefix, 'WEBAPP_URL', env.PUBLIC_URL);
+  const botPublicUrl = PUBLIC_ROOT_URL ? joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, false) : prefixed(bot.prefix, 'PUBLIC_URL', process.env.PUBLIC_URL || '');
+  env.PUBLIC_URL = String(botPublicUrl || '').replace(/\/+$/, '');
+  // Mini App URL har doim slash bilan tugasin: Telegram webview va relative fetch yo‘llarida redirect sikl bo‘lmaydi.
+  const botWebAppUrl = prefixed(bot.prefix, 'WEBAPP_URL', joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, true) || (env.PUBLIC_URL ? `${env.PUBLIC_URL}/` : ''));
+  env.WEBAPP_URL = String(botWebAppUrl || '').replace(/\/+$/, '') + (botWebAppUrl ? '/' : '');
   env.MONGODB_URI = botMongoUri(bot.prefix, bot.defaultDbName);
 
   const mappedKeys = [
@@ -169,12 +188,11 @@ function startBot(bot) {
 
 function proxyTo(bot, stripBasePath = true) {
   return (req, res) => {
-    const strippedPath = stripBasePath ? (req.originalUrl.slice(bot.basePath.length) || '/') : req.originalUrl;
-    const targetPath = strippedPath.startsWith('/') ? strippedPath : `/${strippedPath}`;
+    const targetPath = stripBasePath ? safeTargetPath(req.originalUrl, bot.basePath) : (req.originalUrl || '/');
     const headers = { ...req.headers };
     headers.host = `${INTERNAL_HOST}:${bot.port}`;
     headers['x-forwarded-host'] = req.headers.host || '';
-    headers['x-forwarded-proto'] = req.protocol || 'https';
+    headers['x-forwarded-proto'] = req.get('x-forwarded-proto') || req.protocol || 'https';
     headers['x-forwarded-prefix'] = bot.basePath;
 
     const proxyReq = http.request({
@@ -185,8 +203,11 @@ function proxyTo(bot, stripBasePath = true) {
       headers
     }, (proxyRes) => {
       const responseHeaders = { ...proxyRes.headers };
-      if (responseHeaders.location && responseHeaders.location.startsWith('/')) {
-        responseHeaders.location = bot.basePath + responseHeaders.location;
+      if (responseHeaders.location) {
+        const loc = String(responseHeaders.location);
+        if (loc.startsWith('/') && !loc.startsWith(bot.basePath + '/')) {
+          responseHeaders.location = bot.basePath + loc;
+        }
       }
       res.writeHead(proxyRes.statusCode || 500, responseHeaders);
       proxyRes.pipe(res);
@@ -235,7 +256,7 @@ app.get('/api/health', (_req, res) => {
       path: bot.basePath,
       internalPort: bot.port,
       running: children.has(bot.key),
-      publicUrl: PUBLIC_ROOT_URL ? `${PUBLIC_ROOT_URL}${bot.basePath}` : ''
+      publicUrl: joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, true)
     }))
   });
 });
@@ -261,7 +282,8 @@ app.get('/', (_req, res) => {
 });
 
 for (const bot of bots) {
-  app.get(bot.basePath, (_req, res) => res.redirect(`${bot.basePath}/`));
+  // /giftgo va /giftgo/ ikkalasi ham ichki botning / sahifasiga tushadi.
+  // 301/302 redirect qilmaymiz — Telegram WebView ichida ERR_TOO_MANY_REDIRECTS shu joydan ko‘p chiqadi.
   app.use(bot.basePath, proxyTo(bot));
 }
 

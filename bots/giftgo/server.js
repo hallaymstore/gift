@@ -91,6 +91,17 @@ function adminPanelUrl() { return PUBLIC_URL ? `${PUBLIC_URL}/admin` : ''; }
 function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${WEBAPP_URL}${q}`; }
 function botStartUrl(botUsername, startParam = '') { const username = String(botUsername || '').replace(/^@/, '').trim(); if (!username) return webAppStartUrl(startParam); return `https://t.me/${username}${startParam ? `?start=${encodeURIComponent(startParam)}` : ''}`; }
 
+async function ensureBotMenuButton() {
+  if (!BOT_TOKEN || !WEBAPP_URL) return;
+  try {
+    await telegramApi('setChatMenuButton', {
+      menu_button: { type: 'web_app', text: 'Sovg‘alar', web_app: { url: WEBAPP_URL } }
+    });
+  } catch (error) {
+    console.error('Telegram menu button error:', error.message);
+  }
+}
+
 function makeLogoDataUri() {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect width="512" height="512" rx="126" fill="#fff0f4"/><circle cx="256" cy="246" r="146" fill="#e21b4d"/><path d="M160 252c52-92 124-124 192-52 20 22 26 58 4 92-40 62-152 74-196-40Z" fill="#fff"/><path d="M170 248c42-64 100-92 150-42 19 19 21 46 3 72-34 50-120 55-153-30Z" fill="#e21b4d"/><circle cx="318" cy="162" r="30" fill="#ffcf4a"/><text x="256" y="404" text-anchor="middle" font-family="Arial" font-weight="900" font-size="42" fill="#e21b4d">GIFT</text></svg>`;
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
@@ -1053,7 +1064,7 @@ app.patch('/api/admin/reviews/:id', verifyAdminToken, asyncHandler(async (req, r
 }));
 
 app.get('/api/admin/bot/status', verifyAdminToken, asyncHandler(async (_req, res) => { const [webhookInfo, identity] = await Promise.all([telegramApi('getWebhookInfo', {}), getTelegramBotIdentity(true)]); res.json({ success: true, bot: { hasToken: Boolean(BOT_TOKEN), username: identity?.username || '', firstName: identity?.first_name || '', expectedUsername: BOT_EXPECTED_USERNAME, publicUrl: PUBLIC_URL, webAppUrl: WEBAPP_URL, autoSetWebhook: AUTO_SET_WEBHOOK, polling: TELEGRAM_POLLING, webhookSecretEnabled: Boolean(TELEGRAM_WEBHOOK_SECRET), adminIdsConfigured: adminIdsConfigured(), adminIdsCount: ADMIN_TELEGRAM_IDS.size, adminPanelUrl: adminPanelUrl(), webhookInfo } }); }));
-app.post('/api/admin/bot/setup-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { if (!PUBLIC_URL) return res.status(400).json({ success: false, message: 'PUBLIC_URL kerak.' }); const identity = await syncTelegramBotIdentity(); const result = await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); res.json({ success: Boolean(result.ok), bot: identity, result }); }));
+app.post('/api/admin/bot/setup-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { if (!PUBLIC_URL) return res.status(400).json({ success: false, message: 'PUBLIC_URL kerak.' }); const identity = await syncTelegramBotIdentity(); const result = await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); await ensureBotMenuButton(); res.json({ success: Boolean(result.ok), bot: identity, result }); }));
 app.post('/api/admin/bot/delete-webhook', verifyAdminToken, asyncHandler(async (_req, res) => { const result = await telegramApi('deleteWebhook', { drop_pending_updates: false }); res.json({ success: Boolean(result.ok), result }); }));
 
 app.get('/telegram/webhook', (_req, res) => res.send('GiftGo Telegram webhook is alive'));
@@ -1097,7 +1108,7 @@ mongoose.connect(MONGODB_URI).then(async () => {
   app.listen(PORT, async () => {
     console.log(`GiftGo Mini App listening on ${PORT}`);
     if (BOT_TOKEN) await syncTelegramBotIdentity();
-    if (AUTO_SET_WEBHOOK && PUBLIC_URL && BOT_TOKEN) await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true });
+    if (AUTO_SET_WEBHOOK && PUBLIC_URL && BOT_TOKEN) { await telegramApi('setWebhook', { url: `${PUBLIC_URL}/telegram/webhook`, secret_token: TELEGRAM_WEBHOOK_SECRET || undefined, allowed_updates: ['message', 'callback_query'], drop_pending_updates: true }); await ensureBotMenuButton(); }
     if (TELEGRAM_POLLING && BOT_TOKEN && !AUTO_SET_WEBHOOK) {
       // Agar oldingi deployda webhook qolib ketgan bo‘lsa, getUpdates ishlamaydi.
       // .env o‘zgarmasdan ham /start javob berishi uchun pollingdan oldin webhook xavfsiz o‘chiriladi.
