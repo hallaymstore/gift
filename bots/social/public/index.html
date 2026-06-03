@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Garant Market</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{--red:#e50914;--red2:#b8000c;--black:#09090b;--ink:#18181b;--muted:#71717a;--line:#ececef;--soft:#f7f7f8;--white:#fff;--radius:14px;--shadow:0 18px 46px rgba(9,9,11,.08)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#fff;color:var(--ink);font-family:Inter,Arial,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.app{max-width:760px;margin:0 auto;min-height:100vh;padding:14px 14px 90px}.hero{position:relative;overflow:hidden;background:linear-gradient(135deg,#0a0a0c,#161616 65%,#290006);color:#fff;border:1px solid #201015;border-radius:22px;padding:18px;box-shadow:var(--shadow)}.hero:before{content:"";position:absolute;right:-80px;top:-80px;width:210px;height:210px;background:radial-gradient(circle,rgba(229,9,20,.42),transparent 68%)}.heroTop{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px}.brand{display:flex;align-items:center;gap:10px}.logo{width:46px;height:46px;border-radius:13px;background:#fff;display:grid;place-items:center;color:var(--red);font-weight:950;letter-spacing:-1px}.brand h1{margin:0;font-size:20px}.brand p{margin:2px 0 0;color:#d4d4d8;font-size:12px}.badge{background:rgba(229,9,20,.16);border:1px solid rgba(229,9,20,.38);color:#fff;border-radius:999px;padding:7px 10px;font-size:12px;font-weight:800}.heroText{position:relative;margin-top:18px}.heroText h2{margin:0;font-size:25px;line-height:1.1;letter-spacing:-.7px}.heroText p{margin:10px 0 0;color:#e4e4e7;line-height:1.45;font-size:14px}.heroActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.btn{border:none;border-radius:12px;padding:12px 14px;background:var(--red);color:#fff;font-weight:850;box-shadow:0 12px 28px rgba(229,9,20,.22)}.btn.black{background:#111;color:#fff}.btn.ghost{background:#fff;color:#111;border:1px solid var(--line);box-shadow:none}.btn.mini{padding:9px 11px;font-size:13px;border-radius:10px}.btn.full{width:100%}.trust{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}.trust div{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.14);border-radius:13px;padding:10px}.trust b{display:block;font-size:15px}.trust small{color:#d4d4d8;font-size:11px}.notice{margin:12px 0;padding:12px;border-radius:15px;background:#fff5f5;border:1px solid #ffd4d7;color:#5d080d;font-size:13px;line-height:1.45}.tabs{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.92);backdrop-filter:blur(14px);display:grid;grid-template-columns:repeat(4,1fr);gap:7px;padding:10px 0;margin:10px 0}.tab{border:1px solid var(--line);background:#fff;border-radius:12px;padding:10px 6px;font-size:12px;font-weight:850;color:#18181b}.tab.active{background:#111;color:#fff;border-color:#111}.section{display:none;animation:fade .18s ease}.section.active{display:block}@keyframes fade{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:none}}.head{display:flex;justify-content:space-between;align-items:end;gap:10px;margin:12px 0}.head h2{margin:0;font-size:20px}.head small{color:var(--muted)}.grid{display:grid;gap:10px}.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;box-shadow:0 10px 28px rgba(9,9,11,.045)}.service{position:relative;overflow:hidden}.service:before{content:"";position:absolute;right:-28px;top:-28px;width:88px;height:88px;border-radius:50%;background:rgba(229,9,20,.08)}.serviceTop{position:relative;display:flex;justify-content:space-between;gap:10px}.service h3{margin:0;font-size:16px}.service p{margin:8px 0 0;color:#52525b;font-size:13px;line-height:1.45}.pill{display:inline-flex;align-items:center;border-radius:999px;background:#111;color:#fff;padding:6px 9px;font-size:11px;font-weight:850}.platform{color:var(--red);font-weight:900;text-transform:uppercase;font-size:11px;margin-bottom:4px}.reqFields{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}.chip{border:1px solid #eee;background:#fafafa;border-radius:999px;padding:5px 8px;font-size:11px;color:#52525b}.search{display:flex;gap:8px;margin:10px 0}.search input{width:100%;border:1px solid var(--line);border-radius:13px;padding:12px;background:#fff}.panel{background:#fff;border:1px solid var(--line);border-radius:18px;padding:14px;margin:10px 0;box-shadow:var(--shadow)}.field{display:grid;gap:6px;margin:10px 0}.field label{font-weight:850;font-size:13px;color:#27272a}.field input,.field select,.field textarea{width:100%;border:1px solid #e4e4e7;background:#fff;border-radius:12px;padding:12px;outline:none}.field textarea{min-height:86px;resize:vertical}.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--red);box-shadow:0 0 0 4px rgba(229,9,20,.09)}.row{display:grid;grid-template-columns:1fr 1fr;gap:9px}.switcher{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.switcher button{border:1px solid var(--line);background:#fff;border-radius:12px;padding:11px 6px;font-weight:850;font-size:12px}.switcher button.active{background:var(--red);color:#fff;border-color:var(--red)}.summary{background:#0d0d0f;color:#fff;border-radius:15px;padding:13px;font-size:13px;line-height:1.5}.summary b{color:#fff}.proofs{display:grid;gap:8px}.file{border:1px dashed #d4d4d8;border-radius:13px;padding:12px;background:#fafafa;font-size:13px}.bottomBar{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);width:min(760px,calc(100% - 22px));display:grid;grid-template-columns:repeat(4,1fr);gap:7px;background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:18px;padding:8px;box-shadow:0 18px 48px rgba(9,9,11,.14);backdrop-filter:blur(16px);z-index:30}.bottomBar button{border:0;background:transparent;border-radius:12px;padding:9px 4px;font-size:11px;font-weight:850;color:#52525b}.bottomBar button.active{background:#111;color:#fff}.floatAdmin{position:fixed;right:15px;bottom:88px;background:var(--red);color:#fff;text-decoration:none;border-radius:999px;padding:12px 14px;font-weight:900;box-shadow:0 14px 34px rgba(229,9,20,.26);z-index:25}.status{padding:9px 10px;border-radius:12px;background:#f4f4f5;color:#3f3f46;font-size:12px;font-weight:850}.hidden{display:none!important}.empty{text-align:center;color:var(--muted);padding:18px}.toast{position:fixed;left:50%;bottom:154px;transform:translateX(-50%);background:#111;color:#fff;padding:12px 14px;border-radius:13px;z-index:60;box-shadow:0 16px 42px rgba(0,0,0,.22);display:none;max-width:88%;font-size:13px}.toast.show{display:block}.miniText{font-size:12px;color:var(--muted);line-height:1.4}.dangerText{color:#861018;font-size:12px;line-height:1.45}@media(max-width:560px){.app{padding:10px 10px 90px}.hero{border-radius:20px;padding:15px}.heroText h2{font-size:22px}.trust{grid-template-columns:1fr}.tabs{grid-template-columns:repeat(2,1fr)}.row{grid-template-columns:1fr}.bottomBar{grid-template-columns:repeat(4,1fr)}.floatAdmin{bottom:86px}}
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="hero">
+      <div class="heroTop">
+        <div class="brand"><div class="logo">GM</div><div><h1 id="brandName">Garant Market</h1><p id="brandSubtitle">Ijtimoiy tarmoq hisoblari savdosi</p></div></div>
+        <span class="badge">Qizil × Qora</span>
+      </div>
+      <div class="heroText">
+        <h2>Akkaunt savdosi, reklama kanallari va garant bitimlar bitta joyda</h2>
+        <p>YouTube, Instagram, TikTok, Telegram va PUBG hisoblari bo‘yicha ma’lumot yuboring. Admin tekshiradi, tomonlarni bog‘laydi va garantlik tartibida savdoni nazorat qiladi.</p>
+        <div class="heroActions"><button class="btn" onclick="showSection('form')">So‘rov yuborish</button><button class="btn ghost" onclick="showSection('services')">Xizmatlar</button></div>
+      </div>
+      <div class="trust"><div><b>Garant</b><small>admin nazorati</small></div><div><b>Dalillar</b><small>screen/profil</small></div><div><b>Tez aloqa</b><small>Telegram orqali</small></div></div>
+    </section>
+
+    <div class="notice" id="legalNote">Faqat qonuniy, egasining roziligi bor hisoblar qabul qilinadi. Parol va maxfiy kodlarni ochiq formaga yozmang.</div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="services" onclick="showSection('services')">Xizmatlar</button>
+      <button class="tab" data-tab="form" onclick="showSection('form')">So‘rov</button>
+      <button class="tab" data-tab="guide" onclick="showSection('guide')">Garant tartibi</button>
+      <button class="tab" data-tab="orders" onclick="showSection('orders')">Mening so‘rovlarim</button>
+    </nav>
+
+    <section id="services" class="section active">
+      <div class="head"><div><h2>Xizmatlar</h2><small>Admin paneldan yana xizmat qo‘shish mumkin</small></div><button class="btn mini black" onclick="openAdmin()">Admin</button></div>
+      <div class="search"><input id="serviceSearch" placeholder="YouTube, Instagram, garant, PUBG..." oninput="renderServices()" /></div>
+      <div id="servicesGrid" class="grid"></div>
+    </section>
+
+    <section id="form" class="section">
+      <div class="panel">
+        <div class="head"><div><h2>Garant so‘rov yuborish</h2><small>Kerakli inputlarni to‘ldiring</small></div></div>
+        <div class="switcher">
+          <button id="typeSell" class="active" onclick="setRequestType('SELL_ACCOUNT')">Sotaman</button>
+          <button id="typeBuy" onclick="setRequestType('BUY_ACCOUNT')">Sotib olaman</button>
+          <button id="typeGarant" onclick="setRequestType('GUARANT_DEAL')">Garant</button>
+        </div>
+        <form id="requestForm" onsubmit="submitRequest(event)">
+          <input type="hidden" id="requestType" name="requestType" value="SELL_ACCOUNT" />
+          <input type="hidden" id="serviceId" name="serviceId" />
+
+          <div class="row">
+            <div class="field"><label>Xizmat turi</label><select id="serviceSelect" name="serviceId" onchange="selectService(this.value)"></select></div>
+            <div class="field"><label>Platforma</label><select id="platform" name="platform"><option value="youtube">YouTube</option><option value="instagram">Instagram</option><option value="tiktok">TikTok</option><option value="telegram">Telegram</option><option value="pubg">PUBG Mobile</option><option value="facebook">Facebook</option><option value="ads">Reklama kanali</option><option value="other">Boshqa</option></select></div>
+          </div>
+
+          <div class="row">
+            <div class="field"><label>Hisob turi</label><input id="accountType" name="accountType" placeholder="Kanal, profil, guruh, o‘yin hisob..." /></div>
+            <div class="field"><label>Username / ID</label><input id="accountUsername" name="accountUsername" placeholder="@username yoki hisob ID" /></div>
+          </div>
+          <div class="field"><label>Hisob/profil havolasi</label><input id="accountLink" name="accountLink" placeholder="https://..." /></div>
+          <div class="row">
+            <div class="field"><label>Auditoriya / obunachi</label><input id="audienceSize" name="audienceSize" placeholder="Masalan: 12 500 obunachi" /></div>
+            <div class="field"><label>Narx / byudjet</label><input id="price" name="price" type="number" inputmode="numeric" placeholder="Masalan: 500000" /></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>Monetizatsiya / holat</label><input id="monetization" name="monetization" placeholder="Ulangan, ulanmagan, aktiv..." /></div>
+            <div class="field"><label>Nisha / davlat</label><input id="niche" name="niche" placeholder="Gaming, music, USA, UZ..." /></div>
+          </div>
+
+          <div class="panel" style="box-shadow:none;margin-top:12px">
+            <h3 style="margin:0 0 8px">Sotuvchi ma’lumotlari</h3>
+            <div class="row"><div class="field"><label>Ism</label><input name="sellerName" placeholder="Sotuvchi ismi" /></div><div class="field"><label>Telefon</label><input name="sellerPhone" placeholder="+998..." /></div></div>
+            <div class="field"><label>Telegram</label><input name="sellerTelegram" placeholder="@username" /></div>
+          </div>
+          <div class="panel" style="box-shadow:none;margin-top:12px">
+            <h3 style="margin:0 0 8px">Xaridor ma’lumotlari</h3>
+            <div class="row"><div class="field"><label>Ism</label><input name="buyerName" placeholder="Xaridor ismi" /></div><div class="field"><label>Telefon</label><input name="buyerPhone" placeholder="+998..." /></div></div>
+            <div class="field"><label>Telegram</label><input name="buyerTelegram" placeholder="@username" /></div>
+          </div>
+
+          <div class="field"><label>Topshirish usuli</label><select name="transferMethod"><option>Garant admin orqali bosqichma-bosqich</option><option>Email/telefon almashtirish</option><option>Kanal egasini o‘zgartirish</option><option>Login ma’lumotlarini topshirish</option><option>Boshqa</option></select></div>
+          <div class="proofs"><label class="file">Profil/statistika screenshotlari <input type="file" name="proofImages" accept="image/png,image/jpeg,image/webp" multiple /></label></div>
+          <div class="field"><label>Qo‘shimcha izoh</label><textarea name="note" placeholder="Hisob tarixi, shartlar, garant foizi, kelishuv, admin bilishi kerak bo‘lgan ma’lumotlar..."></textarea></div>
+          <div class="summary"><b>Eslatma:</b> parol, SMS kod, 2FA kod va maxfiy ma’lumotlarni formaga yozmang. Admin faqat kelishuv jarayonida xavfsiz tartibda yo‘l-yo‘riq beradi.</div>
+          <button class="btn full" id="submitBtn" type="submit">So‘rovni adminga yuborish</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="guide" class="section">
+      <div class="panel"><h2>Garantlik qanday ishlaydi?</h2><div class="grid">
+        <div class="card"><b>1. So‘rov yuboriladi</b><p class="miniText">Sotuvchi yoki xaridor profil ma’lumotlarini kiritadi. Screenshot va havolalar tekshiruvni tezlashtiradi.</p></div>
+        <div class="card"><b>2. Admin Telegramda bog‘lanadi</b><p class="miniText">Admin tomonlarni aniqlaydi, bitim summasi va topshirish tartibini kelishadi.</p></div>
+        <div class="card"><b>3. To‘lov va topshirish nazorati</b><p class="miniText">Pul, akkaunt huquqi va dalillar bo‘yicha bosqichma-bosqich tekshiruv qilinadi.</p></div>
+        <div class="card"><b>4. Yakunlash</b><p class="miniText">Xaridor hisobni qabul qilganidan keyin bitim yakunlanadi. Muammoli holatda dalillar saqlanadi.</p></div>
+      </div></div>
+      <div class="notice dangerText">Akkaunt savdosi ayrim platformalar qoidalariga zid bo‘lishi mumkin. Faqat egasining roziligi bor, noqonuniy yo‘l bilan olingan bo‘lmagan hisoblar bo‘yicha murojaat qiling.</div>
+    </section>
+
+    <section id="orders" class="section">
+      <div class="head"><div><h2>Mening so‘rovlarim</h2><small>Telegram Mini App ichida ochilganda avtomatik chiqadi</small></div><button class="btn mini ghost" onclick="loadMyRequests()">Yangilash</button></div>
+      <div id="myRequests" class="grid"></div>
+    </section>
+  </main>
+
+  <a id="adminFloat" class="floatAdmin hidden" target="_blank" rel="noopener">Admin</a>
+  <div class="bottomBar">
+    <button class="active" data-bottom="services" onclick="showSection('services')">Xizmatlar</button>
+    <button data-bottom="form" onclick="showSection('form')">So‘rov</button>
+    <button data-bottom="guide" onclick="showSection('guide')">Garant</button>
+    <button data-bottom="orders" onclick="showSection('orders')">So‘rovlar</button>
+  </div>
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { tg.ready(); tg.expand(); }
+    const API = new URL('./api/', location.href).toString();
+    let config = {}; let services = []; let selectedType = 'SELL_ACCOUNT';
+    const $ = (id) => document.getElementById(id);
+    function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3200); }
+    function money(v,c='UZS'){ return Number(v||0).toLocaleString('uz-UZ')+' '+c; }
+    function esc(s){ return String(s??'').replace(/[&<>'"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch])); }
+    async function api(path, options={}){ const r=await fetch(API+path.replace(/^\//,''), options); const j=await r.json().catch(()=>({success:false,message:'Server javobi noto‘g‘ri'})); if(!r.ok||j.success===false) throw new Error(j.message||'Xatolik'); return j; }
+    function showSection(id){ document.querySelectorAll('.section').forEach(s=>s.classList.toggle('active',s.id===id)); document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===id)); document.querySelectorAll('.bottomBar button').forEach(b=>b.classList.toggle('active',b.dataset.bottom===id)); if(id==='orders') loadMyRequests(); }
+    function setRequestType(type){ selectedType=type; $('requestType').value=type; ['Sell','Buy','Garant'].forEach(x=>$('type'+x).classList.remove('active')); ({SELL_ACCOUNT:'typeSell',BUY_ACCOUNT:'typeBuy',GUARANT_DEAL:'typeGarant'}[type] && $(({SELL_ACCOUNT:'typeSell',BUY_ACCOUNT:'typeBuy',GUARANT_DEAL:'typeGarant'}[type])).classList.add('active')); }
+    function selectService(id){ const s=services.find(x=>x._id===id); if(!s)return; $('serviceId').value=id; if(s.platform && s.platform!=='all') $('platform').value=s.platform; $('accountType').placeholder=(s.requiredFields||[])[0]||'Kanal, profil, guruh, o‘yin hisob...'; }
+    function renderServices(){ const q=($('serviceSearch').value||'').toLowerCase(); const list=services.filter(s=>[s.title,s.platform,s.category,s.description].join(' ').toLowerCase().includes(q)); $('servicesGrid').innerHTML=list.map(s=>`<article class="card service"><div class="serviceTop"><div><div class="platform">${esc(s.platform||'all')}</div><h3>${esc(s.title)}</h3></div><span class="pill">${esc(s.badge||s.category)}</span></div><p>${esc(s.description||'')}</p><div class="reqFields">${(s.requiredFields||[]).slice(0,5).map(f=>`<span class="chip">${esc(f)}</span>`).join('')}</div><div class="heroActions"><button class="btn mini" onclick="chooseService('${s._id}')">Tanlash</button><button class="btn mini ghost" onclick="showSection('guide')">Tartib</button></div></article>`).join('') || '<div class="empty">Xizmat topilmadi</div>'; }
+    function fillServiceSelect(){ $('serviceSelect').innerHTML='<option value="">Umumiy so‘rov</option>'+services.map(s=>`<option value="${s._id}">${esc(s.title)}</option>`).join(''); }
+    function chooseService(id){ $('serviceSelect').value=id; selectService(id); showSection('form'); toast('Xizmat tanlandi. Endi inputlarni to‘ldiring.'); }
+    function openAdmin(){ location.href='./admin'; }
+    async function submitRequest(e){ e.preventDefault(); const btn=$('submitBtn'); btn.disabled=true; btn.textContent='Yuborilmoqda...'; try{ const fd=new FormData(e.target); fd.set('requestType', selectedType); fd.set('currency', config.currency||'UZS'); if(tg?.initData) fd.set('initData', tg.initData); if(tg?.initDataUnsafe?.user){ const u=tg.initDataUnsafe.user; fd.set('telegramUserId', u.id||''); fd.set('telegramUsername', u.username||''); fd.set('telegramFullName', [u.first_name,u.last_name].filter(Boolean).join(' ')); } const j=await fetch(API+'requests',{method:'POST',body:fd}).then(async r=>{const x=await r.json(); if(!r.ok||x.success===false) throw new Error(x.message||'Xatolik'); return x;}); toast(j.message||'So‘rov yuborildi'); e.target.reset(); setRequestType('SELL_ACCOUNT'); if(config.adminTelegramUrl) setTimeout(()=>window.open(config.adminTelegramUrl,'_blank'),650); }catch(err){ toast(err.message); }finally{ btn.disabled=false; btn.textContent='So‘rovni adminga yuborish'; } }
+    async function loadMyRequests(){ const uid=tg?.initDataUnsafe?.user?.id; if(!uid){ $('myRequests').innerHTML='<div class="empty">Telegram Mini App ichida ochilsa, so‘rovlaringiz shu yerda ko‘rinadi.</div>'; return; } try{ const j=await api('requests/my?telegramUserId='+encodeURIComponent(uid)); $('myRequests').innerHTML=(j.requests||[]).map(r=>`<div class="card"><div class="serviceTop"><b>#${esc(r.requestNo)}</b><span class="status">${esc(r.status)}</span></div><p class="miniText">${esc(r.serviceTitle||r.platform)} · ${esc(r.accountUsername||r.accountLink||'Hisob')}</p><b>${money(r.price,r.currency)}</b></div>`).join('')||'<div class="empty">Hali so‘rov yo‘q</div>'; }catch(e){ $('myRequests').innerHTML='<div class="empty">'+esc(e.message)+'</div>'; } }
+    async function boot(){ try{ const c=await api('config'); config=c; $('brandName').textContent=c.brand?.name||'Garant Market'; $('brandSubtitle').textContent=c.brand?.subtitle||''; $('legalNote').textContent=c.legalNote||$('legalNote').textContent; if(c.adminTelegramUrl){ $('adminFloat').href=c.adminTelegramUrl; $('adminFloat').textContent=c.adminTelegramUsername?'@'+c.adminTelegramUsername:'Admin'; $('adminFloat').classList.remove('hidden'); } const cat=await api('catalog'); services=cat.services||[]; fillServiceSelect(); renderServices(); }catch(e){ toast(e.message); } }
+    boot();
+  </script>
+</body>
+</html>

@@ -1,12 +1,12 @@
 {
-  "name": "giftgo-hybrid-telegram-mini-app",
-  "version": "3.0.0",
+  "name": "render-multi-telegram-mini-apps",
+  "version": "1.0.0",
   "private": true,
-  "description": "Universal Telegram Mini App for flowers, gifts, cakes, delivery, preorder, express random orders, promo, referral and cashback.",
+  "description": "GiftGo, EduCourse va Garant Market botlarini bitta Render serverida ishga tushirish uchun multi-bot runner.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js && node --check bots/giftgo/server.js && node --check bots/course/server.js && node --check bots/social/server.js"
   },
   "engines": {
     "node": ">=18"
