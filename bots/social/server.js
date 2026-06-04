@@ -57,8 +57,11 @@ function firstEnv(...names) {
 function normalizeTelegramUsername(value) {
   return String(value || '').trim().replace(/^https?:\/\/(t\.me|telegram\.me)\//i, '').replace(/^@/, '').split(/[/?#]/)[0];
 }
-const ADMIN_TELEGRAM_USERNAME = normalizeTelegramUsername(firstEnv('SOCIAL_ADMIN_TELEGRAM_USERNAME', 'ADMIN_TELEGRAM_USERNAME', 'ADMIN_USERNAME'));
-const ADMIN_TELEGRAM_URL = cleanPublicUrl(firstEnv('SOCIAL_ADMIN_TELEGRAM_URL', 'ADMIN_TELEGRAM_URL')) || (ADMIN_TELEGRAM_USERNAME ? `https://t.me/${ADMIN_TELEGRAM_USERNAME}` : '');
+const REQUESTED_ADMIN_USERNAME = 'Qoryogdiyev';
+const ENV_ADMIN_TELEGRAM_USERNAME = normalizeTelegramUsername(firstEnv('SOCIAL_ADMIN_TELEGRAM_USERNAME', 'ADMIN_TELEGRAM_USERNAME', 'ADMIN_USERNAME'));
+// User-facing garant admin contact. Kept fixed so channel posts always show the requested admin.
+const ADMIN_TELEGRAM_USERNAME = REQUESTED_ADMIN_USERNAME || ENV_ADMIN_TELEGRAM_USERNAME;
+const ADMIN_TELEGRAM_URL = `https://t.me/${ADMIN_TELEGRAM_USERNAME}`;
 const DEFAULT_TRADE_CHAT_URL = 'https://t.me/youtube_savdolarr';
 const DEFAULT_CHANNEL_URL = 'https://t.me/akkaunt_savdoolar';
 const GROUP_CHAT_URL = cleanPublicUrl(firstEnv('SOCIAL_GROUP_CHAT_URL', 'GROUP_CHAT_URL', 'SOCIAL_TRADE_CHAT_URL')) || DEFAULT_TRADE_CHAT_URL || ADMIN_TELEGRAM_URL;
@@ -122,6 +125,27 @@ function randomCode(prefix = 'SG') { return `${prefix}-${crypto.randomBytes(3).t
 function userFullName(user, fallback = '') { return [user?.first_name, user?.last_name].filter(Boolean).join(' ') || fallback || 'Telegram foydalanuvchi'; }
 function isAdminTelegramId(id) { return ADMIN_TELEGRAM_IDS.has(String(id || '').trim()); }
 function isConfiguredCloudinary() { return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET); }
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+async function waitForDatabaseReady(timeoutMs = Number(process.env.SOCIAL_DB_WAIT_MS || 15000)) {
+  if (isDbReady()) return true;
+  if (!databaseConnecting) connectMongoWithRetry().catch(() => {});
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (isDbReady()) return true;
+    await sleep(350);
+  }
+  return isDbReady();
+}
+async function requirePersistentDatabase(res) {
+  const ok = await waitForDatabaseReady();
+  if (ok) return true;
+  res.status(503).json({
+    success: false,
+    message: 'MongoDB ulanmagan. Maʼlumotlar o‘chib ketmasligi uchun admin yozuvlari faqat doimiy bazaga saqlanadi. Render env dagi MONGODB_URI ni tekshirib qayta urinib ko‘ring.',
+    database: dbStatus()
+  });
+  return false;
+}
 
 async function uploadToCloudinary(file, folder) {
   if (!file) return null;
@@ -323,12 +347,12 @@ const DEFAULT_SETTINGS = {
   channelUrl: CHANNEL_URL || DEFAULT_CHANNEL_URL,
   channelChatId: CHANNEL_CHAT_ID || telegramTargetFromUrl(CHANNEL_URL || DEFAULT_CHANNEL_URL),
   paymentInstructions: 'To‘lov ilovasiga o‘ting, to‘lovni yuboring, keyin mini appga qaytib chek rasmini yuklang. Chek admin Telegramiga yuboriladi.',
-  paymentPaynetUrl: "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24",
-  paymentClickUrl: 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD',
-  paymentUzumUrl: 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9',
-  paymentXaznaUrl: 'https://pay.xazna.uz/p2p/e07e655f-886e-4942-b325-846d8a0c2ce9',
-  paymentPaymeUrl: '',
-  paymentOtherUrl: '',
+  paymentPaynetUrl: firstEnv('SOCIAL_PAYMENT_PAYNET_URL', 'PAYMENT_PAYNET_URL') || "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24",
+  paymentClickUrl: firstEnv('SOCIAL_PAYMENT_CLICK_URL', 'PAYMENT_CLICK_URL') || 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD',
+  paymentUzumUrl: firstEnv('SOCIAL_PAYMENT_UZUM_URL', 'PAYMENT_UZUM_URL') || 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9',
+  paymentXaznaUrl: firstEnv('SOCIAL_PAYMENT_XAZNA_URL', 'PAYMENT_XAZNA_URL') || 'https://pay.xazna.uz/p2p/e07e655f-886e-4942-b325-846d8a0c2ce9',
+  paymentPaymeUrl: firstEnv('SOCIAL_PAYMENT_PAYME_URL', 'PAYMENT_PAYME_URL'),
+  paymentOtherUrl: firstEnv('SOCIAL_PAYMENT_OTHER_URL', 'PAYMENT_OTHER_URL'),
   marketplaceTitle: 'Marketplace',
 };
 
@@ -420,6 +444,34 @@ function localStats() {
 function localDbInfo() {
   return { fallbackStorage: !isDbReady(), localStoreFile: LOCAL_STORE_FILE };
 }
+async function syncLocalStoreToMongo() {
+  if (!isDbReady()) return;
+  const store = ensureLocalStore();
+  let moved = { services: 0, marketplace: 0, requests: 0, users: 0 };
+  for (const service of store.services || []) {
+    if (!String(service._id || '').startsWith('local-')) continue;
+    const exists = await SocialService.exists({ title: service.title, createdAt: service.createdAt }).catch(() => null);
+    if (!exists) { const { _id, ...doc } = service; await SocialService.create(doc).catch(() => {}); moved.services++; }
+  }
+  for (const item of store.marketplace || []) {
+    if (!String(item._id || '').startsWith('market-')) continue;
+    const exists = await MarketplaceItem.exists({ title: item.title, createdAt: item.createdAt }).catch(() => null);
+    if (!exists) { const { _id, ...doc } = item; await MarketplaceItem.create(doc).catch(() => {}); moved.marketplace++; }
+  }
+  for (const request of store.requests || []) {
+    if (!String(request._id || '').startsWith('req-')) continue;
+    const exists = await SocialRequest.exists({ requestNo: request.requestNo }).catch(() => null);
+    if (!exists) { const { _id, ...doc } = request; await SocialRequest.create(doc).catch(() => {}); moved.requests++; }
+  }
+  for (const user of store.users || []) {
+    if (!user.telegramUserId) continue;
+    await SocialVisitor.updateOne({ telegramUserId: user.telegramUserId }, { $setOnInsert: user }, { upsert: true }).catch(() => {});
+    moved.users++;
+  }
+  store.lastMongoSyncAt = nowIso();
+  saveLocalStore();
+  if (Object.values(moved).some(Boolean)) console.log('Local social store synced to MongoDB:', moved);
+}
 
 async function seedDefaults() {
   const ops = DEFAULT_SERVICES.map((service) => ({
@@ -430,7 +482,16 @@ async function seedDefaults() {
     },
   }));
   if (ops.length) await SocialService.bulkWrite(ops, { ordered: false });
-  await SocialSettings.updateOne({ key: 'main' }, { $setOnInsert: { key: 'main', ...DEFAULT_SETTINGS } }, { upsert: true });
+  let settings = await SocialSettings.findOne({ key: 'main' });
+  if (!settings) {
+    await SocialSettings.create({ key: 'main', ...DEFAULT_SETTINGS });
+  } else {
+    const patch = {};
+    for (const key of ['tradeChatUrl', 'channelUrl', 'channelChatId', 'paymentInstructions', 'paymentPaynetUrl', 'paymentClickUrl', 'paymentUzumUrl', 'paymentXaznaUrl', 'paymentPaymeUrl', 'paymentOtherUrl', 'marketplaceTitle']) {
+      if (!settings[key] && DEFAULT_SETTINGS[key]) patch[key] = DEFAULT_SETTINGS[key];
+    }
+    if (Object.keys(patch).length) await SocialSettings.updateOne({ key: 'main' }, { $set: patch });
+  }
 }
 
 function adminTokenPayload() { return `${Date.now() + ADMIN_TOKEN_TTL_MS}:${crypto.randomBytes(10).toString('hex')}`; }
@@ -528,33 +589,78 @@ function channelButtons(kind, doc, settings = {}) {
   if (settings.tradeChatUrl || GROUP_CHAT_URL) buttons.push([{ text: 'Savdo guruhiga o‘tish', url: settings.tradeChatUrl || GROUP_CHAT_URL }]);
   return buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
 }
-function channelPostText(kind, doc) {
+function telegramLabelFromUrl(url, fallback = '') {
+  const raw = String(url || '').trim();
+  const m = raw.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{4,})/i);
+  if (m) return '@' + m[1];
+  if (/^@[a-zA-Z0-9_]{4,}$/.test(raw)) return raw;
+  return fallback;
+}
+function compactLinkLine(label, url, fallbackText = '') {
+  const text = telegramLabelFromUrl(url, fallbackText || url);
+  if (!url) return text ? `${label}: <b>${escapeHtml(text)}</b>` : '';
+  return `${label}: <a href="${escapeHtml(url)}">${escapeHtml(text || url)}</a>`;
+}
+function line(label, value, bold = false) {
+  const v = String(value ?? '').trim();
+  if (!v) return '';
+  return `${label}: ${bold ? `<b>${escapeHtml(v)}</b>` : escapeHtml(v)}`;
+}
+function channelPostText(kind, doc, settings = {}) {
   const isService = kind === 'service';
-  const lines = [
-    `${iconText(doc)} <b>${escapeHtml(doc.title || 'Eʼlon')}</b>`,
-    doc.badge ? `🏷 <b>${escapeHtml(doc.badge)}</b>` : '',
-    doc.platform ? `Platforma: <b>${escapeHtml(doc.platform)}</b>` : '',
+  const status = doc.status === 'SOLD' ? '✅ <b>SOTILDI</b>' : (isService ? '🛠 <b>XIZMAT QABUL QILINADI</b>' : '🟢 <b>SOTUVDA</b>');
+  const ownerText = [doc.ownerName, doc.ownerTelegram && (String(doc.ownerTelegram).startsWith('@') ? doc.ownerTelegram : '@' + normalizeTelegramUsername(doc.ownerTelegram)), doc.ownerTelegramId].filter(Boolean).join(' · ');
+  const adminText = '@' + ADMIN_TELEGRAM_USERNAME;
+  const rows = [
+    `${iconText(doc)} <b>${isService ? 'YANGI XIZMAT' : 'YANGI EʼLON'}</b>`,
+    status,
+    '',
+    line('Nomi', doc.title || 'Eʼlon', true),
+    line('Platforma', doc.platform || 'other', true),
+    line('Kategoriya', doc.category || ''),
+    doc.badge ? line('Badge', doc.badge, true) : '',
+    !isService && doc.accountUsername ? line('Username/ID', doc.accountUsername) : '',
+    !isService && doc.accountLink ? `Link: ${escapeHtml(doc.accountLink)}` : '',
     !isService && doc.price ? `Narx: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
     !isService && doc.oldPrice ? `Oldingi narx: <s>${escapeHtml(formatMoney(doc.oldPrice, doc.currency))}</s>` : '',
-    !isService && doc.audienceSize ? `Auditoriya: <b>${escapeHtml(doc.audienceSize)}</b>` : '',
-    !isService && doc.monetization ? `Holat: <b>${escapeHtml(doc.monetization)}</b>` : '',
-    doc.description ? '' : '',
-    doc.description ? escapeHtml(String(doc.description).slice(0, 800)) : '',
+    !isService && doc.audienceSize ? line('Auditoriya/Level', doc.audienceSize, true) : '',
+    !isService && doc.monetization ? line('Holat', doc.monetization, true) : '',
+    !isService && doc.niche ? line('Nisha', doc.niche) : '',
+    !isService && doc.country ? line('Davlat', doc.country) : '',
+    isService && doc.priceFrom ? `Boshlang‘ich narx: <b>${escapeHtml(formatMoney(doc.priceFrom, doc.currency))}</b>` : '',
+    isService && Array.isArray(doc.customFields) && doc.customFields.length ? `Kerakli inputlar: ${escapeHtml(doc.customFields.map((f) => f.label).filter(Boolean).join(', '))}` : '',
+    ownerText ? `Egasi: <b>${escapeHtml(ownerText)}</b>` : 'Egasi: <b>Admin orqali kelishiladi</b>',
+    `Admin: <b>${escapeHtml(adminText)}</b>`,
+    compactLinkLine('Kanalimiz', settings.channelUrl || CHANNEL_URL || DEFAULT_CHANNEL_URL, '@akkaunt_savdoolar'),
+    compactLinkLine('Savdo guruhimiz', settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL, '@youtube_savdolarr'),
     '',
-    isService ? 'So‘rov mini app orqali yuboriladi.' : (doc.status === 'SOLD' ? '✅ <b>SOTILDI</b>' : 'Admin tasdiqlagan marketplace eʼloni.')
+    doc.description ? `Tavsif: ${escapeHtml(String(doc.description).slice(0, 550))}` : '',
+    '',
+    isService ? 'So‘rov mini app orqali yuboriladi. Chek screenshoti admin botiga keladi.' : 'Admin tasdiqlagan marketplace eʼloni. Savdo garant orqali amalga oshiriladi.'
   ].filter((x) => x !== '');
-  return lines.join('\n');
+  let text = rows.join('\n');
+  if (text.length > 950) text = text.slice(0, 930) + '…';
+  return text;
 }
 async function postToChannel(kind, doc) {
   try {
     const settings = await getPostSettings();
-    const target = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
-    if (!target || !BOT_TOKEN) return null;
-    const text = channelPostText(kind, doc);
+    const channelTarget = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
+    const groupTarget = telegramTargetFromUrl(settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL);
+    if (!BOT_TOKEN) return null;
+    const targets = [channelTarget, groupTarget].filter(Boolean).filter((x, i, arr) => arr.indexOf(x) === i);
+    if (!targets.length) return null;
+    const text = channelPostText(kind, doc, settings);
     const firstImage = (doc.images || [])[0]?.url;
     const extra = channelButtons(kind, doc, settings);
-    const result = firstImage && isHttpImage(firstImage) ? await sendTelegramPhoto(target, firstImage, text, extra) : await sendTelegramMessage(target, text, extra);
-    const messageId = result?.result?.message_id ? String(result.result.message_id) : '';
+    let primaryResult = null;
+    for (const [index, target] of targets.entries()) {
+      const result = firstImage && isHttpImage(firstImage)
+        ? await sendTelegramPhoto(target, firstImage, text, extra)
+        : await sendTelegramMessage(target, text, extra);
+      if (index === 0) primaryResult = result;
+    }
+    const messageId = primaryResult?.result?.message_id ? String(primaryResult.result.message_id) : '';
     if (messageId) {
       const patch = { channelMessageId: messageId, channelPostedAt: new Date() };
       if (kind === 'service') {
@@ -565,17 +671,26 @@ async function postToChannel(kind, doc) {
         else localUpdate('marketplace', doc._id, patch);
       }
     }
-    return result;
+    return primaryResult;
   } catch (error) { console.error('Channel auto post failed:', error.message); return null; }
 }
 async function notifySold(item) {
   try {
     const settings = await getPostSettings();
-    const target = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
-    if (!target) return;
-    await sendTelegramMessage(target, `✅ <b>SOTILDI</b>
-${iconText(item)} ${escapeHtml(item.title || 'Eʼlon')}
-Narx: <b>${escapeHtml(formatMoney(item.price, item.currency))}</b>`, channelButtons('marketplace', item, settings));
+    const channelTarget = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
+    const groupTarget = telegramTargetFromUrl(settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL);
+    const targets = [channelTarget, groupTarget].filter(Boolean).filter((x, i, arr) => arr.indexOf(x) === i);
+    if (!targets.length) return;
+    const text = [
+      '✅ <b>SOTILDI</b>',
+      `${iconText(item)} <b>${escapeHtml(item.title || 'Eʼlon')}</b>`,
+      line('Platforma', item.platform || 'other', true),
+      item.price ? `Narx: <b>${escapeHtml(formatMoney(item.price, item.currency))}</b>` : '',
+      `Admin: <b>@${escapeHtml(ADMIN_TELEGRAM_USERNAME)}</b>`,
+      compactLinkLine('Kanalimiz', settings.channelUrl || CHANNEL_URL || DEFAULT_CHANNEL_URL, '@akkaunt_savdoolar'),
+      compactLinkLine('Savdo guruhimiz', settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL, '@youtube_savdolarr'),
+    ].filter(Boolean).join('\n');
+    for (const target of targets) await sendTelegramMessage(target, text, channelButtons('marketplace', item, settings));
   } catch (error) { console.error('Sold notification failed:', error.message); }
 }
 function compactRequestMessage(doc) {
@@ -647,10 +762,18 @@ function normalizeCustomFields(value) {
 function normalizeImageUrls(value) {
   return String(value || '').split(/\n|,/).map((url) => url.trim()).filter((url) => /^https?:\/\//i.test(url)).slice(0, 8).map((url) => ({ url, publicId: '', local: false }));
 }
+function mergeSettings(settings = {}) {
+  const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  for (const key of ['tradeChatUrl', 'channelUrl', 'channelChatId', 'paymentInstructions', 'paymentPaynetUrl', 'paymentClickUrl', 'paymentUzumUrl', 'paymentXaznaUrl', 'marketplaceTitle']) {
+    if (!String(merged[key] || '').trim()) merged[key] = DEFAULT_SETTINGS[key] || '';
+  }
+  if (!merged.channelChatId) merged.channelChatId = telegramTargetFromUrl(merged.channelUrl || DEFAULT_CHANNEL_URL);
+  return merged;
+}
 async function getSettingsLean() {
-  if (!isDbReady()) return { ...DEFAULT_SETTINGS, ...(ensureLocalStore().settings || {}) };
+  if (!isDbReady()) return mergeSettings(ensureLocalStore().settings || {});
   const settings = await SocialSettings.findOne({ key: 'main' }).lean();
-  return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  return mergeSettings(settings || {});
 }
 async function recordVisitor(initData, startParam = '') {
   const tg = validateTelegramInitData(initData);
@@ -758,6 +881,7 @@ app.get('/api/catalog', asyncHandler(async (_req, res) => {
 }));
 
 app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, { name: 'paymentScreenshot', maxCount: 1 }]), asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const initData = body.initData || req.get('X-Telegram-Init-Data') || '';
   const tg = validateTelegramInitData(initData);
@@ -876,7 +1000,8 @@ app.get('/api/admin/services', requireAdmin, asyncHandler(async (_req, res) => {
   res.json({ success: true, services, database: dbStatus() });
 }));
 
-app.post('/api/admin/services', requireAdmin, upload.array('images', 6), asyncHandler(async (req, res) => {
+app.post('/api/admin/services', requireAdmin, upload.array('images', 10), asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const images = normalizeImageUrls(body.imageUrls);
   for (const file of (req.files || [])) images.push(await uploadToCloudinary(file, 'social-garant/services'));
@@ -908,6 +1033,7 @@ app.post('/api/admin/services', requireAdmin, upload.array('images', 6), asyncHa
 }));
 
 app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const patch = { ...body };
   if ('priceFrom' in patch) patch.priceFrom = normalizeNumber(patch.priceFrom);
@@ -927,6 +1053,7 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
 }));
 
 app.delete('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   if (!isDbReady()) {
     localDelete('services', req.params.id);
     return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
@@ -952,6 +1079,7 @@ app.get('/api/admin/requests', requireAdmin, asyncHandler(async (req, res) => {
 }));
 
 app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const patch = {};
   for (const key of ['status', 'adminNote']) if (key in req.body) patch[key] = req.body[key];
   if (!isDbReady()) {
@@ -980,6 +1108,7 @@ app.get('/api/admin/settings', requireAdmin, asyncHandler(async (_req, res) => {
 }));
 
 app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const patch = {
     referralBonus: normalizeNumber(body.referralBonus),
@@ -1020,7 +1149,8 @@ app.get('/api/admin/marketplace', requireAdmin, asyncHandler(async (req, res) =>
   res.json({ success: true, items, database: dbStatus() });
 }));
 
-app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyncHandler(async (req, res) => {
+app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 10), asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const images = normalizeImageUrls(body.imageUrls);
   for (const file of (req.files || [])) images.push(await uploadToCloudinary(file, 'social-garant/marketplace'));
@@ -1062,6 +1192,7 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyn
 }));
 
 app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   const body = req.body || {};
   const patch = { ...body };
   for (const key of ['price', 'oldPrice', 'sort']) if (key in patch) patch[key] = normalizeNumber(patch[key]);
@@ -1083,6 +1214,7 @@ app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, r
 }));
 
 app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   if (!isDbReady()) {
     localDelete('marketplace', req.params.id);
     return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
@@ -1093,6 +1225,7 @@ app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, 
 }));
 
 app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandler(async (req, res) => {
+  if (!(await requirePersistentDatabase(res))) return;
   if (!isDbReady()) {
     const r = localById('requests', req.params.id);
     if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.', database: dbStatus(), local: localDbInfo() });
@@ -1205,6 +1338,7 @@ async function connectMongoWithRetry() {
     databaseReady = true;
     databaseError = '';
     await seedDefaults();
+    await syncLocalStoreToMongo().catch((error) => console.error('Local sync failed:', error.message));
     console.log(`${BRAND_NAME} MongoDB connected`);
   } catch (error) {
     databaseReady = false;

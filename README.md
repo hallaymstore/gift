@@ -98,3 +98,11 @@ SOCIAL_ADMIN_TELEGRAM_URL=https://t.me/Youtube_Admini
 ## Muhim
 
 Yangi frontendlarda API so‘rovlar `./api/...` shaklida yozilgan. Eski frontendlar ichida absolute `/api/...` ishlatilgan bo‘lsa ham, root server Referer bo‘yicha kerakli botga proksi qilishga harakat qiladi.
+
+## Social marketplace so'nggi tuzatishlar
+- Kanal postlari batafsil formatga o'tkazildi: nomi, platforma, egasi, admin, kanalimiz, savdo guruhimiz, narx, auditoriya/level, holat, nisha/davlat va tavsif chiqadi.
+- Admin kontakt: @Qoryogdiyev.
+- Savdo guruhi: https://t.me/youtube_savdolarr.
+- Kanal: https://t.me/akkaunt_savdoolar.
+- Admin yozuvlari va foydalanuvchi so'rovlari endi o'chib ketmasligi uchun MongoDB tayyor bo'lmaguncha local fallbackga yozmaydi; MONGODB_URI orqali doimiy bazaga yoziladi.
+- Marketplace/xizmat qo'shishda qurilmadan bir nechta rasm tanlash saqlangan.
