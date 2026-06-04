@@ -59,7 +59,19 @@ function normalizeTelegramUsername(value) {
 }
 const ADMIN_TELEGRAM_USERNAME = normalizeTelegramUsername(firstEnv('SOCIAL_ADMIN_TELEGRAM_USERNAME', 'ADMIN_TELEGRAM_USERNAME', 'ADMIN_USERNAME'));
 const ADMIN_TELEGRAM_URL = cleanPublicUrl(firstEnv('SOCIAL_ADMIN_TELEGRAM_URL', 'ADMIN_TELEGRAM_URL')) || (ADMIN_TELEGRAM_USERNAME ? `https://t.me/${ADMIN_TELEGRAM_USERNAME}` : '');
-const GROUP_CHAT_URL = cleanPublicUrl(firstEnv('SOCIAL_GROUP_CHAT_URL', 'GROUP_CHAT_URL', 'SOCIAL_TRADE_CHAT_URL')) || ADMIN_TELEGRAM_URL;
+const DEFAULT_TRADE_CHAT_URL = 'https://t.me/youtube_savdolarr';
+const DEFAULT_CHANNEL_URL = 'https://t.me/akkaunt_savdoolar';
+const GROUP_CHAT_URL = cleanPublicUrl(firstEnv('SOCIAL_GROUP_CHAT_URL', 'GROUP_CHAT_URL', 'SOCIAL_TRADE_CHAT_URL')) || DEFAULT_TRADE_CHAT_URL || ADMIN_TELEGRAM_URL;
+const CHANNEL_URL = cleanPublicUrl(firstEnv('SOCIAL_CHANNEL_URL', 'CHANNEL_URL', 'SOCIAL_POST_CHANNEL_URL')) || DEFAULT_CHANNEL_URL;
+function telegramTargetFromUrl(url) {
+  const raw = String(url || '').trim();
+  const m = raw.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{4,})/i);
+  if (m) return '@' + m[1];
+  if (/^-?\d+$/.test(raw)) return raw;
+  if (/^@[a-zA-Z0-9_]{4,}$/.test(raw)) return raw;
+  return '';
+}
+const CHANNEL_CHAT_ID = firstEnv('SOCIAL_CHANNEL_CHAT_ID', 'CHANNEL_CHAT_ID') || telegramTargetFromUrl(CHANNEL_URL);
 const BRAND_NAME = firstEnv('SOCIAL_BRAND_NAME', 'BRAND_NAME') || 'Garant Market';
 const BRAND_SUBTITLE = firstEnv('SOCIAL_BRAND_SUBTITLE', 'BRAND_SUBTITLE') || 'Ijtimoiy tarmoq hisoblari savdosi va garant bitimlar';
 
@@ -93,7 +105,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: UPLOAD_MAX_MB * 1024 * 1024, files: 6 },
+  limits: { fileSize: UPLOAD_MAX_MB * 1024 * 1024, files: 10 },
   fileFilter: (_req, file, cb) => {
     if (!/^image\/(png|jpe?g|webp)$/i.test(file.mimetype)) return cb(new Error('Faqat PNG, JPG yoki WEBP rasm qabul qilinadi.'));
     cb(null, true);
@@ -165,6 +177,8 @@ const serviceSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
   category: { type: String, default: 'accounts', enum: ['accounts', 'guarantee', 'promotion', 'gaming', 'support', 'other'] },
   platform: { type: String, default: 'other', trim: true },
+  iconKey: { type: String, default: '', trim: true },
+  iconEmoji: { type: String, default: '', trim: true },
   badge: { type: String, default: '', trim: true },
   description: { type: String, default: '', trim: true },
   priceFrom: { type: Number, default: 0 },
@@ -173,6 +187,9 @@ const serviceSchema = new mongoose.Schema({
   customFields: [formFieldSchema],
   images: [imageSchema],
   active: { type: Boolean, default: true },
+  autoPost: { type: Boolean, default: true },
+  channelMessageId: { type: String, default: '' },
+  channelPostedAt: { type: Date, default: null },
   sort: { type: Number, default: 100 },
 }, { timestamps: true });
 
@@ -202,6 +219,9 @@ const requestSchema = new mongoose.Schema({
   telegramUsername: { type: String, default: '' },
   telegramFullName: { type: String, default: '' },
   transferMethod: { type: String, default: '' },
+  paymentProvider: { type: String, default: '' },
+  paymentStatus: { type: String, enum: ['NOT_REQUIRED', 'PENDING', 'APPROVED', 'REJECTED'], default: 'PENDING', index: true },
+  paymentScreenshot: imageSchema,
   contactName: { type: String, default: '' },
   contactPhone: { type: String, default: '' },
   contactTelegram: { type: String, default: '' },
@@ -219,6 +239,8 @@ const marketplaceItemSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
   platform: { type: String, default: 'other', index: true },
   category: { type: String, default: 'accounts', index: true },
+  iconKey: { type: String, default: '', trim: true },
+  iconEmoji: { type: String, default: '', trim: true },
   badge: { type: String, default: '', trim: true },
   description: { type: String, default: '', trim: true },
   accountLink: { type: String, default: '', trim: true },
@@ -232,6 +254,13 @@ const marketplaceItemSchema = new mongoose.Schema({
   currency: { type: String, default: DEFAULT_CURRENCY },
   images: [imageSchema],
   sourceRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'SocialRequest', default: null },
+  ownerName: { type: String, default: '', trim: true },
+  ownerTelegram: { type: String, default: '', trim: true },
+  ownerTelegramId: { type: String, default: '', trim: true },
+  ownerChatUrl: { type: String, default: '', trim: true },
+  channelAutoPost: { type: Boolean, default: true },
+  channelMessageId: { type: String, default: '' },
+  channelPostedAt: { type: Date, default: null },
   approved: { type: Boolean, default: true, index: true },
   status: { type: String, enum: ['AVAILABLE', 'RESERVED', 'SOLD', 'HIDDEN'], default: 'AVAILABLE', index: true },
   soldAt: { type: Date, default: null },
@@ -257,6 +286,15 @@ const settingsSchema = new mongoose.Schema({
   referralBonus: { type: Number, default: 0 },
   referralBonusText: { type: String, default: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.' },
   tradeChatUrl: { type: String, default: '' },
+  channelUrl: { type: String, default: '' },
+  channelChatId: { type: String, default: '' },
+  paymentInstructions: { type: String, default: 'To‘lov ilovasiga o‘ting, to‘lovni yuboring, keyin mini appga qaytib chek rasmini yuklang.' },
+  paymentPaynetUrl: { type: String, default: '' },
+  paymentClickUrl: { type: String, default: '' },
+  paymentUzumUrl: { type: String, default: '' },
+  paymentXaznaUrl: { type: String, default: '' },
+  paymentPaymeUrl: { type: String, default: '' },
+  paymentOtherUrl: { type: String, default: '' },
   marketplaceTitle: { type: String, default: 'Marketplace' },
 }, { timestamps: true });
 
@@ -267,21 +305,30 @@ const SocialVisitor = mongoose.model('SocialVisitor', visitorSchema);
 const SocialSettings = mongoose.model('SocialSettings', settingsSchema);
 
 const DEFAULT_SERVICES = [
-  { title: 'Garant bitim xizmati', category: 'guarantee', platform: 'all', badge: 'Xavfsiz', description: 'Sotuvchi va xaridor uchun admin nazoratidagi garant bitim.', priceFrom: 0, sort: 5, requiredFields: ['Hisob havolasi', 'Bitim summasi', 'Kontakt'] },
-  { title: 'YouTube kanal savdosi', category: 'accounts', platform: 'youtube', badge: 'Talabgir', description: 'YouTube kanal sotish yoki sotib olish uchun tekshiruv va garant.', priceFrom: 0, sort: 10, requiredFields: ['Kanal havolasi', 'Obunachi', 'Narx'] },
-  { title: 'Instagram akkaunt savdosi', category: 'accounts', platform: 'instagram', badge: 'Tezkor', description: 'Instagram profil/sahifa savdosi uchun qisqa so‘rov va admin aloqa.', priceFrom: 0, sort: 20, requiredFields: ['Username', 'Follower', 'Narx'] },
-  { title: 'TikTok akkaunt savdosi', category: 'accounts', platform: 'tiktok', badge: 'Trend', description: 'TikTok akkaunt, auditoriya va aktivlik bo‘yicha savdo so‘rovi.', priceFrom: 0, sort: 30, requiredFields: ['Profil link', 'Follower', 'Narx'] },
-  { title: 'Telegram kanal/guruh savdosi', category: 'accounts', platform: 'telegram', badge: 'Kanal', description: 'Telegram kanal, guruh yoki reklama kanalini garant orqali savdo qilish.', priceFrom: 0, sort: 40, requiredFields: ['Kanal linki', 'Aʼzo', 'Narx'] },
-  { title: 'PUBG Mobile hisob savdosi', category: 'gaming', platform: 'pubg', badge: 'Gaming', description: 'PUBG hisob ID, level va skinlar bo‘yicha garantli kelishuv.', priceFrom: 0, sort: 50, requiredFields: ['Hisob ID', 'Level', 'Narx'] },
-  { title: 'Reklama kanallari savdosi', category: 'promotion', platform: 'ads', badge: 'Reklama', description: 'Reklama kanal sotish/sotib olish yoki post joylash bo‘yicha buyurtma.', priceFrom: 0, sort: 60, requiredFields: ['Kanal turi', 'Auditoriya', 'Byudjet'] },
-  { title: 'Hisob tekshirish va maslahat', category: 'support', platform: 'all', badge: 'Tekshiruv', description: 'Akkaunt xavfsizligi, ko‘rsatkichlari va savdoga tayyorligini tekshirish.', priceFrom: 0, sort: 70, requiredFields: ['Hisob turi', 'Muammo', 'Kontakt'] },
+  { title: 'Garant bitim xizmati', iconKey: 'shield', iconEmoji: '🛡', category: 'guarantee', platform: 'all', badge: 'Xavfsiz', description: 'Sotuvchi va xaridor uchun admin nazoratidagi garant bitim.', priceFrom: 0, sort: 5, requiredFields: ['Hisob havolasi', 'Bitim summasi', 'Kontakt'] },
+  { title: 'YouTube kanal savdosi', iconKey: 'youtube', iconEmoji: '▶️', category: 'accounts', platform: 'youtube', badge: 'Talabgir', description: 'YouTube kanal sotish yoki sotib olish uchun tekshiruv va garant.', priceFrom: 0, sort: 10, requiredFields: ['Kanal havolasi', 'Obunachi', 'Narx'] },
+  { title: 'Instagram akkaunt savdosi', iconKey: 'instagram', iconEmoji: '📸', category: 'accounts', platform: 'instagram', badge: 'Tezkor', description: 'Instagram profil/sahifa savdosi uchun qisqa so‘rov va admin aloqa.', priceFrom: 0, sort: 20, requiredFields: ['Username', 'Follower', 'Narx'] },
+  { title: 'TikTok akkaunt savdosi', iconKey: 'tiktok', iconEmoji: '🎵', category: 'accounts', platform: 'tiktok', badge: 'Trend', description: 'TikTok akkaunt, auditoriya va aktivlik bo‘yicha savdo so‘rovi.', priceFrom: 0, sort: 30, requiredFields: ['Profil link', 'Follower', 'Narx'] },
+  { title: 'Telegram kanal/guruh savdosi', iconKey: 'telegram', iconEmoji: '✈️', category: 'accounts', platform: 'telegram', badge: 'Kanal', description: 'Telegram kanal, guruh yoki reklama kanalini garant orqali savdo qilish.', priceFrom: 0, sort: 40, requiredFields: ['Kanal linki', 'Aʼzo', 'Narx'] },
+  { title: 'PUBG Mobile hisob savdosi', iconKey: 'pubg', iconEmoji: '🎮', category: 'gaming', platform: 'pubg', badge: 'Gaming', description: 'PUBG hisob ID, level va skinlar bo‘yicha garantli kelishuv.', priceFrom: 0, sort: 50, requiredFields: ['Hisob ID', 'Level', 'Narx'] },
+  { title: 'Reklama kanallari savdosi', iconKey: 'ads', iconEmoji: '📣', category: 'promotion', platform: 'ads', badge: 'Reklama', description: 'Reklama kanal sotish/sotib olish yoki post joylash bo‘yicha buyurtma.', priceFrom: 0, sort: 60, requiredFields: ['Kanal turi', 'Auditoriya', 'Byudjet'] },
+  { title: 'Hisob tekshirish va maslahat', iconKey: 'verify', iconEmoji: '✅', category: 'support', platform: 'all', badge: 'Tekshiruv', description: 'Akkaunt xavfsizligi, ko‘rsatkichlari va savdoga tayyorligini tekshirish.', priceFrom: 0, sort: 70, requiredFields: ['Hisob turi', 'Muammo', 'Kontakt'] },
 ];
 
 
 const DEFAULT_SETTINGS = {
   referralBonus: 0,
   referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.',
-  tradeChatUrl: GROUP_CHAT_URL || '',
+  tradeChatUrl: GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL,
+  channelUrl: CHANNEL_URL || DEFAULT_CHANNEL_URL,
+  channelChatId: CHANNEL_CHAT_ID || telegramTargetFromUrl(CHANNEL_URL || DEFAULT_CHANNEL_URL),
+  paymentInstructions: 'To‘lov ilovasiga o‘ting, to‘lovni yuboring, keyin mini appga qaytib chek rasmini yuklang. Chek admin Telegramiga yuboriladi.',
+  paymentPaynetUrl: "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24",
+  paymentClickUrl: 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD',
+  paymentUzumUrl: 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9',
+  paymentXaznaUrl: 'https://pay.xazna.uz/p2p/e07e655f-886e-4942-b325-846d8a0c2ce9',
+  paymentPaymeUrl: '',
+  paymentOtherUrl: '',
   marketplaceTitle: 'Marketplace',
 };
 
@@ -383,7 +430,7 @@ async function seedDefaults() {
     },
   }));
   if (ops.length) await SocialService.bulkWrite(ops, { ordered: false });
-  await SocialSettings.updateOne({ key: 'main' }, { $setOnInsert: { key: 'main', referralBonus: 0, referralBonusText: 'Referral orqali do‘st taklif qiling. Bonus shartlarini admin belgilaydi.', tradeChatUrl: GROUP_CHAT_URL || '', marketplaceTitle: 'Marketplace' } }, { upsert: true });
+  await SocialSettings.updateOne({ key: 'main' }, { $setOnInsert: { key: 'main', ...DEFAULT_SETTINGS } }, { upsert: true });
 }
 
 function adminTokenPayload() { return `${Date.now() + ADMIN_TOKEN_TTL_MS}:${crypto.randomBytes(10).toString('hex')}`; }
@@ -424,7 +471,8 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
   if (!chatId) return null;
   return telegramApi('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
 }
-function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${WEBAPP_URL}${q}`; }
+function webAppStartUrl(startParam = '') { if (!WEBAPP_URL) return ''; const q = startParam ? `?startapp=${encodeURIComponent(startParam)}` : ''; return `${String(WEBAPP_URL).replace(/\/+$/, '/')}${q}`; }
+function webAppDeepLink(params = {}) { if (!WEBAPP_URL) return ''; const q = new URLSearchParams(params); const sep = String(WEBAPP_URL).includes('?') ? '&' : '?'; return `${String(WEBAPP_URL).replace(/\/+$/, '/')}${q.toString() ? sep + q.toString() : ''}`; }
 function adminPanelUrl() {
   const base = (WEBAPP_URL || PUBLIC_URL || '').replace(/\/+$/, '');
   return base ? `${base}/admin` : '';
@@ -450,6 +498,86 @@ function statusText(status) {
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
 }
+
+function iconText(doc) {
+  const map = { youtube: '▶️', instagram: '📸', tiktok: '🎵', telegram: '✈️', pubg: '🎮', freefire: '🔥', facebook: 'f', stars: '⭐', premium: '💎', shield: '🛡', verify: '✅', ads: '📣', game: '🎮', football: '⚽', vine: '😂', cs2: '🎯', mlbb: '⚔️', clash: '🏰' };
+  return doc?.iconEmoji || map[String(doc?.iconKey || doc?.platform || '').toLowerCase()] || '🛡';
+}
+function paymentTitle(provider) { return ({ PAYNET: 'Paynet', CLICK: 'Click', UZUM: 'Uzum Bank', XAZNA: 'Xazna', PAYME: 'Payme', OTHER: 'Boshqa' })[String(provider || '').toUpperCase()] || provider || ''; }
+function ownerContactUrl(doc = {}) {
+  const direct = cleanPublicUrl(doc.ownerChatUrl || '');
+  if (direct) return direct;
+  const username = normalizeTelegramUsername(doc.ownerTelegram || '');
+  if (username) return `https://t.me/${username}`;
+  const id = String(doc.ownerTelegramId || '').trim();
+  if (/^-?\d+$/.test(id)) return `tg://user?id=${id}`;
+  return ADMIN_TELEGRAM_URL || GROUP_CHAT_URL || '';
+}
+function isHttpImage(url) { return /^https?:\/\//i.test(String(url || '')); }
+async function sendTelegramPhoto(chatId, photoUrl, caption, extra = {}) {
+  if (!chatId || !photoUrl || !isHttpImage(photoUrl)) return null;
+  return telegramApi('sendPhoto', { chat_id: chatId, photo: photoUrl, caption, parse_mode: 'HTML', ...extra });
+}
+async function getPostSettings() { return getSettingsLean().catch(() => ({ ...DEFAULT_SETTINGS })); }
+function channelButtons(kind, doc, settings = {}) {
+  const buttons = [];
+  const detailUrl = webAppDeepLink(kind === 'service' ? { service: String(doc._id || '') } : { item: String(doc._id || '') });
+  if (detailUrl) buttons.push([{ text: kind === 'service' ? 'So‘rov yuborish' : 'Batafsil ko‘rish', url: detailUrl }]);
+  const owner = ownerContactUrl(doc);
+  if (owner) buttons.push([{ text: 'Egasi bilan kelishish', url: owner }]);
+  if (settings.tradeChatUrl || GROUP_CHAT_URL) buttons.push([{ text: 'Savdo guruhiga o‘tish', url: settings.tradeChatUrl || GROUP_CHAT_URL }]);
+  return buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
+}
+function channelPostText(kind, doc) {
+  const isService = kind === 'service';
+  const lines = [
+    `${iconText(doc)} <b>${escapeHtml(doc.title || 'Eʼlon')}</b>`,
+    doc.badge ? `🏷 <b>${escapeHtml(doc.badge)}</b>` : '',
+    doc.platform ? `Platforma: <b>${escapeHtml(doc.platform)}</b>` : '',
+    !isService && doc.price ? `Narx: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
+    !isService && doc.oldPrice ? `Oldingi narx: <s>${escapeHtml(formatMoney(doc.oldPrice, doc.currency))}</s>` : '',
+    !isService && doc.audienceSize ? `Auditoriya: <b>${escapeHtml(doc.audienceSize)}</b>` : '',
+    !isService && doc.monetization ? `Holat: <b>${escapeHtml(doc.monetization)}</b>` : '',
+    doc.description ? '' : '',
+    doc.description ? escapeHtml(String(doc.description).slice(0, 800)) : '',
+    '',
+    isService ? 'So‘rov mini app orqali yuboriladi.' : (doc.status === 'SOLD' ? '✅ <b>SOTILDI</b>' : 'Admin tasdiqlagan marketplace eʼloni.')
+  ].filter((x) => x !== '');
+  return lines.join('\n');
+}
+async function postToChannel(kind, doc) {
+  try {
+    const settings = await getPostSettings();
+    const target = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
+    if (!target || !BOT_TOKEN) return null;
+    const text = channelPostText(kind, doc);
+    const firstImage = (doc.images || [])[0]?.url;
+    const extra = channelButtons(kind, doc, settings);
+    const result = firstImage && isHttpImage(firstImage) ? await sendTelegramPhoto(target, firstImage, text, extra) : await sendTelegramMessage(target, text, extra);
+    const messageId = result?.result?.message_id ? String(result.result.message_id) : '';
+    if (messageId) {
+      const patch = { channelMessageId: messageId, channelPostedAt: new Date() };
+      if (kind === 'service') {
+        if (isDbReady() && mongoose.Types.ObjectId.isValid(String(doc._id))) await SocialService.findByIdAndUpdate(doc._id, patch).catch(() => {});
+        else localUpdate('services', doc._id, patch);
+      } else {
+        if (isDbReady() && mongoose.Types.ObjectId.isValid(String(doc._id))) await MarketplaceItem.findByIdAndUpdate(doc._id, patch).catch(() => {});
+        else localUpdate('marketplace', doc._id, patch);
+      }
+    }
+    return result;
+  } catch (error) { console.error('Channel auto post failed:', error.message); return null; }
+}
+async function notifySold(item) {
+  try {
+    const settings = await getPostSettings();
+    const target = settings.channelChatId || telegramTargetFromUrl(settings.channelUrl || CHANNEL_URL) || CHANNEL_CHAT_ID;
+    if (!target) return;
+    await sendTelegramMessage(target, `✅ <b>SOTILDI</b>
+${iconText(item)} ${escapeHtml(item.title || 'Eʼlon')}
+Narx: <b>${escapeHtml(formatMoney(item.price, item.currency))}</b>`, channelButtons('marketplace', item, settings));
+  } catch (error) { console.error('Sold notification failed:', error.message); }
+}
 function compactRequestMessage(doc) {
   const lines = [
     `🛡 <b>Yangi garant so‘rov</b>`,
@@ -461,6 +589,8 @@ function compactRequestMessage(doc) {
     doc.accountUsername || doc.accountLink ? `Hisob: ${escapeHtml(doc.accountUsername || doc.accountLink)}` : '',
     doc.audienceSize ? `Auditoriya: ${escapeHtml(doc.audienceSize)}` : '',
     doc.price ? `Summa: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
+    doc.paymentProvider ? `To‘lov: <b>${escapeHtml(paymentTitle(doc.paymentProvider))}</b> · ${escapeHtml(doc.paymentStatus || 'PENDING')}` : '',
+    doc.paymentScreenshot?.url ? `Chek: biriktirilgan` : '',
     doc.contactTelegram || doc.contactPhone ? `Aloqa: ${escapeHtml(doc.contactName || '')} ${escapeHtml(doc.contactTelegram || doc.contactPhone || '')}` : '',
     doc.referralCode ? `Referral: <code>${escapeHtml(doc.referralCode)}</code>` : '',
     doc.sellerTelegram || doc.sellerPhone ? `Sotuvchi: ${escapeHtml(doc.sellerName || '')} ${escapeHtml(doc.sellerTelegram || doc.sellerPhone || '')}` : '',
@@ -479,6 +609,8 @@ async function notifyAdmins(doc) {
   if (GROUP_CHAT_URL) inline_keyboard.push([{ text: 'Savdo chatini ochish', url: GROUP_CHAT_URL }]);
   for (const id of ADMIN_TELEGRAM_IDS) {
     await sendTelegramMessage(id, compactRequestMessage(doc), inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {});
+    const imgs = [doc.paymentScreenshot, ...(doc.proofImages || [])].filter((x) => x?.url && isHttpImage(x.url)).slice(0, 4);
+    for (const img of imgs) await sendTelegramPhoto(id, img.url, `#${escapeHtml(doc.requestNo || '')} rasm/chek`).catch(() => {});
   }
 }
 
@@ -518,7 +650,7 @@ function normalizeImageUrls(value) {
 async function getSettingsLean() {
   if (!isDbReady()) return { ...DEFAULT_SETTINGS, ...(ensureLocalStore().settings || {}) };
   const settings = await SocialSettings.findOne({ key: 'main' }).lean();
-  return settings || { ...DEFAULT_SETTINGS };
+  return { ...DEFAULT_SETTINGS, ...(settings || {}) };
 }
 async function recordVisitor(initData, startParam = '') {
   const tg = validateTelegramInitData(initData);
@@ -569,6 +701,8 @@ app.get('/api/config', (_req, res) => {
     adminTelegramUrl: ADMIN_TELEGRAM_URL,
     adminTelegramUsername: ADMIN_TELEGRAM_USERNAME,
     groupChatUrl: GROUP_CHAT_URL,
+    channelUrl: CHANNEL_URL,
+    channelChatId: CHANNEL_CHAT_ID,
     botUsername: BOT_EXPECTED_USERNAME,
     currency: DEFAULT_CURRENCY,
     legalNote: 'Faqat egasining roziligi bor hisoblar qabul qilinadi. Parol, SMS kod va 2FA kodlarni formaga yozmang.',
@@ -623,16 +757,18 @@ app.get('/api/catalog', asyncHandler(async (_req, res) => {
   res.json({ success: true, services, database: dbStatus() });
 }));
 
-app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (req, res) => {
+app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, { name: 'paymentScreenshot', maxCount: 1 }]), asyncHandler(async (req, res) => {
   const body = req.body || {};
   const initData = body.initData || req.get('X-Telegram-Init-Data') || '';
   const tg = validateTelegramInitData(initData);
   const tgUser = tg.ok ? tg.user : null;
   const serviceId = body.serviceId && mongoose.Types.ObjectId.isValid(String(body.serviceId)) ? body.serviceId : null;
   const service = serviceId && isDbReady() ? await SocialService.findById(serviceId).lean() : null;
-  const files = req.files || [];
+  const proofFiles = Array.isArray(req.files) ? req.files : (req.files?.proofImages || []);
+  const paymentFiles = Array.isArray(req.files) ? [] : (req.files?.paymentScreenshot || []);
   const proofImages = [];
-  for (const file of files) proofImages.push(await uploadToCloudinary(file, 'social-garant/proofs'));
+  for (const file of proofFiles) proofImages.push(await uploadToCloudinary(file, 'social-garant/proofs'));
+  const paymentScreenshot = paymentFiles[0] ? await uploadToCloudinary(paymentFiles[0], 'social-garant/payments') : null;
 
   const requestType = body.requestType || 'GUARANT_DEAL';
   const contactName = String(body.contactName || '').trim();
@@ -666,6 +802,9 @@ app.post('/api/requests', upload.array('proofImages', 6), asyncHandler(async (re
     telegramUsername: tgUser?.username || body.telegramUsername || '',
     telegramFullName: tgUser ? userFullName(tgUser) : (body.telegramFullName || ''),
     transferMethod: body.transferMethod || '',
+    paymentProvider: String(body.paymentProvider || '').toUpperCase(),
+    paymentStatus: body.paymentProvider || paymentScreenshot ? 'PENDING' : 'NOT_REQUIRED',
+    paymentScreenshot: paymentScreenshot || undefined,
     contactName,
     contactPhone,
     contactTelegram,
@@ -745,6 +884,8 @@ app.post('/api/admin/services', requireAdmin, upload.array('images', 6), asyncHa
     title: body.title,
     category: body.category || 'accounts',
     platform: body.platform || 'other',
+    iconKey: body.iconKey || '',
+    iconEmoji: body.iconEmoji || '',
     badge: body.badge || '',
     description: body.description || '',
     priceFrom: normalizeNumber(body.priceFrom),
@@ -753,13 +894,16 @@ app.post('/api/admin/services', requireAdmin, upload.array('images', 6), asyncHa
     customFields: normalizeCustomFields(body.customFields || body.managedInputs || body.requiredFields),
     images,
     active: parseBoolean(body.active, true),
+    autoPost: parseBoolean(body.autoPost, true),
     sort: normalizeNumber(body.sort) || 100,
   };
   if (!isDbReady()) {
     const service = localCreate('services', 'service', payload);
+    if (service.autoPost !== false) postToChannel('service', service).catch((error) => console.error('Service channel post failed:', error.message));
     return res.status(201).json({ success: true, service, database: dbStatus(), local: localDbInfo() });
   }
   const service = await SocialService.create(payload);
+  if (service.autoPost !== false) postToChannel('service', service.toObject ? service.toObject() : service).catch((error) => console.error('Service channel post failed:', error.message));
   res.status(201).json({ success: true, service });
 }));
 
@@ -840,7 +984,16 @@ app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => 
   const patch = {
     referralBonus: normalizeNumber(body.referralBonus),
     referralBonusText: String(body.referralBonusText || '').trim() || 'Referral bonus shartlarini admin belgilaydi.',
-    tradeChatUrl: String(body.tradeChatUrl || '').trim(),
+    tradeChatUrl: String(body.tradeChatUrl || '').trim() || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL,
+    channelUrl: String(body.channelUrl || '').trim() || CHANNEL_URL || DEFAULT_CHANNEL_URL,
+    channelChatId: String(body.channelChatId || '').trim() || telegramTargetFromUrl(String(body.channelUrl || '').trim() || CHANNEL_URL || DEFAULT_CHANNEL_URL),
+    paymentInstructions: String(body.paymentInstructions || '').trim() || DEFAULT_SETTINGS.paymentInstructions,
+    paymentPaynetUrl: String(body.paymentPaynetUrl || '').trim(),
+    paymentClickUrl: String(body.paymentClickUrl || '').trim(),
+    paymentUzumUrl: String(body.paymentUzumUrl || '').trim(),
+    paymentXaznaUrl: String(body.paymentXaznaUrl || '').trim(),
+    paymentPaymeUrl: String(body.paymentPaymeUrl || '').trim(),
+    paymentOtherUrl: String(body.paymentOtherUrl || '').trim(),
     marketplaceTitle: String(body.marketplaceTitle || '').trim() || 'Marketplace',
   };
   if (!isDbReady()) {
@@ -875,6 +1028,8 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyn
     title: body.title,
     platform: body.platform || 'other',
     category: body.category || 'accounts',
+    iconKey: body.iconKey || '',
+    iconEmoji: body.iconEmoji || '',
     badge: body.badge || '',
     description: body.description || '',
     accountLink: body.accountLink || '',
@@ -887,15 +1042,22 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 8), asyn
     oldPrice: normalizeNumber(body.oldPrice),
     currency: body.currency || DEFAULT_CURRENCY,
     images,
+    ownerName: body.ownerName || '',
+    ownerTelegram: body.ownerTelegram || '',
+    ownerTelegramId: body.ownerTelegramId || '',
+    ownerChatUrl: body.ownerChatUrl || '',
+    channelAutoPost: parseBoolean(body.channelAutoPost, true),
     status: body.status || 'AVAILABLE',
     approved: parseBoolean(body.approved, true),
     sort: normalizeNumber(body.sort) || 100,
   };
   if (!isDbReady()) {
     const item = localCreate('marketplace', 'market', payload);
+    if (item.channelAutoPost !== false) postToChannel('marketplace', item).catch((error) => console.error('Marketplace channel post failed:', error.message));
     return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
   }
   const item = await MarketplaceItem.create(payload);
+  if (item.channelAutoPost !== false) postToChannel('marketplace', item.toObject ? item.toObject() : item).catch((error) => console.error('Marketplace channel post failed:', error.message));
   res.status(201).json({ success: true, item });
 }));
 
@@ -907,12 +1069,16 @@ app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, r
   if ('imageUrls' in patch) { patch.images = normalizeImageUrls(patch.imageUrls); delete patch.imageUrls; }
   if (patch.status === 'SOLD') patch.soldAt = new Date();
   if (!isDbReady()) {
+    const before = localById('marketplace', req.params.id);
     const item = localUpdate('marketplace', req.params.id, patch);
     if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.', database: dbStatus(), local: localDbInfo() });
+    if (patch.status === 'SOLD' && before?.status !== 'SOLD') notifySold(item).catch(() => {});
     return res.json({ success: true, item, database: dbStatus(), local: localDbInfo() });
   }
   ensureObjectId(req.params.id);
-  const item = await MarketplaceItem.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
+  const before = await MarketplaceItem.findById(req.params.id).lean();
+  const item = await MarketplaceItem.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true }).lean();
+  if (patch.status === 'SOLD' && before?.status !== 'SOLD') notifySold(item).catch(() => {});
   res.json({ success: true, item });
 }));
 
@@ -951,6 +1117,7 @@ app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandl
       sort: 100,
     });
     localUpdate('requests', r._id, { status: 'IN_GUARANT', adminNote: `${r.adminNote || ''}\nMarketplacega chiqarildi: ${item._id}`.trim() });
+    postToChannel('marketplace', item).catch(() => {});
     return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
   }
   ensureObjectId(req.params.id);
@@ -977,6 +1144,7 @@ app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandl
     sort: 100,
   });
   await SocialRequest.findByIdAndUpdate(r._id, { status: 'IN_GUARANT', adminNote: `${r.adminNote || ''}\nMarketplacega chiqarildi: ${item._id}`.trim() });
+  postToChannel('marketplace', item.toObject ? item.toObject() : item).catch(() => {});
   res.status(201).json({ success: true, item });
 }));
 
