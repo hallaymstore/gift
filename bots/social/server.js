@@ -117,7 +117,7 @@ const upload = multer({
 });
 
 function asyncHandler(fn) { return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next); }
-function normalizeNumber(value) { const n = Number(String(value ?? '').replace(/\s/g, '').replace(/,/g, '.')); return Number.isFinite(n) ? n : 0; }
+function normalizeNumber(value) { if (Array.isArray(value)) value = value.find((x) => String(x ?? '').trim() !== '') ?? value[0]; const n = Number(String(value ?? '').replace(/\s/g, '').replace(/,/g, '.')); return Number.isFinite(n) ? n : 0; }
 function parseBoolean(value, fallback = false) { if (value === undefined || value === null || value === '') return fallback; return ['true', '1', 'yes', 'on', 'ha'].includes(String(value).toLowerCase()); }
 function safeJsonParse(value, fallback) { try { if (typeof value === 'string') return JSON.parse(value); return value ?? fallback; } catch { return fallback; } }
 function formatMoney(amount, currency = DEFAULT_CURRENCY) { return `${Number(amount || 0).toLocaleString('uz-UZ')} ${currency}`; }
@@ -347,7 +347,7 @@ const DEFAULT_SETTINGS = {
   tradeChatUrl: GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL,
   channelUrl: CHANNEL_URL || DEFAULT_CHANNEL_URL,
   channelChatId: CHANNEL_CHAT_ID || telegramTargetFromUrl(CHANNEL_URL || DEFAULT_CHANNEL_URL),
-  paymentInstructions: 'To‘lov ilovasiga o‘ting, to‘lovni yuboring, keyin mini appga qaytib chek rasmini yuklang. Chek admin Telegramiga yuboriladi.',
+  paymentInstructions: 'To‘lov majburiy emas. Xizmat bo‘yicha so‘rov yuboriladi, admin Telegram orqali tasdiqlaydi yoki rad etadi. Zarur bo‘lsa to‘lov linklari admin orqali beriladi.',
   paymentPaynetUrl: firstEnv('SOCIAL_PAYMENT_PAYNET_URL', 'PAYMENT_PAYNET_URL') || "https://app.paynet.uz/qr-online/00020101021140440012qr-online.uz01186r0vBrkobM1uBpXqv40202115204531153038605802UZ5910AO'PAYNET'6008Tashkent610610002164280002uz0106PAYNET0208Toshkent80520012qr-online.uz03097120207070419marketing@paynet.uz63042E24",
   paymentClickUrl: firstEnv('SOCIAL_PAYMENT_CLICK_URL', 'PAYMENT_CLICK_URL') || 'https://my.click.uz/clickp2p/64FF6DA1B8F00B46B2936F561CCF73B01A05A23D2130A2B7F7A9E217A12F0BBD',
   paymentUzumUrl: firstEnv('SOCIAL_PAYMENT_UZUM_URL', 'PAYMENT_UZUM_URL') || 'https://b.2u.uz/ttc?qr=Nzk5MzoyMDQzNTUwMzowMUtTUE1XM0gwSE03RTFUNzRDTU5XRkZLNzpkMUhZYmhKWDZ3UGVQYVkxcW9mU3pVTmRHcVU9',
@@ -581,13 +581,20 @@ async function sendTelegramPhoto(chatId, photoUrl, caption, extra = {}) {
   return telegramApi('sendPhoto', { chat_id: chatId, photo: photoUrl, caption, parse_mode: 'HTML', ...extra });
 }
 async function getPostSettings() { return getSettingsLean().catch(() => ({ ...DEFAULT_SETTINGS })); }
+function miniAppLaunchUrl(kind, doc = {}) {
+  const id = String(doc._id || '').trim();
+  const startParam = kind === 'service' ? `service_${id}` : `item_${id}`;
+  if (BOT_EXPECTED_USERNAME && id) return `https://t.me/${BOT_EXPECTED_USERNAME}?startapp=${encodeURIComponent(startParam)}`;
+  return webAppDeepLink(kind === 'service' ? { service: id } : { item: id });
+}
 function channelButtons(kind, doc, settings = {}) {
   const buttons = [];
-  const detailUrl = webAppDeepLink(kind === 'service' ? { service: String(doc._id || '') } : { item: String(doc._id || '') });
-  if (detailUrl) buttons.push([{ text: kind === 'service' ? 'So‘rov yuborish' : 'Batafsil ko‘rish', url: detailUrl }]);
+  const detailUrl = miniAppLaunchUrl(kind, doc);
+  if (detailUrl) buttons.push([{ text: kind === 'service' ? '📝 So‘rov yuborish' : '🛒 Batafsil ko‘rish / Xarid qilish', url: detailUrl }]);
   const owner = ownerContactUrl(doc);
-  if (owner) buttons.push([{ text: 'Egasi bilan kelishish', url: owner }]);
-  if (settings.tradeChatUrl || GROUP_CHAT_URL) buttons.push([{ text: 'Savdo guruhiga o‘tish', url: settings.tradeChatUrl || GROUP_CHAT_URL }]);
+  if (owner) buttons.push([{ text: '🤝 Egasi bilan kelishish', url: owner }]);
+  if (settings.tradeChatUrl || GROUP_CHAT_URL) buttons.push([{ text: '💬 Savdo guruhiga o‘tish', url: settings.tradeChatUrl || GROUP_CHAT_URL }]);
+  if (ADMIN_TELEGRAM_URL) buttons.push([{ text: '👨‍💼 Adminga murojaat', url: ADMIN_TELEGRAM_URL }]);
   return buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
 }
 function telegramLabelFromUrl(url, fallback = '') {
@@ -616,31 +623,31 @@ function channelPostText(kind, doc, settings = {}) {
     `${iconText(doc)} <b>${isService ? 'YANGI XIZMAT' : 'YANGI EʼLON'}</b>`,
     status,
     '',
-    line('Nomi', doc.title || 'Eʼlon', true),
-    line('Platforma', doc.platform || 'other', true),
-    line('Kategoriya', doc.category || ''),
-    doc.badge ? line('Badge', doc.badge, true) : '',
-    !isService && doc.accountUsername ? line('Username/ID', doc.accountUsername) : '',
-    !isService && doc.accountLink ? `Link: ${escapeHtml(doc.accountLink)}` : '',
-    !isService && doc.price ? `Narx: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
-    !isService && doc.oldPrice ? `Oldingi narx: <s>${escapeHtml(formatMoney(doc.oldPrice, doc.currency))}</s>` : '',
-    !isService && doc.audienceSize ? line('Auditoriya/Level', doc.audienceSize, true) : '',
-    !isService && doc.monetization ? line('Holat', doc.monetization, true) : '',
-    !isService && doc.niche ? line('Nisha', doc.niche) : '',
-    !isService && doc.country ? line('Davlat', doc.country) : '',
-    isService && doc.priceFrom ? `Boshlang‘ich narx: <b>${escapeHtml(formatMoney(doc.priceFrom, doc.currency))}</b>` : '',
-    isService && Array.isArray(doc.customFields) && doc.customFields.length ? `Kerakli inputlar: ${escapeHtml(doc.customFields.map((f) => f.label).filter(Boolean).join(', '))}` : '',
-    ownerText ? `Egasi: <b>${escapeHtml(ownerText)}</b>` : 'Egasi: <b>Admin orqali kelishiladi</b>',
-    `Admin: <b>${escapeHtml(adminText)}</b>`,
-    compactLinkLine('Kanalimiz', settings.channelUrl || CHANNEL_URL || DEFAULT_CHANNEL_URL, '@akkaunt_savdoolar'),
-    compactLinkLine('Savdo guruhimiz', settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL, '@youtube_savdolarr'),
+    line('🏷 Nomi', doc.title || 'Eʼlon', true),
+    line('🌐 Platforma', doc.platform || 'other', true),
+    line('📂 Kategoriya', doc.category || ''),
+    doc.badge ? line('🏅 Badge', doc.badge, true) : '',
+    !isService && doc.accountUsername ? line('👤 Username/ID', doc.accountUsername) : '',
+    !isService && doc.accountLink ? `🔗 Link: ${escapeHtml(doc.accountLink)}` : '',
+    !isService && doc.price ? `💰 Narx: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
+    !isService && doc.oldPrice ? `🏷 Oldingi narx: <s>${escapeHtml(formatMoney(doc.oldPrice, doc.currency))}</s>` : '',
+    !isService && doc.audienceSize ? line('👥 Auditoriya/Level', doc.audienceSize, true) : '',
+    !isService && doc.monetization ? line('📊 Holat', doc.monetization, true) : '',
+    !isService && doc.niche ? line('🎯 Nisha', doc.niche) : '',
+    !isService && doc.country ? line('🌍 Davlat', doc.country) : '',
+    isService && doc.priceFrom ? `💰 Boshlang‘ich narx: <b>${escapeHtml(formatMoney(doc.priceFrom, doc.currency))}</b>` : '',
+    isService && Array.isArray(doc.customFields) && doc.customFields.length ? `🧾 Kerakli inputlar: ${escapeHtml(doc.customFields.map((f) => f.label).filter(Boolean).join(', '))}` : '',
+    ownerText ? `🤝 Egasi: <b>${escapeHtml(ownerText)}</b>` : '🤝 Egasi: <b>Admin orqali kelishiladi</b>',
+    `👨‍💼 Admin: <b>${escapeHtml(adminText)}</b>`,
+    compactLinkLine('📢 Kanalimiz', settings.channelUrl || CHANNEL_URL || DEFAULT_CHANNEL_URL, '@akkaunt_savdoolar'),
+    compactLinkLine('💬 Savdo guruhimiz', settings.tradeChatUrl || GROUP_CHAT_URL || DEFAULT_TRADE_CHAT_URL, '@youtube_savdolarr'),
     '',
-    doc.description ? `Tavsif: ${escapeHtml(String(doc.description).slice(0, 550))}` : '',
+    doc.description ? `📝 Tavsif: ${escapeHtml(String(doc.description).slice(0, 700))}` : '',
     '',
-    isService ? 'So‘rov mini app orqali yuboriladi. Chek screenshoti admin botiga keladi.' : 'Admin tasdiqlagan marketplace eʼloni. Savdo garant orqali amalga oshiriladi.'
+    isService ? '📩 So‘rov mini app orqali yuboriladi. To‘lov shart emas — admin tasdiqlaydi yoki rad etadi.' : '🛡 Admin tasdiqlagan marketplace eʼloni. Savdo garant orqali amalga oshiriladi.'
   ].filter((x) => x !== '');
   let text = rows.join('\n');
-  if (text.length > 950) text = text.slice(0, 930) + '…';
+  if (text.length > 1024) text = text.slice(0, 1000) + '…';
   return text;
 }
 async function postToChannel(kind, doc) {
@@ -695,24 +702,28 @@ async function notifySold(item) {
   } catch (error) { console.error('Sold notification failed:', error.message); }
 }
 function compactRequestMessage(doc) {
+  const dyn = doc.extra?.dynamicFields || {};
+  const dynLines = Object.entries(dyn).filter(([, v]) => String(v ?? '').trim()).map(([k, v]) => `• ${escapeHtml(k)}: <b>${escapeHtml(v)}</b>`);
   const lines = [
     `🛡 <b>Yangi garant so‘rov</b>`,
     `#${escapeHtml(doc.requestNo)}`,
     ``,
-    `Turi: <b>${escapeHtml(requestTypeText(doc.requestType))}</b>`,
-    `Platforma: <b>${escapeHtml(doc.platform)}</b>`,
-    doc.serviceTitle ? `Xizmat: <b>${escapeHtml(doc.serviceTitle)}</b>` : '',
-    doc.accountUsername || doc.accountLink ? `Hisob: ${escapeHtml(doc.accountUsername || doc.accountLink)}` : '',
-    doc.audienceSize ? `Auditoriya: ${escapeHtml(doc.audienceSize)}` : '',
-    doc.price ? `Summa: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
-    doc.paymentProvider ? `To‘lov: <b>${escapeHtml(paymentTitle(doc.paymentProvider))}</b> · ${escapeHtml(doc.paymentStatus || 'PENDING')}` : '',
-    doc.paymentScreenshot?.url ? `Chek: biriktirilgan` : '',
-    doc.contactTelegram || doc.contactPhone ? `Aloqa: ${escapeHtml(doc.contactName || '')} ${escapeHtml(doc.contactTelegram || doc.contactPhone || '')}` : '',
-    doc.referralCode ? `Referral: <code>${escapeHtml(doc.referralCode)}</code>` : '',
-    doc.sellerTelegram || doc.sellerPhone ? `Sotuvchi: ${escapeHtml(doc.sellerName || '')} ${escapeHtml(doc.sellerTelegram || doc.sellerPhone || '')}` : '',
-    doc.buyerTelegram || doc.buyerPhone ? `Xaridor: ${escapeHtml(doc.buyerName || '')} ${escapeHtml(doc.buyerTelegram || doc.buyerPhone || '')}` : '',
-    doc.telegramUsername ? `Telegram: @${escapeHtml(doc.telegramUsername)}` : '',
-    doc.note ? `Izoh: ${escapeHtml(doc.note).slice(0, 800)}` : '',
+    `📌 Turi: <b>${escapeHtml(requestTypeText(doc.requestType))}</b>`,
+    `🌐 Platforma: <b>${escapeHtml(doc.platform)}</b>`,
+    doc.serviceTitle ? `🛠 Xizmat: <b>${escapeHtml(doc.serviceTitle)}</b>` : '',
+    doc.accountUsername || doc.accountLink ? `👤 Hisob: ${escapeHtml(doc.accountUsername || doc.accountLink)}` : '',
+    doc.audienceSize ? `👥 Auditoriya: ${escapeHtml(doc.audienceSize)}` : '',
+    doc.price ? `💰 Summa: <b>${escapeHtml(formatMoney(doc.price, doc.currency))}</b>` : '',
+    doc.paymentProvider ? `💳 To‘lov: <b>${escapeHtml(paymentTitle(doc.paymentProvider))}</b> · ${escapeHtml(doc.paymentStatus || 'PENDING')}` : '💳 To‘lov: <b>shart emas / admin orqali</b>',
+    doc.contactTelegram || doc.contactPhone ? `📞 Aloqa: ${escapeHtml(doc.contactName || '')} ${escapeHtml(doc.contactTelegram || doc.contactPhone || '')}` : '',
+    dynLines.length ? `
+🧾 <b>Input maʼlumotlari:</b>
+${dynLines.join('\n')}` : '',
+    doc.referralCode ? `🎁 Referral: <code>${escapeHtml(doc.referralCode)}</code>` : '',
+    doc.sellerTelegram || doc.sellerPhone ? `🤝 Sotuvchi: ${escapeHtml(doc.sellerName || '')} ${escapeHtml(doc.sellerTelegram || doc.sellerPhone || '')}` : '',
+    doc.buyerTelegram || doc.buyerPhone ? `🛒 Xaridor: ${escapeHtml(doc.buyerName || '')} ${escapeHtml(doc.buyerTelegram || doc.buyerPhone || '')}` : '',
+    doc.telegramUsername ? `👤 Telegram: @${escapeHtml(doc.telegramUsername)}` : '',
+    doc.note ? `📝 Izoh: ${escapeHtml(doc.note).slice(0, 800)}` : '',
     ``,
     adminPanelUrl() ? `Admin panel: ${adminPanelUrl()}` : '',
   ].filter(Boolean);
@@ -721,8 +732,9 @@ function compactRequestMessage(doc) {
 async function notifyAdmins(doc) {
   if (!ADMIN_TELEGRAM_IDS.size) return;
   const inline_keyboard = [];
-  if (adminPanelUrl()) inline_keyboard.push([{ text: 'Admin panelni ochish', web_app: { url: adminPanelUrl() } }]);
-  if (GROUP_CHAT_URL) inline_keyboard.push([{ text: 'Savdo chatini ochish', url: GROUP_CHAT_URL }]);
+  if (adminPanelUrl()) inline_keyboard.push([{ text: '⚙️ Admin panelni ochish', web_app: { url: adminPanelUrl() } }]);
+  if (GROUP_CHAT_URL) inline_keyboard.push([{ text: '💬 Savdo chatini ochish', url: GROUP_CHAT_URL }]);
+  if (ADMIN_TELEGRAM_URL) inline_keyboard.push([{ text: '👨‍💼 Admin profili', url: ADMIN_TELEGRAM_URL }]);
   for (const id of ADMIN_TELEGRAM_IDS) {
     await sendTelegramMessage(id, compactRequestMessage(doc), inline_keyboard.length ? { reply_markup: { inline_keyboard } } : {});
     const imgs = [doc.paymentScreenshot, ...(doc.proofImages || [])].filter((x) => x?.url && isHttpImage(x.url)).slice(0, 4);
@@ -736,6 +748,8 @@ function slugKey(label, fallback = 'field') {
   return key || `${fallback}_${crypto.randomBytes(2).toString('hex')}`;
 }
 function normalizeCustomFields(value) {
+  const parsedValue = typeof value === 'string' && String(value).trim().startsWith('[') ? safeJsonParse(value, null) : value;
+  value = parsedValue ?? value;
   if (Array.isArray(value)) {
     return value.map((field) => ({
       key: slugKey(field.key || field.label),
@@ -895,7 +909,7 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
     audienceSize: body.audienceSize || '',
     monetization: body.monetization || '',
     country: body.country || '',
-    price: normalizeNumber(body.price),
+    price: normalizeNumber(body.price) || normalizeNumber(body.itemPrice) || normalizeNumber(service?.priceFrom),
     currency: body.currency || DEFAULT_CURRENCY,
     sellerName: body.sellerName || (requestType !== 'BUY_ACCOUNT' ? contactName : ''),
     sellerPhone: body.sellerPhone || (requestType !== 'BUY_ACCOUNT' ? contactPhone : ''),
@@ -925,7 +939,7 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
   const stored = true;
 
   notifyAdmins(doc).catch((error) => console.error('Admin notification failed:', error.message));
-  res.status(201).json({ success: true, message: 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.', request: doc, stored, database: dbStatus() });
+  res.status(201).json({ success: true, message: `So‘rov qabul qilindi. Raqam: #${doc.requestNo}. Admin tasdiqlaydi yoki rad etadi.`, request: doc, stored, database: dbStatus() });
 }));
 
 app.get('/api/requests/my', asyncHandler(async (req, res) => {
