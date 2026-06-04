@@ -123,6 +123,9 @@ function safeJsonParse(value, fallback) { try { if (typeof value === 'string') r
 function formatMoney(amount, currency = DEFAULT_CURRENCY) { return `${Number(amount || 0).toLocaleString('uz-UZ')} ${currency}`; }
 function ensureObjectId(id, fieldName = 'ID') { if (!mongoose.Types.ObjectId.isValid(String(id || ''))) { const err = new Error(`${fieldName} noto‘g‘ri.`); err.status = 400; throw err; } return id; }
 function randomCode(prefix = 'SG') { return `${prefix}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`; }
+function publicProductCode(prefix = 'AKK') { return `${prefix}-${crypto.randomBytes(2).toString('hex').toUpperCase()}-${Date.now().toString(36).slice(-4).toUpperCase()}`; }
+function hashPrivateCode(value) { return crypto.createHmac('sha256', APP_SECRET).update(String(value || '')).digest('hex'); }
+function safePublicCode(doc = {}) { return doc.publicCode || doc.extra?.security?.publicCode || (doc._id ? `AKK-${String(doc._id).slice(-6).toUpperCase()}` : publicProductCode('AKK')); }
 function userFullName(user, fallback = '') { return [user?.first_name, user?.last_name].filter(Boolean).join(' ') || fallback || 'Telegram foydalanuvchi'; }
 function isAdminTelegramId(id) { return ADMIN_TELEGRAM_IDS.has(String(id || '').trim()); }
 function isConfiguredCloudinary() { return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET); }
@@ -205,6 +208,8 @@ const serviceSchema = new mongoose.Schema({
   iconKey: { type: String, default: '', trim: true },
   iconEmoji: { type: String, default: '', trim: true },
   badge: { type: String, default: '', trim: true },
+  publicCode: { type: String, default: '', index: true, trim: true },
+  secretCodeHash: { type: String, default: '', trim: true },
   description: { type: String, default: '', trim: true },
   priceFrom: { type: Number, default: 0 },
   currency: { type: String, default: DEFAULT_CURRENCY },
@@ -267,6 +272,8 @@ const marketplaceItemSchema = new mongoose.Schema({
   iconKey: { type: String, default: '', trim: true },
   iconEmoji: { type: String, default: '', trim: true },
   badge: { type: String, default: '', trim: true },
+  publicCode: { type: String, default: '', index: true, trim: true },
+  secretCodeHash: { type: String, default: '', trim: true },
   description: { type: String, default: '', trim: true },
   accountLink: { type: String, default: '', trim: true },
   accountUsername: { type: String, default: '', trim: true },
@@ -583,7 +590,7 @@ async function sendTelegramPhoto(chatId, photoUrl, caption, extra = {}) {
 async function getPostSettings() { return getSettingsLean().catch(() => ({ ...DEFAULT_SETTINGS })); }
 function miniAppLaunchUrl(kind, doc = {}) {
   const id = String(doc._id || '').trim();
-  const startParam = kind === 'service' ? `service_${id}` : `item_${id}`;
+  const startParam = kind === 'service' ? `service_${id}` : `item_${encodeURIComponent(safePublicCode(doc))}`;
   if (BOT_EXPECTED_USERNAME && id) return `https://t.me/${BOT_EXPECTED_USERNAME}?startapp=${encodeURIComponent(startParam)}`;
   return webAppDeepLink(kind === 'service' ? { service: id } : { item: id });
 }
@@ -624,6 +631,7 @@ function channelPostText(kind, doc, settings = {}) {
     status,
     '',
     line('🏷 Nomi', doc.title || 'Eʼlon', true),
+    !isService ? line('🔐 Mahsulot kodi', safePublicCode(doc), true) : '',
     line('🌐 Platforma', doc.platform || 'other', true),
     line('📂 Kategoriya', doc.category || ''),
     doc.badge ? line('🏅 Badge', doc.badge, true) : '',
@@ -703,7 +711,25 @@ async function notifySold(item) {
 }
 function compactRequestMessage(doc) {
   const dyn = doc.extra?.dynamicFields || {};
+  const sec = doc.extra?.security || {};
+  let deviceText = '';
+  try { const d = typeof sec.deviceInfo === 'string' ? JSON.parse(sec.deviceInfo) : (sec.deviceInfo || {}); deviceText = [d.platform, d.language, d.screen, d.tz].filter(Boolean).join(' · '); } catch { deviceText = String(sec.deviceInfo || '').slice(0, 160); }
   const dynLines = Object.entries(dyn).filter(([, v]) => String(v ?? '').trim()).map(([k, v]) => `• ${escapeHtml(k)}: <b>${escapeHtml(v)}</b>`);
+  const securityLines = [
+    sec.publicCode ? `• Mahsulot kodi: <code>${escapeHtml(sec.publicCode)}</code>` : '',
+    sec.buyerRegion || sec.buyerLocationText ? `• Xaridor lokatsiya: <b>${escapeHtml([sec.buyerRegion, sec.buyerLocationText].filter(Boolean).join(' · '))}</b>` : '',
+    sec.buyerLat && sec.buyerLng ? `• Xaridor GPS: <code>${escapeHtml(sec.buyerLat)}, ${escapeHtml(sec.buyerLng)}</code> ±${escapeHtml(sec.locationAccuracy || '?')}m` : '',
+    sec.sellerRegion || sec.sellerLocationText ? `• Sotuvchi lokatsiya: <b>${escapeHtml([sec.sellerRegion, sec.sellerLocationText].filter(Boolean).join(' · '))}</b>` : '',
+    sec.sellerLat && sec.sellerLng ? `• Sotuvchi GPS: <code>${escapeHtml(sec.sellerLat)}, ${escapeHtml(sec.sellerLng)}</code> ±${escapeHtml(sec.locationAccuracy || '?')}m` : '',
+    sec.sellerOwnershipProof ? `• Egaliği dalili: <b>${escapeHtml(sec.sellerOwnershipProof)}</b>` : '',
+    sec.sellerTransferReady ? `• Topshirish holati: <b>${escapeHtml(sec.sellerTransferReady)}</b>` : '',
+    sec.sellerRecoveryInfo ? `• Recovery xavfi: ${escapeHtml(String(sec.sellerRecoveryInfo).slice(0, 400))}` : '',
+    sec.riskNote ? `• Xavfsizlik izohi: ${escapeHtml(String(sec.riskNote).slice(0, 400))}` : '',
+    sec.securityAgreement ? `• Rozilik: <b>${escapeHtml(sec.securityAgreement)}</b>` : '',
+    deviceText ? `• Qurilma: <code>${escapeHtml(deviceText)}</code>` : '',
+    sec.clientIp ? `• IP: <code>${escapeHtml(sec.clientIp)}</code>` : '',
+    sec.serverReceivedAt ? `• Qabul vaqti: <code>${escapeHtml(sec.serverReceivedAt)}</code>` : '',
+  ].filter(Boolean);
   const lines = [
     `🛡 <b>Yangi garant so‘rov</b>`,
     `#${escapeHtml(doc.requestNo)}`,
@@ -895,6 +921,9 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
   const contactTelegram = String(body.contactTelegram || '').trim();
   const referralCode = String(body.referralCode || body.referredBy || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
   const startParam = String(body.startParam || '').trim().slice(0, 80);
+  const security = safeJsonParse(body.security, {});
+  security.clientIp = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  security.serverReceivedAt = new Date().toISOString();
   const payload = {
     requestNo: randomCode('SG'),
     requestType,
@@ -909,7 +938,7 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
     audienceSize: body.audienceSize || '',
     monetization: body.monetization || '',
     country: body.country || '',
-    price: normalizeNumber(body.price) || normalizeNumber(body.itemPrice) || normalizeNumber(service?.priceFrom),
+    price: requestType === 'BUY_ACCOUNT' ? normalizeNumber(body.itemPrice) : (normalizeNumber(body.price) || normalizeNumber(body.itemPrice) || normalizeNumber(service?.priceFrom)),
     currency: body.currency || DEFAULT_CURRENCY,
     sellerName: body.sellerName || (requestType !== 'BUY_ACCOUNT' ? contactName : ''),
     sellerPhone: body.sellerPhone || (requestType !== 'BUY_ACCOUNT' ? contactPhone : ''),
@@ -931,7 +960,7 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
     referredBy: referralCode,
     startParam,
     proofImages,
-    extra: { ...safeJsonParse(body.extra, {}), dynamicFields: safeJsonParse(body.dynamicFields, {}), marketplaceItemId: body.marketplaceItemId || '', startParam },
+    extra: { ...safeJsonParse(body.extra, {}), dynamicFields: safeJsonParse(body.dynamicFields, {}), security, marketplaceItemId: body.marketplaceItemId || '', publicCode: body.publicCode || security.publicCode || '', startParam },
     note: body.note || '',
   };
 
@@ -994,6 +1023,8 @@ app.post('/api/admin/services', requireAdmin, upload.array('images', 10), asyncH
     iconKey: body.iconKey || '',
     iconEmoji: body.iconEmoji || '',
     badge: body.badge || '',
+    publicCode: body.publicCode || publicProductCode('AKK'),
+    secretCodeHash: hashPrivateCode(body.publicCode || `${body.title || ''}-${Date.now()}`),
     description: body.description || '',
     priceFrom: normalizeNumber(body.priceFrom),
     currency: body.currency || DEFAULT_CURRENCY,
@@ -1104,6 +1135,8 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 10), asy
     iconKey: body.iconKey || '',
     iconEmoji: body.iconEmoji || '',
     badge: body.badge || '',
+    publicCode: body.publicCode || publicProductCode('AKK'),
+    secretCodeHash: hashPrivateCode(body.publicCode || `${body.title || ''}-${Date.now()}`),
     description: body.description || '',
     accountLink: body.accountLink || '',
     accountUsername: body.accountUsername || '',
@@ -1161,6 +1194,8 @@ app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandl
     platform: r.platform || 'other',
     category: r.requestType === 'SERVICE_ORDER' ? 'other' : 'accounts',
     badge: 'Tasdiqlangan',
+    publicCode: r.extra?.security?.publicCode || publicProductCode('AKK'),
+    secretCodeHash: hashPrivateCode(String(r._id || '') + ':' + String(r.requestNo || '')),
     description: req.body?.description || r.note || `${r.accountUsername || r.accountLink || 'Hisob'} bo‘yicha admin tasdiqlagan eʼlon.`,
     accountLink: r.accountLink || '',
     accountUsername: r.accountUsername || '',
@@ -1171,6 +1206,8 @@ app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandl
     price: r.price || 0,
     currency: r.currency || DEFAULT_CURRENCY,
     images: r.proofImages || [],
+    ownerName: r.sellerName || r.contactName || '',
+    ownerTelegram: r.sellerTelegram || r.contactTelegram || '',
     sourceRequestId: r._id,
     approved: true,
     status: 'AVAILABLE',
