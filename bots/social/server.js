@@ -1258,23 +1258,33 @@ mongoose.connection.on('error', (error) => {
   databaseError = error?.message || String(error);
 });
 
+async function setupTelegramWebhookWithRetry() {
+  if (!AUTO_SET_WEBHOOK || !BOT_TOKEN || !PUBLIC_URL) return;
+  try {
+    const result = await telegramApi('setWebhook', {
+      url: `${PUBLIC_URL}/telegram/webhook`,
+      secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
+      allowed_updates: ['message'],
+      drop_pending_updates: false,
+    });
+    console.log('Telegram webhook:', result?.ok ? 'set' : JSON.stringify(result));
+    await ensureBotMenuButton();
+  } catch (error) {
+    console.error('Telegram webhook error:', error.message);
+    setTimeout(() => setupTelegramWebhookWithRetry().catch(() => {}), Number(process.env.TELEGRAM_WEBHOOK_RETRY_MS || 10000)).unref();
+  }
+}
+
 async function boot() {
   if (httpServerStarted) return;
   httpServerStarted = true;
-  await connectMongoWithRetry({ exitOnFail: true });
+
+  // Muhim: /start va Mini App tugmalari MongoDB ulanishini kutib qolmasin.
+  // Maʼlumot yozish APIlari baribir requirePersistentDatabase() orqali faqat MongoDB tayyor bo‘lganda saqlaydi.
   app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`${BRAND_NAME} server listening on ${PORT} with persistent MongoDB storage`);
-    if (AUTO_SET_WEBHOOK && BOT_TOKEN && PUBLIC_URL) {
-      try {
-        const result = await telegramApi('setWebhook', {
-          url: `${PUBLIC_URL}/telegram/webhook`,
-          secret_token: TELEGRAM_WEBHOOK_SECRET || undefined,
-          allowed_updates: ['message'],
-        });
-        console.log('Telegram webhook:', result?.ok ? 'set' : JSON.stringify(result));
-        await ensureBotMenuButton();
-      } catch (error) { console.error('Telegram webhook error:', error.message); }
-    }
+    console.log(`${BRAND_NAME} server listening on ${PORT}; MongoDB persistent storage is connecting in background`);
+    setupTelegramWebhookWithRetry().catch((error) => console.error('Telegram webhook setup failed:', error.message));
+    connectMongoWithRetry({ exitOnFail: false }).catch((error) => console.error('MongoDB background boot failed:', error.message));
     if (TELEGRAM_POLLING) console.warn('TELEGRAM_POLLING=true sozlangan, lekin bu bot Render uchun webhook rejimida ishlaydi.');
   });
 }
