@@ -66,7 +66,7 @@ function withDatabaseName(uri, dbName) {
 function botMongoUri(prefix, defaultDbName) {
   const specific = process.env[`${prefix}_MONGODB_URI`] || process.env[`MONGODB_URI_${prefix}`] || '';
   if (specific) return specific;
-  const common = process.env.MONGODB_URI || '';
+  const common = process.env.MONGODB_URI || process.env.GIFTGO_MONGODB_URI || process.env.MONGO_URI || process.env.MONGODB_URL || '';
   if (!common) return `mongodb://127.0.0.1:27017/${defaultDbName}`;
   // GiftGo ishlayotgan shu MONGODB_URI bazasini Social bot ham ishlatsin.
   // Ayrim Atlas userlar faqat URI ichidagi bitta DB uchun ruxsatli bo‘ladi;

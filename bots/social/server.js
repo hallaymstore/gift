@@ -14,7 +14,8 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { v2: cloudinary } = require('cloudinary');
 
-mongoose.set('bufferCommands', false);
+mongoose.set('bufferCommands', true);
+mongoose.set('bufferTimeoutMS', Number(process.env.MONGO_BUFFER_TIMEOUT_MS || 60000));
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -82,7 +83,7 @@ let databaseReady = false;
 let databaseError = '';
 let databaseConnecting = false;
 let httpServerStarted = false;
-function isDbReady() { return mongoose.connection.readyState === 1 && databaseReady; }
+function isDbReady() { return mongoose.connection.readyState === 1; }
 function dbStatus() {
   return {
     ready: isDbReady(),
@@ -126,7 +127,7 @@ function userFullName(user, fallback = '') { return [user?.first_name, user?.las
 function isAdminTelegramId(id) { return ADMIN_TELEGRAM_IDS.has(String(id || '').trim()); }
 function isConfiguredCloudinary() { return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-async function waitForDatabaseReady(timeoutMs = Number(process.env.SOCIAL_DB_WAIT_MS || 15000)) {
+async function waitForDatabaseReady(timeoutMs = Number(process.env.SOCIAL_DB_WAIT_MS || 90000)) {
   if (isDbReady()) return true;
   if (!databaseConnecting) connectMongoWithRetry().catch(() => {});
   const started = Date.now();
@@ -141,7 +142,7 @@ async function requirePersistentDatabase(res) {
   if (ok) return true;
   res.status(503).json({
     success: false,
-    message: 'MongoDB ulanmagan. Maʼlumotlar o‘chib ketmasligi uchun admin yozuvlari faqat doimiy bazaga saqlanadi. Render env dagi MONGODB_URI ni tekshirib qayta urinib ko‘ring.',
+    message: 'MongoDB hali ulanmoqda yoki uzilgan. Maʼlumotlar o‘chib ketmasligi uchun yozuvlar faqat doimiy MongoDB bazaga saqlanadi. Render logs va MONGODB_URI ni tekshirib, bir necha soniyadan keyin qayta urinib ko‘ring.',
     database: dbStatus()
   });
   return false;
@@ -771,7 +772,10 @@ function mergeSettings(settings = {}) {
   return merged;
 }
 async function getSettingsLean() {
-  if (!isDbReady()) return mergeSettings(ensureLocalStore().settings || {});
+  if (!isDbReady()) {
+    await waitForDatabaseReady(30000);
+    if (!isDbReady()) return mergeSettings(DEFAULT_SETTINGS);
+  }
   const settings = await SocialSettings.findOne({ key: 'main' }).lean();
   return mergeSettings(settings || {});
 }
@@ -791,26 +795,15 @@ async function recordVisitor(initData, startParam = '') {
   };
   if (referredBy && referredBy !== referralCode) payload.referredBy = referredBy;
   let user = { telegramUserId, username: tgUser.username || '', fullName: userFullName(tgUser), referralCode, referredBy, visits: 1 };
+  if (!isDbReady()) await waitForDatabaseReady(30000);
   if (isDbReady()) {
     user = await SocialVisitor.findOneAndUpdate(
       { telegramUserId },
       { $set: payload, $inc: { visits: 1 }, $setOnInsert: { firstSeen: new Date(), bonusBalance: 0 } },
       { upsert: true, new: true, lean: true }
     );
-  } else {
-    const store = ensureLocalStore();
-    const index = store.users.findIndex((x) => String(x.telegramUserId) === telegramUserId);
-    if (index >= 0) {
-      store.users[index] = { ...store.users[index], ...payload, visits: Number(store.users[index].visits || 0) + 1, updatedAt: nowIso() };
-      user = store.users[index];
-    } else {
-      user = withLocalDates({ _id: localId('user'), ...payload, firstSeen: nowIso(), visits: 1, bonusBalance: 0, bonusNote: '' });
-      store.users.push(user);
-    }
-    saveLocalStore();
-    user = deepClone(user);
   }
-  return { user, isAdmin: isAdminTelegramId(telegramUserId) };
+  return { user, isAdmin: isAdminTelegramId(telegramUserId), stored: isDbReady() };
 }
 
 app.get('/api/health', (_req, res) => res.json({ success: true, app: 'social-garant-market', time: new Date().toISOString(), database: dbStatus() }));
@@ -846,12 +839,7 @@ app.post('/api/track-user', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/marketplace', asyncHandler(async (req, res) => {
-  if (!isDbReady()) {
-    let items = localCollection('marketplace').filter((x) => x.approved !== false && x.status !== 'HIDDEN');
-    if (req.query.platform) items = items.filter((x) => x.platform === req.query.platform);
-    if (req.query.status) items = items.filter((x) => x.status === req.query.status);
-    return res.json({ success: true, items: sortItems(items).slice(0, 250), database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const filter = { approved: true, status: { $ne: 'HIDDEN' } };
   if (req.query.platform) filter.platform = req.query.platform;
   if (req.query.status) filter.status = req.query.status;
@@ -860,11 +848,7 @@ app.get('/api/marketplace', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/marketplace/:id', asyncHandler(async (req, res) => {
-  if (!isDbReady()) {
-    const item = localById('marketplace', req.params.id);
-    if (!item || item.approved === false || item.status === 'HIDDEN') return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.', database: dbStatus(), local: localDbInfo() });
-    return res.json({ success: true, item, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   ensureObjectId(req.params.id);
   const item = await MarketplaceItem.findOne({ _id: req.params.id, approved: true, status: { $ne: 'HIDDEN' } }).lean();
   if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.' });
@@ -872,10 +856,7 @@ app.get('/api/marketplace/:id', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/catalog', asyncHandler(async (_req, res) => {
-  if (!isDbReady()) {
-    const services = sortItems(localCollection('services').filter((service) => service.active !== false));
-    return res.json({ success: true, services, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const services = await SocialService.find({ active: true }).sort({ sort: 1, createdAt: -1 }).lean();
   res.json({ success: true, services, database: dbStatus() });
 }));
@@ -940,27 +921,17 @@ app.post('/api/requests', upload.fields([{ name: 'proofImages', maxCount: 6 }, {
     note: body.note || '',
   };
 
-  let doc = payload;
-  let stored = false;
-  if (isDbReady()) {
-    doc = await SocialRequest.create(payload);
-    stored = true;
-  } else {
-    doc = localCreate('requests', 'req', { ...payload, status: 'NEW' });
-    stored = true;
-  }
+  const doc = await SocialRequest.create(payload);
+  const stored = true;
 
   notifyAdmins(doc).catch((error) => console.error('Admin notification failed:', error.message));
-  res.status(201).json({ success: true, message: 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.', request: doc, stored, database: dbStatus(), local: isDbReady() ? undefined : localDbInfo() });
+  res.status(201).json({ success: true, message: 'So‘rov qabul qilindi. Admin garant bitim uchun Telegram orqali bog‘lanadi.', request: doc, stored, database: dbStatus() });
 }));
 
 app.get('/api/requests/my', asyncHandler(async (req, res) => {
   const telegramUserId = String(req.query.telegramUserId || '').trim();
   if (!telegramUserId) return res.json({ success: true, requests: [], database: dbStatus() });
-  if (!isDbReady()) {
-    const requests = localCollection('requests').filter((x) => String(x.telegramUserId) === telegramUserId).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 30);
-    return res.json({ success: true, requests, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const requests = await SocialRequest.find({ telegramUserId }).sort({ createdAt: -1 }).limit(30).lean();
   res.json({ success: true, requests, database: dbStatus() });
 }));
@@ -976,7 +947,7 @@ app.post('/api/admin/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) return res.json({ success: true, stats: localStats(), database: dbStatus(), local: localDbInfo() });
+  if (!(await requirePersistentDatabase(res))) return;
   const [total, fresh, inGarant, done, services, users, marketplace, sold, referrals] = await Promise.all([
     SocialRequest.countDocuments(),
     SocialRequest.countDocuments({ status: 'NEW' }),
@@ -992,10 +963,7 @@ app.get('/api/admin/stats', requireAdmin, asyncHandler(async (_req, res) => {
 }));
 
 app.get('/api/admin/services', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) {
-    const services = sortItems(localCollection('services'));
-    return res.json({ success: true, services, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const services = await SocialService.find().sort({ sort: 1, createdAt: -1 }).lean();
   res.json({ success: true, services, database: dbStatus() });
 }));
@@ -1022,11 +990,6 @@ app.post('/api/admin/services', requireAdmin, upload.array('images', 10), asyncH
     autoPost: parseBoolean(body.autoPost, true),
     sort: normalizeNumber(body.sort) || 100,
   };
-  if (!isDbReady()) {
-    const service = localCreate('services', 'service', payload);
-    if (service.autoPost !== false) postToChannel('service', service).catch((error) => console.error('Service channel post failed:', error.message));
-    return res.status(201).json({ success: true, service, database: dbStatus(), local: localDbInfo() });
-  }
   const service = await SocialService.create(payload);
   if (service.autoPost !== false) postToChannel('service', service.toObject ? service.toObject() : service).catch((error) => console.error('Service channel post failed:', error.message));
   res.status(201).json({ success: true, service });
@@ -1042,11 +1005,6 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
   if ('requiredFields' in patch && !Array.isArray(patch.requiredFields)) patch.requiredFields = String(patch.requiredFields || '').split('\n').map((x) => x.trim()).filter(Boolean);
   if ('customFields' in patch || 'managedInputs' in patch) patch.customFields = normalizeCustomFields(patch.customFields || patch.managedInputs || patch.requiredFields || '');
   delete patch.managedInputs;
-  if (!isDbReady()) {
-    const service = localUpdate('services', req.params.id, patch);
-    if (!service) return res.status(404).json({ success: false, message: 'Xizmat topilmadi.', database: dbStatus(), local: localDbInfo() });
-    return res.json({ success: true, service, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   const service = await SocialService.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, service });
@@ -1054,23 +1012,13 @@ app.patch('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res)
 
 app.delete('/api/admin/services/:id', requireAdmin, asyncHandler(async (req, res) => {
   if (!(await requirePersistentDatabase(res))) return;
-  if (!isDbReady()) {
-    localDelete('services', req.params.id);
-    return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   await SocialService.findByIdAndDelete(req.params.id);
   res.json({ success: true });
 }));
 
 app.get('/api/admin/requests', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) {
-    let requests = localCollection('requests');
-    if (req.query.status) requests = requests.filter((x) => x.status === req.query.status);
-    if (req.query.platform) requests = requests.filter((x) => x.platform === req.query.platform);
-    requests = requests.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 250);
-    return res.json({ success: true, requests, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
   if (req.query.platform) filter.platform = req.query.platform;
@@ -1082,11 +1030,6 @@ app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res)
   if (!(await requirePersistentDatabase(res))) return;
   const patch = {};
   for (const key of ['status', 'adminNote']) if (key in req.body) patch[key] = req.body[key];
-  if (!isDbReady()) {
-    const doc = localUpdate('requests', req.params.id, patch);
-    if (!doc) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.', database: dbStatus(), local: localDbInfo() });
-    return res.json({ success: true, request: doc, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   const doc = await SocialRequest.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
   res.json({ success: true, request: doc });
@@ -1094,10 +1037,7 @@ app.patch('/api/admin/requests/:id', requireAdmin, asyncHandler(async (req, res)
 
 
 app.get('/api/admin/users', requireAdmin, asyncHandler(async (_req, res) => {
-  if (!isDbReady()) {
-    const users = localCollection('users').slice().sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || ''))).slice(0, 500);
-    return res.json({ success: true, users, database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const users = await SocialVisitor.find().sort({ lastSeen: -1 }).limit(500).lean();
   res.json({ success: true, users, database: dbStatus() });
 }));
@@ -1125,23 +1065,12 @@ app.patch('/api/admin/settings', requireAdmin, asyncHandler(async (req, res) => 
     paymentOtherUrl: String(body.paymentOtherUrl || '').trim(),
     marketplaceTitle: String(body.marketplaceTitle || '').trim() || 'Marketplace',
   };
-  if (!isDbReady()) {
-    const store = ensureLocalStore();
-    store.settings = { ...(store.settings || DEFAULT_SETTINGS), ...patch, updatedAt: nowIso() };
-    saveLocalStore();
-    return res.json({ success: true, settings: store.settings, database: dbStatus(), local: localDbInfo() });
-  }
   const settings = await SocialSettings.findOneAndUpdate({ key: 'main' }, { $set: patch, $setOnInsert: { key: 'main' } }, { upsert: true, new: true, lean: true });
   res.json({ success: true, settings });
 }));
 
 app.get('/api/admin/marketplace', requireAdmin, asyncHandler(async (req, res) => {
-  if (!isDbReady()) {
-    let items = localCollection('marketplace');
-    if (req.query.status) items = items.filter((x) => x.status === req.query.status);
-    if (req.query.platform) items = items.filter((x) => x.platform === req.query.platform);
-    return res.json({ success: true, items: sortItems(items).slice(0, 500), database: dbStatus(), local: localDbInfo() });
-  }
+  if (!(await requirePersistentDatabase(res))) return;
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
   if (req.query.platform) filter.platform = req.query.platform;
@@ -1181,11 +1110,6 @@ app.post('/api/admin/marketplace', requireAdmin, upload.array('images', 10), asy
     approved: parseBoolean(body.approved, true),
     sort: normalizeNumber(body.sort) || 100,
   };
-  if (!isDbReady()) {
-    const item = localCreate('marketplace', 'market', payload);
-    if (item.channelAutoPost !== false) postToChannel('marketplace', item).catch((error) => console.error('Marketplace channel post failed:', error.message));
-    return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
-  }
   const item = await MarketplaceItem.create(payload);
   if (item.channelAutoPost !== false) postToChannel('marketplace', item.toObject ? item.toObject() : item).catch((error) => console.error('Marketplace channel post failed:', error.message));
   res.status(201).json({ success: true, item });
@@ -1199,13 +1123,6 @@ app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, r
   if ('approved' in patch) patch.approved = parseBoolean(patch.approved, true);
   if ('imageUrls' in patch) { patch.images = normalizeImageUrls(patch.imageUrls); delete patch.imageUrls; }
   if (patch.status === 'SOLD') patch.soldAt = new Date();
-  if (!isDbReady()) {
-    const before = localById('marketplace', req.params.id);
-    const item = localUpdate('marketplace', req.params.id, patch);
-    if (!item) return res.status(404).json({ success: false, message: 'Eʼlon topilmadi.', database: dbStatus(), local: localDbInfo() });
-    if (patch.status === 'SOLD' && before?.status !== 'SOLD') notifySold(item).catch(() => {});
-    return res.json({ success: true, item, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   const before = await MarketplaceItem.findById(req.params.id).lean();
   const item = await MarketplaceItem.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true }).lean();
@@ -1215,10 +1132,6 @@ app.patch('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, r
 
 app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, res) => {
   if (!(await requirePersistentDatabase(res))) return;
-  if (!isDbReady()) {
-    localDelete('marketplace', req.params.id);
-    return res.json({ success: true, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   await MarketplaceItem.findByIdAndDelete(req.params.id);
   res.json({ success: true });
@@ -1226,33 +1139,6 @@ app.delete('/api/admin/marketplace/:id', requireAdmin, asyncHandler(async (req, 
 
 app.post('/api/admin/requests/:id/publish-marketplace', requireAdmin, asyncHandler(async (req, res) => {
   if (!(await requirePersistentDatabase(res))) return;
-  if (!isDbReady()) {
-    const r = localById('requests', req.params.id);
-    if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.', database: dbStatus(), local: localDbInfo() });
-    const item = localCreate('marketplace', 'market', {
-      title: req.body?.title || r.serviceTitle || `${r.platform} hisob`,
-      platform: r.platform || 'other',
-      category: r.requestType === 'SERVICE_ORDER' ? 'other' : 'accounts',
-      badge: 'Tasdiqlangan',
-      description: req.body?.description || r.note || `${r.accountUsername || r.accountLink || 'Hisob'} bo‘yicha admin tasdiqlagan eʼlon.`,
-      accountLink: r.accountLink || '',
-      accountUsername: r.accountUsername || '',
-      audienceSize: r.audienceSize || '',
-      niche: r.niche || '',
-      country: r.country || '',
-      monetization: r.monetization || '',
-      price: r.price || 0,
-      currency: r.currency || DEFAULT_CURRENCY,
-      images: r.proofImages || [],
-      sourceRequestId: r._id,
-      approved: true,
-      status: 'AVAILABLE',
-      sort: 100,
-    });
-    localUpdate('requests', r._id, { status: 'IN_GUARANT', adminNote: `${r.adminNote || ''}\nMarketplacega chiqarildi: ${item._id}`.trim() });
-    postToChannel('marketplace', item).catch(() => {});
-    return res.status(201).json({ success: true, item, database: dbStatus(), local: localDbInfo() });
-  }
   ensureObjectId(req.params.id);
   const r = await SocialRequest.findById(req.params.id).lean();
   if (!r) return res.status(404).json({ success: false, message: 'So‘rov topilmadi.' });
@@ -1330,21 +1216,32 @@ app.use((error, _req, res, _next) => {
   res.status(status).json({ success: false, message: error.message || 'Server xatoligi.', database: dbStatus() });
 });
 
-async function connectMongoWithRetry() {
-  if (databaseConnecting || isDbReady()) return;
+async function connectMongoWithRetry({ exitOnFail = false } = {}) {
+  if (databaseConnecting || isDbReady()) return isDbReady();
   databaseConnecting = true;
   try {
-    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 12000, autoIndex: true });
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 60000),
+      connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 60000),
+      socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS || 45000),
+      maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 10),
+      minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 1),
+      retryWrites: true,
+      autoIndex: true,
+    });
     databaseReady = true;
     databaseError = '';
     await seedDefaults();
-    await syncLocalStoreToMongo().catch((error) => console.error('Local sync failed:', error.message));
-    console.log(`${BRAND_NAME} MongoDB connected`);
+    await syncLocalStoreToMongo().catch((error) => console.error('Old local store sync failed:', error.message));
+    console.log(`${BRAND_NAME} MongoDB connected and persistent storage is active`);
+    return true;
   } catch (error) {
     databaseReady = false;
     databaseError = error?.message || String(error);
     console.error(`${BRAND_NAME} MongoDB connection failed:`, databaseError);
-    setTimeout(connectMongoWithRetry, Number(process.env.MONGO_RETRY_MS || 10000)).unref();
+    if (exitOnFail) process.exit(1);
+    setTimeout(() => connectMongoWithRetry().catch(() => {}), Number(process.env.MONGO_RETRY_MS || 10000)).unref();
+    return false;
   } finally {
     databaseConnecting = false;
   }
@@ -1354,19 +1251,19 @@ mongoose.connection.on('connected', () => { databaseReady = true; databaseError 
 mongoose.connection.on('disconnected', () => {
   databaseReady = false;
   databaseError = databaseError || 'MongoDB disconnected';
-  setTimeout(connectMongoWithRetry, Number(process.env.MONGO_RETRY_MS || 10000)).unref();
+  setTimeout(() => connectMongoWithRetry().catch(() => {}), Number(process.env.MONGO_RETRY_MS || 10000)).unref();
 });
 mongoose.connection.on('error', (error) => {
   databaseReady = false;
   databaseError = error?.message || String(error);
 });
 
-function boot() {
+async function boot() {
   if (httpServerStarted) return;
   httpServerStarted = true;
+  await connectMongoWithRetry({ exitOnFail: true });
   app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`${BRAND_NAME} server listening on ${PORT}`);
-    connectMongoWithRetry();
+    console.log(`${BRAND_NAME} server listening on ${PORT} with persistent MongoDB storage`);
     if (AUTO_SET_WEBHOOK && BOT_TOKEN && PUBLIC_URL) {
       try {
         const result = await telegramApi('setWebhook', {
@@ -1381,4 +1278,4 @@ function boot() {
     if (TELEGRAM_POLLING) console.warn('TELEGRAM_POLLING=true sozlangan, lekin bu bot Render uchun webhook rejimida ishlaydi.');
   });
 }
-boot();
+boot().catch((error) => { console.error('Boot failed:', error); process.exit(1); });
