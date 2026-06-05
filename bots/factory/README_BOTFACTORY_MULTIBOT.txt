@@ -1,202 +1,154 @@
-BOTFACTORY MULTIBOT PLATFORM
-============================
+BOTFACTORY MULTIBOT PLATFORM — OYLIK TARIFLI SAAS
+=================================================
 
 Bu loyiha bitta Render servisida quyidagilarni ishlatadi:
 
-1) BotFactory — bot tayyorlovchi asosiy bot
-2) Doimiy botlar — KinoBot, MultfilmBot, SerialBot, DoramaBot
-3) Mijoz yaratgan botlar — Factory orqali token kiritiladi, admin ruxsat bergach avtomatik ishga tushadi
+1) FactoryBot — bot tayyorlovchi asosiy bot
+2) KinoBot / MultfilmBot / SerialBot / DoramaBot / AnimeBot / KursBot / KitobBot va boshqalar
+3) Mijoz yaratgan botlar — har biri alohida token bilan, lekin bitta server va bitta MongoDB ichida
 
-ASOSIY G'OYA
-============
+ASOSIY YANGILIKLAR
+==================
 
-Mijoz BotFather orqali o'z bot tokenini oladi va BotFactory botga yuboradi.
-BotFactory tokenni tekshiradi, bot turini tanlatadi, nom va admin ID so'raydi.
-So'rov adminlarga keladi. Admin @Qoryogdiyev bilan narx/shart kelishilgandan keyin "Ruxsat berish" tugmasini bosadi.
-Shundan keyin mijoz boti avtomatik ishga tushadi.
+✅ Yaratish bepul, ishlashi oylik tarif/ruxsat bilan
+✅ Admin har bir botni 1 oyga tasdiqlaydi
+✅ Har oyning bot tasdiqlangan sanasida muddat tugaydi
+✅ Muddat tugasa bot funksiyalari to'xtaydi
+✅ Admin "1 oyga uzaytirish" bossa bot yana kelgan joyidan ishlaydi
+✅ Server qayta deploy/restart bo'lsa ham ma'lumotlar yo'qolmaydi
+✅ Kinolar, qismlar, userlar, statistikalar MongoDB'da saqlanadi
+✅ Barcha yaratilgan botlarga umumiy e'lon yuborish bor
+✅ Har bir botning alohida statistikasi bor
+✅ Umumiy statistika bor
+✅ FactoryBot'ning o'z statistikasi bor
+✅ Bot username, owner username, owner ID yoki bot nomi orqali qidirish bor
+✅ Bot tarif narxlarini admin paneldan o'zgartirish mumkin
 
-Mijoz bot ichida admin panel orqali kontent qo'shadi:
-- qismli bo'lsa: foydalanuvchiga 3 tadan inline qismlar chiqadi
-- qismsiz bo'lsa: foydalanuvchi kod/nom yuborsa post darrov yuboriladi
+ENV SOZLASH
+===========
 
-QO'LLAB-QUVVATLANADIGAN BOT TURLARI
-====================================
+.env faylda eng muhim sozlamalar:
 
-Factory orqali tanlash mumkin:
-- KinoBot
-- MultfilmBot
-- SerialBot
-- DoramaBot
-- AnimeBot
-- TurkSerialBot
-- KursBot
-- KitobBot
-- FaylBot
-- MusicBot
-
-Bularning hammasi bitta universal struktura bilan ishlaydi.
-
-MUHIM XAVFSIZLIK
-================
-
-1) Mijoz tokenlari MongoDB ichida ochiq yozilmaydi.
-   BOT_TOKEN_SECRET orqali AES-256-GCM bilan shifrlanadi.
-
-2) BOT_TOKEN_SECRET ni keyin almashtirmang.
-   Almashtirsangiz, oldin saqlangan mijoz tokenlarini decrypt qilib bo'lmaydi.
-
-3) Chatda ko'rinib qolgan eski bot tokenlarni ishlatmang.
-   BotFather orqali yangi token oling.
-
-4) Majburiy obuna ishlashi uchun har bir kontent bot qo'shilgan kanal/guruhda admin bo'lishi kerak.
-
-.env SOZLASH
-============
-
-.env faylda asosiylari:
-
-MONGODB_URL=mongodb+srv://...
+MONGODB_URL=...
 ADMIN_IDS=6606638731,901126203
-FACTORYBOT_TOKEN=BotFactory tokeni
+FACTORYBOT_TOKEN=...
 OWNER_USERNAME=@Qoryogdiyev
 BOT_TOKEN_SECRET=uzun_random_secret
 WEBHOOK_SECRET=uzun_random_webhook_secret
 
-Doimiy botlar uchun ixtiyoriy tokenlar:
+Oylik tariflar:
 
-KINOBOT_TOKEN=
-MULTFILMBOT_TOKEN=
-SERIALBOT_TOKEN=
-DORAMABOT_TOKEN=
+DEFAULT_MONTHLY_PRICE=50000
+KINO_MONTHLY_PRICE=50000
+MULTFILM_MONTHLY_PRICE=50000
+SERIAL_MONTHLY_PRICE=70000
+DORAMA_MONTHLY_PRICE=70000
+KURS_MONTHLY_PRICE=100000
 
-Agar doimiy token bo'sh bo'lsa, o'sha bot ishga tushmaydi.
-FactoryBot token bo'lsa, mijozlar bot yaratish so'rovini yubora oladi.
+ESLATMA: BOT_TOKEN_SECRET ni keyin almashtirmang. Aks holda DB'da shifrlangan mijoz tokenlarini qayta o'qib bo'lmaydi.
 
-RENDERDA ISHLATISH
-==================
-
-Build command:
-
-npm install
-
-Start command:
-
-npm start
-
-Render Environment Variables ichiga .env dagi qiymatlarni kiriting.
-Render odatda RENDER_EXTERNAL_URL ni o'zi beradi.
-
-LOCAL ISHLATISH
+ISHGA TUSHIRISH
 ===============
 
-.env ichida URL bo'sh bo'lsa, botlar polling rejimida ishlaydi:
-
 npm install
 npm start
 
-BOTFACTORY MIJOZ UCHUN ISHLASH TARTIBI
-======================================
+Render:
 
-1) Mijoz BotFactory botga /start bosadi
-2) "Bot tayyorlash" ni bosadi
-3) BotFather tokenini yuboradi
-4) Bot turi tanlanadi: Kino/Multfilm/Serial/Dorama/Anime...
-5) Bot nomi kiritiladi
-6) Admin ID kiritiladi
-7) So'rov adminlarga boradi
-8) Admin narx/shartni kelishib, "Ruxsat berish" tugmasini bosadi
-9) Bot avtomatik ishga tushadi
-10) Mijoz o'z botiga /start bosib admin paneldan boshqaradi
+Build command: npm install
+Start command: npm start
 
-KONTENT BOT ADMIN PANELI
-========================
+FactoryBot menyusi:
 
-Har bir mijoz botida:
+- 🤖 Bot tayyorlash
+- 📋 Mening botlarim
+- 💰 Narxlar
+- ☎️ Admin bilan kelishish
 
-- Kontent qo'shish
-- Qism qo'shish
-- Kontent ro'yxati
-- Statistika
-- Kontent o'chirish
-- Qism o'chirish
-- Broadcast
-- Majburiy kanal/guruh qo'shish
-- Obuna ro'yxati/o'chirish
+Asosiy admin menyusi:
 
-KONTENT QO'SHISH
+- ✏️ Narx o'zgartirish
+- 💰 Tarif narxlari
+- 📣 Umumiy e'lon
+- 🔍 Bot qidirish
+- 📋 Barcha botlar
+- 📊 Umumiy statistika
+- 🏭 Factory statistikasi
+- 🛂 Kutilayotgan so'rovlar
+- ⏳ To'lovi tugaganlar
+
+MIJOZ BOT YARATISH TARTIBI
+==========================
+
+1. Mijoz BotFather'dan yangi bot ochadi va token oladi.
+2. FactoryBot ichida "🤖 Bot tayyorlash" bosadi.
+3. Tokenni yuboradi.
+4. Bot turini tanlaydi: KinoBot, MultfilmBot, SerialBot, DoramaBot...
+5. Bot nomini kiritadi.
+6. Admin ID kiritadi.
+7. So'rov asosiy adminlarga keladi.
+8. Admin mijoz bilan narx/to'lovni kelishadi.
+9. Admin "✅ Ruxsat berish / 1 oy aktiv qilish" tugmasini bosadi.
+10. Bot ishga tushadi.
+
+OYLIK TO'LOV LOGIKASI
+=====================
+
+- Birinchi tasdiqlash vaqti: billing_started_at
+- Keyingi to'lov sanasi: current_period_end
+- Bot 1 oyga aktiv bo'ladi.
+- current_period_end kelganda bot holati expired bo'ladi.
+- Bot ichidagi kontent/userlar o'chmaydi.
+- Admin "✅ 1 oyga uzaytirish" bossa current_period_end yana 1 oyga cho'ziladi.
+- Bot yana ishlashda davom etadi.
+
+BOT ICHIDAGI KONTENT STRUKTURASI
+================================
+
+Hamma botlar bir xil universal strukturada:
+
+1) Qismsiz kontent
+   - Kod/nom yuborilsa post darrov yuboriladi.
+
+2) Qismli kontent
+   - Kod/nom yuborilsa 3 tadan inline tugma chiqadi.
+   - Oldingi/Keyingi tugmalari bor.
+   - 50, 100, 1000 ta qism bo'lsa ham bot RAM'ga hammasini yuklamaydi.
+   - MongoDB'dan faqat kerakli 3 ta qism olinadi.
+
+UMUMIY E'LON
+============
+
+Asosiy admin "📣 Umumiy e'lon" bosadi va matn/rasm/video/fayl/forward yuboradi.
+E'lon barcha aktiv yaratilgan botlarning foydalanuvchilariga o'sha bot nomidan yuboriladi.
+
+STATISTIKA
+==========
+
+Umumiy statistika:
+- jami yaratilgan botlar
+- aktiv botlar
+- kutilayotgan botlar
+- muddati tugagan botlar
+- barcha userlar
+- barcha kontentlar
+- barcha qismlar
+- FactoryBot userlari
+- umumiy e'lonlar soni
+
+Har bir bot statistikasi:
+- userlar
+- aktiv/bloklagan userlar
+- kontentlar
+- qismli/qismsiz kontent
+- qismlar
+- majburiy obunalar
+- ko'rishlar/qidiruvlar
+
+MUHIM XAVFSIZLIK
 ================
 
-Admin "Kontent qo'shish" tugmasini bosadi.
-Bot so'raydi:
-
-Bu qismli bo'ladimi?
-
-1) Ha, qismli
-   - nom/kod/tavsif kiritiladi
-   - keyin qismlar alohida qo'shiladi
-
-2) Yo'q, bitta to'liq post
-   - post/video/document forward qilinadi
-   - nom/kod/tavsif kiritiladi
-   - foydalanuvchi kod yuborsa post darrov ketadi
-
-QISM QO'SHISH
-=============
-
-Format:
-
-kod | qism_raqami | ixtiyoriy qism nomi
-
-Misol:
-
-poytaxt | 1 | 1-qism
-
-Keyin video/document/post forward qilinadi.
-Caption, premium emoji va formatlar copyMessage orqali saqlanishga harakat qiladi.
-
-BOSHQARUV VA BAZA
-=================
-
-MongoDB collectionlar:
-
-- multibot_users
-- multibot_subscriptions
-- multibot_contents
-- multibot_content_parts
-- multibot_managed_bots
-
-Har bir bot ma'lumotlari bot_key orqali ajraladi.
-Mijoz botlarining bot_key qiymati m_<MongoId> ko'rinishida bo'ladi.
-
-YANGI BOT TURINI QO'SHISH
-=========================
-
-bots.config.js ichida typePresets ga yangi preset qo'shing.
-Masalan:
-
-mytype: {
-  key: 'mytype',
-  title: 'MyBot',
-  item: 'kontent',
-  itemTitle: 'Kontent',
-  itemPlural: 'kontentlar',
-  itemPluralTitle: 'Kontentlar',
-  mainEmoji: '🤖',
-  addEmoji: '➕',
-  listEmoji: '📚',
-  codeExamples: 'test1, kod7',
-  welcomeLine: 'Kontent nomi yoki kodini yuboring.'
-}
-
-Factory typeRows funksiyasiga kerak bo'lsa type nomini qo'shing.
-
-STATUS ENDPOINT
-===============
-
-Render URL ochilganda:
-
-/
-/status
-
-/status orqali aktiv botlar, kontentlar va pending requestlarni ko'rish mumkin.
+- Mijoz tokenlari MongoDB'da ochiq saqlanmaydi.
+- Tokenlar BOT_TOKEN_SECRET bilan AES-256-GCM orqali shifrlanadi.
+- Eski token/parollar chatda ko'rinib qolgan bo'lsa BotFather va MongoDB parollarini almashtiring.
 

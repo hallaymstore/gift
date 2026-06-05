@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const path = require('path');
 const http = require('http');
-const fs = require('fs');
 const express = require('express');
 const { fork } = require('child_process');
 
@@ -27,7 +26,7 @@ function detectPublicUrl() {
   return '';
 }
 
-const PUBLIC_ROOT_URL = cleanPublicUrl(process.env.PUBLIC_URL) || cleanPublicUrl(process.env.URL) || cleanPublicUrl(detectPublicUrl());
+const PUBLIC_ROOT_URL = cleanPublicUrl(process.env.PUBLIC_URL) || cleanPublicUrl(detectPublicUrl());
 
 function joinUrlPath(root, basePath, trailingSlash = false) {
   const base = String(basePath || '').replace(/\/+$/, '');
@@ -64,26 +63,54 @@ function withDatabaseName(uri, dbName) {
   }
 }
 
-function commonMongoUri() {
-  return process.env.MONGODB_URI || process.env.MONGODB_URL || process.env.MONGO_URI || process.env.GIFTGO_MONGODB_URI || '';
-}
-
 function botMongoUri(prefix, defaultDbName) {
-  const specific = process.env[`${prefix}_MONGODB_URI`] || process.env[`MONGODB_URI_${prefix}`] || process.env[`${prefix}_MONGODB_URL`] || '';
+  const specific = process.env[`${prefix}_MONGODB_URI`] || process.env[`MONGODB_URI_${prefix}`] || '';
   if (specific) return specific;
-  const common = commonMongoUri();
+  const common = process.env.MONGODB_URI || process.env.GIFTGO_MONGODB_URI || process.env.MONGO_URI || process.env.MONGODB_URL || '';
   if (!common) return `mongodb://127.0.0.1:27017/${defaultDbName}`;
-  // GiftGo va Social oldingi DB ichida ishlayotgan bo'lishi mumkin. Ularni majburan DB nomiga o'tkazmaymiz.
-  if (prefix === 'GIFTGO' || prefix === 'SOCIAL' || prefix === 'FACTORY') return common;
+  // GiftGo ishlayotgan shu MONGODB_URI bazasini Social bot ham ishlatsin.
+  // Ayrim Atlas userlar faqat URI ichidagi bitta DB uchun ruxsatli bo‘ladi;
+  // /social_garant_market ga majburan o‘tkazish admin qo‘shishlarda "DB ulanmagan" xatosini beradi.
+  if (prefix === 'GIFTGO' || prefix === 'SOCIAL') return common;
   return withDatabaseName(common, defaultDbName);
 }
 
-function makeMiniAppEnv(bot) {
+function makeBotEnv(bot) {
   const env = { ...process.env };
   env.PORT = String(bot.port);
   env.NODE_ENV = process.env.NODE_ENV || 'production';
+
+  if (bot.key === 'factory') {
+    const factoryPublicUrl = PUBLIC_ROOT_URL ? joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, false) : prefixed(bot.prefix, 'PUBLIC_URL', process.env.PUBLIC_URL || '');
+    env.PUBLIC_URL = String(factoryPublicUrl || '').replace(/\/+$/, '');
+    env.WEBAPP_URL = env.PUBLIC_URL ? `${env.PUBLIC_URL}/` : '';
+    // BotFactory ichida webhook URL `URL`/`RENDER_EXTERNAL_URL` dan olinadi.
+    // Root domen emas, aynan /factory prefiksi bilan beramiz; root proxy uni ichki serverga uzatadi.
+    env.URL = env.PUBLIC_URL;
+    env.RENDER_EXTERNAL_URL = env.PUBLIC_URL;
+
+    const mongo = process.env.FACTORY_MONGODB_URL || process.env.FACTORY_MONGODB_URI || process.env.MONGODB_URL || process.env.MONGODB_URI || process.env.MONGO_URI || '';
+    env.MONGODB_URL = mongo;
+    env.MONGODB_URI = mongo;
+
+    const adminIds = process.env.FACTORY_ADMIN_IDS || process.env.ADMIN_IDS || process.env.ADMIN_TELEGRAM_IDS || process.env.ADMIN_TELEGRAM_CHAT_ID || '';
+    if (adminIds) env.ADMIN_IDS = adminIds;
+    else delete env.ADMIN_IDS;
+
+    const factoryToken = process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || '';
+    if (factoryToken) env.FACTORYBOT_TOKEN = factoryToken;
+    else delete env.FACTORYBOT_TOKEN;
+
+    env.WEBHOOK_SECRET = process.env.FACTORY_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || process.env.TELEGRAM_WEBHOOK_SECRET || process.env.APP_SECRET || 'factory_webhook_secret_change_me';
+    env.BOT_TOKEN_SECRET = process.env.FACTORY_BOT_TOKEN_SECRET || process.env.BOT_TOKEN_SECRET || process.env.APP_SECRET || env.WEBHOOK_SECRET;
+    env.OWNER_USERNAME = process.env.FACTORY_OWNER_USERNAME || process.env.OWNER_USERNAME || process.env.SOCIAL_ADMIN_TELEGRAM_USERNAME || '@Qoryogdiyev';
+    env.DEFAULT_CURRENCY = process.env.FACTORY_DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'UZS';
+    env.DEFAULT_MONTHLY_PRICE = process.env.FACTORY_DEFAULT_MONTHLY_PRICE || process.env.DEFAULT_MONTHLY_PRICE || '50000';
+    return env;
+  }
   const botPublicUrl = PUBLIC_ROOT_URL ? joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, false) : prefixed(bot.prefix, 'PUBLIC_URL', process.env.PUBLIC_URL || '');
   env.PUBLIC_URL = String(botPublicUrl || '').replace(/\/+$/, '');
+  // Mini App URL har doim slash bilan tugasin: Telegram webview va relative fetch yo‘llarida redirect sikl bo‘lmaydi.
   const botWebAppUrl = prefixed(bot.prefix, 'WEBAPP_URL', joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, true) || (env.PUBLIC_URL ? `${env.PUBLIC_URL}/` : ''));
   env.WEBAPP_URL = String(botWebAppUrl || '').replace(/\/+$/, '') + (botWebAppUrl ? '/' : '');
   env.MONGODB_URI = botMongoUri(bot.prefix, bot.defaultDbName);
@@ -106,17 +133,7 @@ function makeMiniAppEnv(bot) {
     'CLOUDINARY_CLOUD_NAME',
     'CLOUDINARY_API_KEY',
     'CLOUDINARY_API_SECRET',
-    'UPLOAD_MAX_MB',
-    'BRAND_NAME',
-    'BRAND_SUBTITLE',
-    'DEFAULT_CURRENCY',
-    'GROUP_CHAT_URL',
-    'CHANNEL_URL',
-    'CHANNEL_CHAT_ID',
-    'PAYMENT_PAYNET_URL',
-    'PAYMENT_CLICK_URL',
-    'PAYMENT_UZUM_URL',
-    'PAYMENT_XAZNA_URL'
+    'UPLOAD_MAX_MB'
   ];
 
   for (const key of mappedKeys) {
@@ -126,6 +143,8 @@ function makeMiniAppEnv(bot) {
       continue;
     }
 
+    // Har bir Telegram bot tokeni alohida bo'lishi shart.
+    // Common BOT_TOKEN fallback qilinsa, ikkala bot bitta token bilan webhookni bir-biridan tortib olishi mumkin.
     if (key === 'BOT_TOKEN' || key === 'BOT_EXPECTED_USERNAME') {
       delete env[key];
       continue;
@@ -140,29 +159,8 @@ function makeMiniAppEnv(bot) {
   return env;
 }
 
-function makeFactoryEnv(bot) {
-  const env = { ...process.env };
-  env.PORT = String(bot.port);
-  env.NODE_ENV = process.env.NODE_ENV || 'production';
-
-  const factoryPublicUrl = PUBLIC_ROOT_URL ? joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, false) : (process.env.FACTORY_URL || process.env.URL || '');
-  if (factoryPublicUrl) env.URL = String(factoryPublicUrl).replace(/\/+$/, '');
-
-  env.MONGODB_URL = process.env.FACTORY_MONGODB_URL || process.env.FACTORY_MONGODB_URI || process.env.MONGODB_URL || process.env.MONGODB_URI || process.env.MONGO_URI || botMongoUri('FACTORY', 'botfactory_multibot');
-  env.MONGODB_URI = env.MONGODB_URL;
-  env.ADMIN_IDS = process.env.FACTORY_ADMIN_IDS || process.env.ADMIN_IDS || process.env.ADMIN_TELEGRAM_IDS || process.env.ADMIN_TELEGRAM_CHAT_ID || '';
-  env.WEBHOOK_SECRET = process.env.FACTORY_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || process.env.TELEGRAM_WEBHOOK_SECRET || 'multi_bot_super_secret_2026_change_me';
-  env.BOT_TOKEN_SECRET = process.env.FACTORY_BOT_TOKEN_SECRET || process.env.BOT_TOKEN_SECRET || env.WEBHOOK_SECRET;
-  env.FACTORYBOT_TOKEN = process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || env.FACTORYBOT_TOKEN || '';
-  env.OWNER_USERNAME = process.env.FACTORY_OWNER_USERNAME || process.env.OWNER_USERNAME || process.env.SOCIAL_ADMIN_TELEGRAM_USERNAME || '@Qoryogdiyev';
-
-  // Factory child o'z papkasidagi .env ni ham o'qiydi. Bu yerda mavjud bo'lgan envlar yuqori prioritetda qoladi.
-  return env;
-}
-
 const bots = [
   {
-    kind: 'miniapp',
     key: 'giftgo',
     title: 'GiftGo',
     prefix: 'GIFTGO',
@@ -173,9 +171,8 @@ const bots = [
     defaultDbName: 'giftgo_platform'
   },
   {
-    kind: 'miniapp',
     key: 'course',
-    title: 'KurslarGo',
+    title: 'EduCourse',
     prefix: 'COURSE',
     basePath: '/course',
     dir: path.join(__dirname, 'bots', 'course'),
@@ -184,9 +181,8 @@ const bots = [
     defaultDbName: 'educourse_platform'
   },
   {
-    kind: 'miniapp',
     key: 'social',
-    title: 'Akkount Savdo / Garant Market',
+    title: 'Garant Market',
     prefix: 'SOCIAL',
     basePath: '/social',
     dir: path.join(__dirname, 'bots', 'social'),
@@ -195,25 +191,19 @@ const bots = [
     defaultDbName: 'social_garant_market'
   },
   {
-    kind: 'factory',
     key: 'factory',
-    title: 'BotFactory — Bot yaratuvchi bot',
+    title: 'BotFactory',
     prefix: 'FACTORY',
     basePath: '/factory',
     dir: path.join(__dirname, 'bots', 'factory'),
     script: path.join(__dirname, 'bots', 'factory', 'server.js'),
     port: Number(process.env.FACTORY_INTERNAL_PORT || 4104),
-    defaultDbName: 'botfactory_multibot'
+    defaultDbName: 'botfactory_platform'
   }
-].filter((bot) => fs.existsSync(bot.script));
+];
 
 const children = new Map();
 let shuttingDown = false;
-
-function makeBotEnv(bot) {
-  if (bot.kind === 'factory') return makeFactoryEnv(bot);
-  return makeMiniAppEnv(bot);
-}
 
 function startBot(bot) {
   const env = makeBotEnv(bot);
@@ -232,7 +222,7 @@ function startBot(bot) {
     children.delete(bot.key);
     console.error(`[${bot.key}] child exited: code=${code} signal=${signal || '-'}`);
     if (!shuttingDown) {
-      const delay = Number(process.env.BOT_RESTART_DELAY_MS || 7000);
+      const delay = Number(process.env.BOT_RESTART_DELAY_MS || 5000);
       setTimeout(() => startBot(bot), delay);
     }
   });
@@ -286,6 +276,7 @@ for (const bot of bots) startBot(bot);
 const app = express();
 app.set('trust proxy', 1);
 
+
 function botFromReferer(req) {
   const target = String(req.get('x-target-bot') || '').toLowerCase().trim();
   if (target) {
@@ -299,14 +290,12 @@ function botFromReferer(req) {
 app.get('/api/health', (_req, res) => {
   res.json({
     success: true,
-    app: 'render-multi-bots-with-botfactory',
+    app: 'multi-telegram-mini-app-runner',
     time: new Date().toISOString(),
-    publicRootUrl: PUBLIC_ROOT_URL || null,
     bots: bots.map((bot) => ({
       key: bot.key,
       title: bot.title,
       path: bot.basePath,
-      kind: bot.kind,
       internalPort: bot.port,
       running: children.has(bot.key),
       publicUrl: joinUrlPath(PUBLIC_ROOT_URL, bot.basePath, true)
@@ -314,8 +303,9 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// Eski mini app frontendlarida absolute /api yoki /telegram fetch ishlatilsa,
-// referer/origin bo'yicha kerakli ichki botga proxy qilamiz.
+
+// Eski frontendlar ichida absolute `/api/...` fetch ishlatilgan bo‘lsa ham,
+// Referer bo‘yicha kerakli ichki botga yo‘naltiramiz. Yangi botlarda relative `./api/...` ishlatiladi.
 app.use(['/api', '/telegram'], (req, res, next) => {
   if (req.path === '/health' && req.baseUrl === '/api') return next();
   const bot = botFromReferer(req);
@@ -324,34 +314,31 @@ app.use(['/api', '/telegram'], (req, res, next) => {
 });
 
 app.get('/', (_req, res) => {
-  const rows = bots.map((bot) => {
-    const extra = bot.kind === 'factory'
-      ? `Webhooklar: ${bot.basePath}/webhook/... · Status: ${bot.basePath}/status`
-      : `Admin: ${bot.basePath}/admin · Webhook: ${bot.basePath}/telegram/webhook`;
-    return `
+  const rows = bots.map((bot) => `
     <a class="card" href="${bot.basePath}/">
       <b>${bot.title}</b>
       <span>${bot.basePath}/</span>
-      <small>${extra}</small>
-    </a>`;
-  }).join('');
-  res.type('html').send(`<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Render Multi Bot + BotFactory</title><style>body{margin:0;font-family:Arial,sans-serif;background:#f7f7fb;color:#161620}.wrap{max-width:880px;margin:0 auto;padding:24px}.grid{display:grid;gap:12px}.card{display:block;text-decoration:none;color:inherit;background:#fff;border:1px solid #e6e6ef;border-radius:12px;padding:16px;box-shadow:0 10px 30px rgba(25,25,50,.06)}b{display:block;font-size:20px;margin-bottom:6px}span{display:block;color:#2563eb;font-weight:700;margin-bottom:6px}small{color:#666}.note{background:#111827;color:#fff;border-radius:12px;padding:14px;margin:14px 0}</style></head><body><main class="wrap"><h1>Render Multi Bot + BotFactory</h1><p>Bitta Render server ichida mini app botlar va bot yaratuvchi BotFactory ishlaydi.</p><div class="note">Start Command: <b>node server.js</b></div><div class="grid">${rows}</div></main></body></html>`);
+      <small>Admin: ${bot.basePath}/admin · Webhook: ${bot.basePath}/telegram/webhook</small>
+    </a>`).join('');
+  res.type('html').send(`<!doctype html><html lang="uz"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multi Bot Server</title><style>body{margin:0;font-family:Arial,sans-serif;background:#f7f7fb;color:#161620}.wrap{max-width:820px;margin:0 auto;padding:24px}.grid{display:grid;gap:12px}.card{display:block;text-decoration:none;color:inherit;background:#fff;border:1px solid #e6e6ef;border-radius:14px;padding:16px;box-shadow:0 10px 30px rgba(25,25,50,.06)}b{display:block;font-size:20px;margin-bottom:6px}span{display:block;color:#2563eb;font-weight:700;margin-bottom:6px}small{color:#666}</style></head><body><main class="wrap"><h1>Render Multi Bot Server</h1><p>Bitta Render server ichida alohida Telegram Mini App botlar ishlayapti.</p><div class="grid">${rows}</div></main></body></html>`);
 });
 
 for (const bot of bots) {
+  // /giftgo va /giftgo/ ikkalasi ham ichki botning / sahifasiga tushadi.
+  // 301/302 redirect qilmaymiz — Telegram WebView ichida ERR_TOO_MANY_REDIRECTS shu joydan ko‘p chiqadi.
   app.use(bot.basePath, proxyTo(bot));
 }
 
 function shutdown() {
   shuttingDown = true;
   for (const child of children.values()) child.kill('SIGTERM');
-  setTimeout(() => process.exit(0), 2500).unref();
+  setTimeout(() => process.exit(0), 2000).unref();
 }
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 app.listen(ROOT_PORT, HOST, () => {
-  console.log(`Multi bot + BotFactory server listening on ${HOST}:${ROOT_PORT}`);
+  console.log(`Multi bot server listening on ${HOST}:${ROOT_PORT}`);
   for (const bot of bots) console.log(`${bot.title}: http://localhost:${ROOT_PORT}${bot.basePath}/ -> internal ${bot.port}`);
 });

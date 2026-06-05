@@ -12,12 +12,12 @@ const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.type
 // =========================
 // ENV SOZLAMALAR
 // =========================
-const MONGODB_URL = process.env.MONGODB_URL;
+const MONGODB_URL = process.env.MONGODB_URL || process.env.MONGODB_URI || process.env.MONGO_URI || process.env.FACTORY_MONGODB_URI || '';
 const PORT = Number(process.env.PORT || 3000);
-const URL = process.env.RENDER_EXTERNAL_URL || process.env.URL || '';
+const URL = String(process.env.URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_webhook_secret';
 const BOT_TOKEN_SECRET = process.env.BOT_TOKEN_SECRET || WEBHOOK_SECRET;
-const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || '').trim();
+const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || '').trim();
 const OWNER_USERNAME = String(process.env.OWNER_USERNAME || '@Qoryogdiyev').trim();
 
 function parseIds(value) {
@@ -27,9 +27,9 @@ function parseIds(value) {
     .filter(Boolean);
 }
 
-const GLOBAL_ADMIN_IDS = parseIds(process.env.ADMIN_IDS);
+const GLOBAL_ADMIN_IDS = parseIds(process.env.ADMIN_IDS || process.env.FACTORY_ADMIN_IDS || process.env.ADMIN_TELEGRAM_IDS || process.env.ADMIN_TELEGRAM_CHAT_ID);
 
-if (!MONGODB_URL) throw new Error('MONGODB_URL .env ichida berilmagan');
+if (!MONGODB_URL) throw new Error('MONGODB_URL/MONGODB_URI .env ichida berilmagan');
 if (GLOBAL_ADMIN_IDS.length === 0) {
   throw new Error('ADMIN_IDS .env ichida berilmagan. Masalan: ADMIN_IDS=6606638731,901126203');
 }
@@ -166,7 +166,22 @@ const managedBotSchema = new mongoose.Schema(
     token_tag: { type: String, required: true },
     token_mask: String,
 
-    status: { type: String, enum: ['pending', 'approved', 'rejected', 'disabled'], default: 'pending', index: true },
+    // Oylik tarif / abonent tizimi
+    plan_key: { type: String, default: 'monthly', index: true },
+    monthly_price: { type: Number, default: 0 },
+    currency: { type: String, default: 'UZS' },
+    payment_status: { type: String, enum: ['not_paid', 'paid', 'overdue'], default: 'not_paid', index: true },
+    billing_started_at: Date,
+    current_period_start: Date,
+    current_period_end: Date,
+    last_paid_at: Date,
+    next_payment_due_at: Date,
+    expired_at: Date,
+    last_extended_by: Number,
+    last_extended_at: Date,
+    disabled_reason: String,
+
+    status: { type: String, enum: ['pending', 'approved', 'rejected', 'disabled', 'expired'], default: 'pending', index: true },
     is_enabled: { type: Boolean, default: false, index: true },
     price_note: String,
     request_note: String,
@@ -180,6 +195,51 @@ const managedBotSchema = new mongoose.Schema(
 );
 managedBotSchema.index({ telegram_bot_id: 1, status: 1 });
 const ManagedBot = mongoose.model('ManagedBot', managedBotSchema);
+
+const botPlanSchema = new mongoose.Schema(
+  {
+    type_key: { type: String, required: true, unique: true, index: true },
+    title: String,
+    monthly_price: { type: Number, default: 0 },
+    currency: { type: String, default: 'UZS' },
+    is_active: { type: Boolean, default: true },
+    updated_by: Number
+  },
+  { timestamps: true, collection: 'multibot_bot_plans' }
+);
+const BotPlan = mongoose.model('BotPlan', botPlanSchema);
+
+const factoryUserSchema = new mongoose.Schema(
+  {
+    user_id: { type: Number, required: true, unique: true, index: true },
+    username: String,
+    first_name: String,
+    last_name: String,
+    language_code: String,
+    joined_at: { type: Date, default: Date.now },
+    last_active_at: { type: Date, default: Date.now },
+    starts: { type: Number, default: 0 },
+    is_blocked: { type: Boolean, default: false }
+  },
+  { timestamps: true, collection: 'multibot_factory_users' }
+);
+const FactoryUser = mongoose.model('FactoryUser', factoryUserSchema);
+
+const broadcastLogSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ['global', 'single_bot'], default: 'global', index: true },
+    sent_by: Number,
+    source_chat_id: Number,
+    source_message_id: Number,
+    target_bot_keys: [String],
+    total_targets: { type: Number, default: 0 },
+    success: { type: Number, default: 0 },
+    failed: { type: Number, default: 0 },
+    finished_at: Date
+  },
+  { timestamps: true, collection: 'multibot_broadcast_logs' }
+);
+const BroadcastLog = mongoose.model('BroadcastLog', broadcastLogSchema);
 
 
 // =========================
@@ -583,6 +643,29 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   const utils = createSharedUtils(bot, config, adminIds);
   const { isAdmin, saveUser, checkAllSubscriptions, sendSubscriptionWarning, broadcastMessage, handleSubscriptionCallback } = utils;
+
+  if (config.managed) {
+    bot.use(async (ctx, next) => {
+      const rec = await ManagedBot.findOne({ bot_key: config.key });
+      if (!rec) return;
+
+      const expiredNow = await markRecordExpiredIfNeeded(rec);
+      const allowed = !expiredNow && rec.status === 'approved' && rec.is_enabled;
+      if (!allowed) {
+        const ownerOrAdmin = ctx.from && (Number(ctx.from.id) === Number(rec.owner_user_id) || (rec.admin_ids || []).map(Number).includes(Number(ctx.from.id)) || GLOBAL_ADMIN_IDS.includes(Number(ctx.from.id)));
+        if (ownerOrAdmin) {
+          return ctx.reply(
+            `⏳ @${rec.telegram_username} botining oylik muddati tugagan yoki admin tomonidan to‘xtatilgan.\n\n` +
+              `Bot ichidagi kinolar/qismlar/userlar MongoDB’da saqlangan. Admin ruxsat/oylik to‘lovni tasdiqlagach bot yana shu joyidan ishlaydi.\n\n` +
+              `Kelishish: ${OWNER_USERNAME}`
+          );
+        }
+        return;
+      }
+
+      return next();
+    });
+  }
 
   function resetSession(ctx) {
     ctx.session.mode = null;
@@ -1299,8 +1382,260 @@ async function activateBot(active, source = 'manual') {
   return true;
 }
 
+
+function formatDate(date) {
+  if (!date) return '—';
+  try {
+    return new Date(date).toLocaleString('uz-UZ', { timeZone: 'Asia/Tashkent' });
+  } catch (_) {
+    return new Date(date).toISOString();
+  }
+}
+
+function formatMoney(amount, currency = 'UZS') {
+  const n = Number(amount || 0);
+  if (!n) return `0 ${currency}`;
+  return `${n.toLocaleString('uz-UZ')} ${currency}`;
+}
+
+function addMonthsSafe(date, months = 1) {
+  const d = new Date(date || Date.now());
+  const day = d.getDate();
+  const target = new Date(d);
+  target.setMonth(target.getMonth() + months);
+  if (target.getDate() !== day) target.setDate(0);
+  return target;
+}
+
+function defaultPlanPrice(typeKey) {
+  return Number(process.env[`${String(typeKey || '').toUpperCase()}_MONTHLY_PRICE`] || process.env.DEFAULT_MONTHLY_PRICE || 0);
+}
+
+async function getOrCreatePlan(typeKey) {
+  const preset = getPreset(typeKey);
+  const existing = await BotPlan.findOne({ type_key: typeKey });
+  if (existing) return existing;
+  return BotPlan.create({
+    type_key: typeKey,
+    title: preset.title || preset.itemTitle || typeKey,
+    monthly_price: defaultPlanPrice(typeKey),
+    currency: process.env.DEFAULT_CURRENCY || 'UZS',
+    is_active: true
+  });
+}
+
+async function seedDefaultPlans() {
+  for (const [typeKey, preset] of Object.entries(TYPE_PRESETS)) {
+    const existing = await BotPlan.findOne({ type_key: typeKey });
+    if (!existing) {
+      await BotPlan.create({
+        type_key: typeKey,
+        title: preset.title || preset.itemTitle || typeKey,
+        monthly_price: defaultPlanPrice(typeKey),
+        currency: process.env.DEFAULT_CURRENCY || 'UZS',
+        is_active: true
+      });
+    } else if (!existing.title) {
+      existing.title = preset.title || preset.itemTitle || typeKey;
+      await existing.save();
+    }
+  }
+}
+
+function isBillingExpired(record, now = new Date()) {
+  if (!record || record.status !== 'approved' || !record.is_enabled) return false;
+  if (!record.current_period_end) return false;
+  return new Date(record.current_period_end).getTime() <= now.getTime();
+}
+
+async function ensureBillingWindow(record) {
+  if (!record || record.status !== 'approved' || !record.is_enabled) return record;
+  if (record.current_period_end) return record;
+
+  const plan = await getOrCreatePlan(record.type_key);
+  const start = record.billing_started_at || record.approved_at || record.createdAt || new Date();
+  record.billing_started_at = record.billing_started_at || start;
+  record.current_period_start = record.current_period_start || start;
+  record.current_period_end = addMonthsSafe(start, 1);
+  record.next_payment_due_at = record.current_period_end;
+  record.monthly_price = Number(record.monthly_price || plan.monthly_price || 0);
+  record.currency = record.currency || plan.currency || 'UZS';
+  record.payment_status = record.payment_status === 'not_paid' ? 'paid' : (record.payment_status || 'paid');
+  await record.save();
+  return record;
+}
+
+async function markRecordExpiredIfNeeded(record) {
+  await ensureBillingWindow(record);
+  if (!isBillingExpired(record)) return false;
+  record.status = 'expired';
+  record.is_enabled = false;
+  record.payment_status = 'overdue';
+  record.disabled_reason = 'billing_expired';
+  record.expired_at = record.expired_at || new Date();
+  await record.save();
+  return true;
+}
+
+async function expireDueManagedBots() {
+  const due = await ManagedBot.find({
+    status: 'approved',
+    is_enabled: true,
+    current_period_end: { $lte: new Date() }
+  });
+
+  for (const rec of due) {
+    await markRecordExpiredIfNeeded(rec);
+    try {
+      for (const adminId of GLOBAL_ADMIN_IDS) {
+        const factory = activeBots.get('factory');
+        if (factory?.bot) {
+          await factory.bot.telegram.sendMessage(
+            adminId,
+            `⏳ Bot muddati tugadi: @${rec.telegram_username}\n` +
+              `👤 Egasi: ${rec.owner_first_name || ''} ${rec.owner_username ? '@' + rec.owner_username : ''}\n` +
+              `🆔 Egasi ID: ${rec.owner_user_id}\n` +
+              `💰 Tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
+              `📅 Tugagan sana: ${formatDate(rec.current_period_end)}`,
+            Markup.inlineKeyboard([[Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${String(rec._id)}`)]])
+          );
+        }
+      }
+    } catch (_) {}
+  }
+}
+
+async function extendManagedBot(record, adminId, months = 1) {
+  const plan = await getOrCreatePlan(record.type_key);
+  const now = new Date();
+  const base = record.current_period_end && new Date(record.current_period_end) > now ? new Date(record.current_period_end) : now;
+  const newEnd = addMonthsSafe(base, months);
+
+  record.status = 'approved';
+  record.is_enabled = true;
+  record.payment_status = 'paid';
+  record.disabled_reason = null;
+  record.expired_at = null;
+  record.monthly_price = Number(plan.monthly_price || record.monthly_price || 0);
+  record.currency = plan.currency || record.currency || 'UZS';
+  record.billing_started_at = record.billing_started_at || now;
+  record.current_period_start = base;
+  record.current_period_end = newEnd;
+  record.next_payment_due_at = newEnd;
+  record.last_paid_at = now;
+  record.last_extended_by = adminId;
+  record.last_extended_at = now;
+  if (!record.bot_key) record.bot_key = `m_${String(record._id)}`;
+  await record.save();
+  return record;
+}
+
+async function disableManagedBot(record, adminId, reason = 'admin_disabled') {
+  record.status = 'disabled';
+  record.is_enabled = false;
+  record.disabled_reason = reason;
+  record.rejected_by = adminId;
+  await record.save();
+  return record;
+}
+
+async function getBotStats(botKey) {
+  const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, viewsAgg, partViewsAgg] = await Promise.all([
+    User.countDocuments({ bot_key: botKey }),
+    User.countDocuments({ bot_key: botKey, is_blocked: { $ne: true } }),
+    User.countDocuments({ bot_key: botKey, is_blocked: true }),
+    Content.countDocuments({ bot_key: botKey, is_active: true }),
+    Content.countDocuments({ bot_key: botKey, has_parts: false, is_active: true }),
+    Content.countDocuments({ bot_key: botKey, has_parts: true, is_active: true }),
+    ContentPart.countDocuments({ bot_key: botKey, is_active: true }),
+    Subscription.countDocuments({ bot_key: botKey }),
+    Content.aggregate([{ $match: { bot_key: botKey, is_active: true } }, { $group: { _id: null, total: { $sum: '$views' }, searches: { $sum: '$search_count' } } }]),
+    ContentPart.aggregate([{ $match: { bot_key: botKey, is_active: true } }, { $group: { _id: null, total: { $sum: '$views' } } }])
+  ]);
+  return {
+    users,
+    activeUsers,
+    blockedUsers,
+    contents,
+    singles,
+    withParts,
+    parts,
+    subscriptions: subs,
+    contentViews: viewsAgg[0]?.total || 0,
+    searches: viewsAgg[0]?.searches || 0,
+    partViews: partViewsAgg[0]?.total || 0
+  };
+}
+
+function botStatusLabel(record) {
+  const map = {
+    pending: '⏳ kutilmoqda',
+    approved: record?.is_enabled ? '✅ aktiv' : '⏸ to‘xtatilgan',
+    expired: '⏳ oylik to‘lov tugagan',
+    rejected: '❌ rad etilgan',
+    disabled: '⏸ admin to‘xtatgan'
+  };
+  return map[record.status] || record.status;
+}
+
+async function botDetailText(record) {
+  const preset = getPreset(record.type_key);
+  const stats = record.bot_key ? await getBotStats(record.bot_key) : null;
+  return (
+    `🤖 BOT MAʼLUMOTI\n\n` +
+    `${preset.mainEmoji || '🤖'} Nomi: ${record.title}\n` +
+    `🔗 Username: @${record.telegram_username}\n` +
+    `📦 Turi: ${preset.itemTitle || record.type_key}\n` +
+    `📌 Holat: ${botStatusLabel(record)}\n` +
+    `👤 Egasi: ${record.owner_first_name || ''} ${record.owner_username ? '@' + record.owner_username : ''}\n` +
+    `🆔 Egasi ID: ${record.owner_user_id}\n` +
+    `👨‍💻 Admin IDlar: ${(record.admin_ids || []).join(', ') || '—'}\n\n` +
+    `💰 Tarif: ${formatMoney(record.monthly_price, record.currency)} / oy\n` +
+    `📅 Boshlangan: ${formatDate(record.billing_started_at)}\n` +
+    `⏳ Keyingi to‘lov: ${formatDate(record.current_period_end)}\n` +
+    `🧾 To‘lov holati: ${record.payment_status || '—'}\n\n` +
+    (stats
+      ? `📊 BOT STATISTIKASI\n` +
+        `👥 Userlar: ${stats.users} | aktiv: ${stats.activeUsers} | blok: ${stats.blockedUsers}\n` +
+        `📦 Kontent: ${stats.contents} | qismsiz: ${stats.singles} | qismli: ${stats.withParts}\n` +
+        `🎞 Qismlar: ${stats.parts}\n` +
+        `🔒 Majburiy obuna: ${stats.subscriptions}\n` +
+        `👁 Ko‘rishlar: ${stats.contentViews + stats.partViews} | qidiruv: ${stats.searches}`
+      : `📊 Bot hali tasdiqlanmagan yoki bot_key yo‘q.`)
+  );
+}
+
+async function searchManagedBots(query) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const username = q.replace(/^@/, '').trim();
+  const numeric = Number(q);
+  const ors = [
+    { telegram_username: new RegExp(escapeRegex(username), 'i') },
+    { title: new RegExp(escapeRegex(q), 'i') },
+    { owner_username: new RegExp(escapeRegex(username), 'i') }
+  ];
+  if (Number.isFinite(numeric) && numeric > 0) ors.push({ owner_user_id: numeric }, { telegram_bot_id: numeric });
+  return ManagedBot.find({ $or: ors }).sort({ createdAt: -1 }).limit(10);
+}
+
+function botActionKeyboard(record) {
+  const rows = [];
+  if (record.status === 'pending') {
+    rows.push([Markup.button.callback('✅ Ruxsat berish / 1 oy aktiv qilish', `factory:approve:${String(record._id)}`)]);
+    rows.push([Markup.button.callback('❌ Rad etish', `factory:reject:${String(record._id)}`)]);
+  } else {
+    rows.push([Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${String(record._id)}`)]);
+    if (record.status !== 'disabled') rows.push([Markup.button.callback('⏸ To‘xtatish', `factory:disable:${String(record._id)}`)]);
+  }
+  rows.push([Markup.button.callback('🔄 Yangilash', `factory:bot:${String(record._id)}`)]);
+  return Markup.inlineKeyboard(rows);
+}
+
 async function startManagedRecord(record, source = 'db') {
   if (!record || record.status !== 'approved' || !record.is_enabled) return null;
+  const expired = await markRecordExpiredIfNeeded(record);
+  if (expired) return null;
   const token = decryptToken(record);
   const config = buildManagedConfig(record);
   const adminIds = Array.from(new Set([...GLOBAL_ADMIN_IDS, ...record.admin_ids.map(Number).filter(Boolean)]));
@@ -1311,7 +1646,7 @@ async function startManagedRecord(record, source = 'db') {
 }
 
 function typeRows(prefix = 'factory:type') {
-  const entries = Object.entries(TYPE_PRESETS).filter(([key]) => ['kino', 'multfilm', 'serial', 'dorama', 'anime', 'turkserial', 'kurs', 'kitob'].includes(key));
+  const entries = Object.entries(TYPE_PRESETS).filter(([key]) => ['kino', 'multfilm', 'serial', 'dorama', 'anime', 'turkserial', 'kurs', 'kitob', 'fayl', 'music'].includes(key));
   const rows = [];
   for (const [key, preset] of entries) rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}`, `${prefix}:${key}`)]);
   return rows;
@@ -1326,6 +1661,26 @@ function createFactoryBot() {
   const bot = new Telegraf(FACTORYBOT_TOKEN);
   bot.use(session({ defaultSession: () => ({ mode: null, draft: {} }) }));
 
+  bot.use(async (ctx, next) => {
+    if (ctx.from) {
+      await FactoryUser.updateOne(
+        { user_id: ctx.from.id },
+        {
+          $set: {
+            username: ctx.from.username || null,
+            first_name: ctx.from.first_name || null,
+            last_name: ctx.from.last_name || null,
+            language_code: ctx.from.language_code || null,
+            last_active_at: new Date(),
+            is_blocked: false
+          }
+        },
+        { upsert: true }
+      );
+    }
+    return next();
+  });
+
   function isOwner(userId) {
     return GLOBAL_ADMIN_IDS.includes(Number(userId));
   }
@@ -1337,10 +1692,16 @@ function createFactoryBot() {
 
   function userKeyboard(ctx) {
     const rows = [
-      ['🤖 Bot tayyorlash'],
+      ['🤖 Bot tayyorlash', '💰 Narxlar'],
       ['📋 Mening botlarim', '☎️ Admin bilan kelishish']
     ];
-    if (ctx.from && isOwner(ctx.from.id)) rows.unshift(['🛂 Kutilayotgan soʻrovlar', '📊 Factory statistika']);
+    if (ctx.from && isOwner(ctx.from.id)) {
+      rows.unshift(['🛂 Kutilayotgan soʻrovlar', '⏳ Toʻlovi tugaganlar']);
+      rows.unshift(['📊 Umumiy statistika', '🏭 Factory statistikasi']);
+      rows.unshift(['🔍 Bot qidirish', '📋 Barcha botlar']);
+      rows.unshift(['📣 Umumiy eʼlon', '💰 Tarif narxlari']);
+      rows.unshift(['✏️ Narx oʻzgartirish']);
+    }
     return Markup.keyboard(rows).resize().oneTime(false);
   }
 
@@ -1354,22 +1715,32 @@ function createFactoryBot() {
     }
   }
 
+  async function showPlans(ctx) {
+    await seedDefaultPlans();
+    const plans = await BotPlan.find({ is_active: true }).sort({ type_key: 1 });
+    const lines = plans.map((p, i) => `${i + 1}. ${getPreset(p.type_key).mainEmoji || '🤖'} ${p.title || p.type_key}: ${formatMoney(p.monthly_price, p.currency)} / oy`);
+    return ctx.reply(`💰 BOT TARIF NARXLARI\n\nYaratish: bepul\nOylik to‘lov: admin tasdiqlagandan keyin bot ishlaydi.\n\n${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
+  }
+
   async function showMyBots(ctx) {
     const list = await ManagedBot.find({ owner_user_id: ctx.from.id }).sort({ createdAt: -1 }).limit(20);
     if (!list.length) return ctx.reply('📭 Sizda hali bot soʻrovi yoʻq.', userKeyboard(ctx));
 
     const lines = list.map((b, i) => {
       const preset = getPreset(b.type_key);
-      const statusMap = { pending: '⏳ kutilmoqda', approved: '✅ aktiv', rejected: '❌ rad etilgan', disabled: '⏸ toʻxtatilgan' };
-      return `${i + 1}. ${preset.mainEmoji || '🤖'} ${b.title} — @${b.telegram_username}\n   Turi: ${preset.itemTitle || b.type_key} | Holat: ${statusMap[b.status] || b.status}`;
+      return (
+        `${i + 1}. ${preset.mainEmoji || '🤖'} ${b.title} — @${b.telegram_username}\n` +
+        `   Turi: ${preset.itemTitle || b.type_key} | Holat: ${botStatusLabel(b)}\n` +
+        `   💰 ${formatMoney(b.monthly_price, b.currency)} / oy | ⏳ ${formatDate(b.current_period_end)}`
+      );
     });
 
-    return ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}`, userKeyboard(ctx));
+    return ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}\n\nTo‘lov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
   }
 
   async function showPending(ctx) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Bu bo‘lim faqat asosiy admin uchun.');
-    const list = await ManagedBot.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(20);
+    const list = await ManagedBot.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(30);
     if (!list.length) return ctx.reply('✅ Kutilayotgan soʻrovlar yoʻq.', userKeyboard(ctx));
 
     for (const req of list) {
@@ -1381,28 +1752,158 @@ function createFactoryBot() {
           `👤 Mijoz: ${req.owner_first_name || ''} ${req.owner_username ? '@' + req.owner_username : ''}\n` +
           `🆔 Mijoz ID: ${req.owner_user_id}\n` +
           `👨‍💻 Admin IDlar: ${req.admin_ids.join(', ')}\n` +
+          `💰 Tarif: ${formatMoney(req.monthly_price, req.currency)} / oy\n` +
           `🔐 Token: ${req.token_mask || '***'}\n\n` +
-          `Narx va shartlarni ${OWNER_USERNAME} orqali kelishib, keyin tasdiqlang.`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Ruxsat berish / ishga tushirish', `factory:approve:${String(req._id)}`)],
-          [Markup.button.callback('❌ Rad etish', `factory:reject:${String(req._id)}`)]
-        ])
+          `Yaratish bepul. Oylik to‘lov kelishilgach 1 oyga ruxsat bering.`,
+        botActionKeyboard(req)
       );
     }
   }
 
+  async function showExpired(ctx) {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Bu bo‘lim faqat asosiy admin uchun.');
+    await expireDueManagedBots();
+    const list = await ManagedBot.find({ status: 'expired' }).sort({ current_period_end: 1 }).limit(30);
+    if (!list.length) return ctx.reply('✅ Toʻlovi tugagan botlar yoʻq.', userKeyboard(ctx));
+
+    for (const rec of list) {
+      await ctx.reply(await botDetailText(rec), botActionKeyboard(rec));
+    }
+  }
+
+  async function showAllBots(ctx) {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Bu bo‘lim faqat asosiy admin uchun.');
+    const list = await ManagedBot.find({}).sort({ createdAt: -1 }).limit(30);
+    if (!list.length) return ctx.reply('📭 Hali yaratilgan botlar yo‘q.', userKeyboard(ctx));
+
+    const lines = list.map((b, i) => `${i + 1}. @${b.telegram_username} — ${b.title} | ${getPreset(b.type_key).itemTitle || b.type_key} | ${botStatusLabel(b)} | ${formatDate(b.current_period_end)}`);
+    return ctx.reply(`📋 SO‘NGGI 30 TA BOT\n\n${lines.join('\n')}\n\nTo‘liq ko‘rish uchun “🔍 Bot qidirish”dan foydalaning.`, userKeyboard(ctx));
+  }
+
+  async function showOverallStats(ctx) {
+    if (!isOwner(ctx.from.id)) return;
+    await expireDueManagedBots();
+    const [total, pending, approved, expired, rejected, disabled, totalUsers, activeUsers, totalContents, totalParts, factoryUsers, broadcasts] = await Promise.all([
+      ManagedBot.countDocuments(),
+      ManagedBot.countDocuments({ status: 'pending' }),
+      ManagedBot.countDocuments({ status: 'approved', is_enabled: true }),
+      ManagedBot.countDocuments({ status: 'expired' }),
+      ManagedBot.countDocuments({ status: 'rejected' }),
+      ManagedBot.countDocuments({ status: 'disabled' }),
+      User.countDocuments(),
+      User.countDocuments({ is_blocked: { $ne: true } }),
+      Content.countDocuments({ is_active: true }),
+      ContentPart.countDocuments({ is_active: true }),
+      FactoryUser.countDocuments(),
+      BroadcastLog.countDocuments({ type: 'global' })
+    ]);
+
+    return ctx.reply(
+      `📊 UMUMIY STATISTIKA\n\n` +
+        `🤖 Jami yaratilgan botlar: ${total}\n` +
+        `✅ Aktiv: ${approved}\n` +
+        `⏳ Kutilayotgan: ${pending}\n` +
+        `💳 To‘lovi tugagan: ${expired}\n` +
+        `⏸ To‘xtatilgan: ${disabled}\n` +
+        `❌ Rad etilgan: ${rejected}\n\n` +
+        `👥 Barcha kontent-bot userlari: ${totalUsers}\n` +
+        `✅ Aktiv userlar: ${activeUsers}\n` +
+        `📦 Barcha kontentlar: ${totalContents}\n` +
+        `🎞 Barcha qismlar: ${totalParts}\n\n` +
+        `🏭 FactoryBot userlari: ${factoryUsers}\n` +
+        `📣 Umumiy eʼlonlar: ${broadcasts}\n` +
+        `🚀 Runtime aktiv botlar: ${activeBots.size}`,
+      userKeyboard(ctx)
+    );
+  }
+
+  async function showFactoryStats(ctx) {
+    if (!isOwner(ctx.from.id)) return;
+    const [factoryUsers, blockedFactory, requestsToday, pending, active] = await Promise.all([
+      FactoryUser.countDocuments(),
+      FactoryUser.countDocuments({ is_blocked: true }),
+      ManagedBot.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+      ManagedBot.countDocuments({ status: 'pending' }),
+      ManagedBot.countDocuments({ status: 'approved', is_enabled: true })
+    ]);
+    return ctx.reply(
+      `🏭 FACTORYBOT STATISTIKASI\n\n` +
+        `👥 Factory userlari: ${factoryUsers}\n` +
+        `🚫 Bloklaganlar: ${blockedFactory}\n` +
+        `🆕 Oxirgi 24 soatdagi so‘rovlar: ${requestsToday}\n` +
+        `⏳ Kutilayotgan so‘rovlar: ${pending}\n` +
+        `✅ Aktiv mijoz botlari: ${active}`,
+      userKeyboard(ctx)
+    );
+  }
+
+  async function sendGlobalBroadcast(ctx) {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
+    const targetKeys = Array.from(activeBots.values()).filter((a) => a.key !== 'factory').map((a) => a.key);
+    if (!targetKeys.length) {
+      reset(ctx);
+      return ctx.reply('❌ Hozir aktiv kontent bot yo‘q.', userKeyboard(ctx));
+    }
+
+    const log = await BroadcastLog.create({
+      type: 'global',
+      sent_by: ctx.from.id,
+      source_chat_id: ctx.chat.id,
+      source_message_id: ctx.message.message_id,
+      target_bot_keys: targetKeys
+    });
+
+    let totalTargets = 0;
+    let success = 0;
+    let failed = 0;
+    await ctx.reply(`📣 Umumiy eʼlon boshlandi. Botlar: ${targetKeys.length} ta`);
+
+    for (const key of targetKeys) {
+      const active = activeBots.get(key);
+      if (!active?.bot) continue;
+      if (active.config?.managed) {
+        const rec = await ManagedBot.findOne({ bot_key: key });
+        const expired = rec ? await markRecordExpiredIfNeeded(rec) : true;
+        if (!rec || expired || rec.status !== 'approved' || !rec.is_enabled) continue;
+      }
+      const users = await User.find({ bot_key: key, is_blocked: { $ne: true } }).select('user_id');
+      totalTargets += users.length;
+      for (const user of users) {
+        try {
+          await active.bot.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id);
+          success += 1;
+          await sleep(45);
+        } catch (error) {
+          failed += 1;
+          if (String(error.message || '').toLowerCase().includes('blocked')) {
+            await User.updateOne({ bot_key: key, user_id: user.user_id }, { $set: { is_blocked: true } });
+          }
+        }
+      }
+    }
+
+    log.total_targets = totalTargets;
+    log.success = success;
+    log.failed = failed;
+    log.finished_at = new Date();
+    await log.save();
+    reset(ctx);
+    return ctx.reply(`✅ Umumiy eʼlon yakunlandi!\n\n🎯 Jami target: ${totalTargets}\n✅ Yuborildi: ${success}\n❌ Xatolik: ${failed}`, userKeyboard(ctx));
+  }
+
   bot.start(async (ctx) => {
+    await FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true });
     reset(ctx);
     return ctx.reply(
       `🏭 Bot tayyorlovchi botga xush kelibsiz!\n\n` +
-        `Bu yerda KinoBot, MultfilmBot, SerialBot, DoramaBot va shunga o‘xshash kontent botlarni tayyorlash uchun soʻrov yuborasiz.\n\n` +
+        `Yaratish bepul. Bot ishlashi uchun oylik tarif admin tomonidan tasdiqlanadi.\n\n` +
         `Jarayon:\n` +
         `1) BotFather’dan token olasiz\n` +
         `2) Tokenni shu botga kiritasiz\n` +
         `3) Bot turini tanlaysiz\n` +
         `4) Bot nomi va admin ID kiritasiz\n` +
-        `5) ${OWNER_USERNAME} bilan narx/shart kelishilgach, admin ruxsat beradi\n\n` +
-        `Ruxsat berilgandan keyin bot avtomatik ishga tushadi.`,
+        `5) ${OWNER_USERNAME} bilan narx/to‘lov kelishilgach admin 1 oyga ruxsat beradi\n\n` +
+        `Har oy muddati tugaganda bot avtomatik to‘xtaydi. Admin yana ruxsat bersa, bot ichidagi barcha maʼlumotlar saqlangan holda davom etadi.`,
       userKeyboard(ctx)
     );
   });
@@ -1416,31 +1917,35 @@ function createFactoryBot() {
     return ctx.reply(`Narx, muddat va ruxsat uchun admin bilan bog‘laning: ${OWNER_USERNAME}`, Markup.inlineKeyboard([[Markup.button.url('Admin bilan yozishish', `https://t.me/${OWNER_USERNAME.replace('@', '')}`)]]));
   });
 
+  bot.hears('💰 Narxlar', showPlans);
+  bot.hears('💰 Tarif narxlari', showPlans);
   bot.hears('📋 Mening botlarim', showMyBots);
   bot.hears('🛂 Kutilayotgan soʻrovlar', showPending);
+  bot.hears('⏳ Toʻlovi tugaganlar', showExpired);
+  bot.hears('📋 Barcha botlar', showAllBots);
+  bot.hears('📊 Umumiy statistika', showOverallStats);
+  bot.hears('📊 Factory statistika', showOverallStats);
+  bot.hears('🏭 Factory statistikasi', showFactoryStats);
 
-  bot.hears('📊 Factory statistika', async (ctx) => {
-    if (!isOwner(ctx.from.id)) return;
-    const [pending, approved, rejected, disabled, totalUsers, totalContents, totalParts] = await Promise.all([
-      ManagedBot.countDocuments({ status: 'pending' }),
-      ManagedBot.countDocuments({ status: 'approved' }),
-      ManagedBot.countDocuments({ status: 'rejected' }),
-      ManagedBot.countDocuments({ status: 'disabled' }),
-      User.countDocuments(),
-      Content.countDocuments({ is_active: true }),
-      ContentPart.countDocuments({ is_active: true })
-    ]);
+  bot.hears('🔍 Bot qidirish', async (ctx) => {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
+    ctx.session.mode = 'search_bot';
+    ctx.session.draft = {};
+    return ctx.reply('🔍 Botni qidirish uchun bot username, egasi username, egasi ID yoki bot nomini yuboring.\n\nMasalan: @kinobot, kinobot, 6606638731\n\n❌ Bekor qilish: /cancel');
+  });
+
+  bot.hears('📣 Umumiy eʼlon', async (ctx) => {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
+    ctx.session.mode = 'global_broadcast';
+    ctx.session.draft = {};
+    return ctx.reply('📣 Umumiy eʼlon rejimi yoqildi. Endi matn, rasm, video, fayl yoki forward xabar yuboring.\n\nBu eʼlon barcha aktiv yaratilgan botlarning foydalanuvchilariga o‘sha bot nomidan yuboriladi.\n\n❌ Bekor qilish: /cancel');
+  });
+
+  bot.hears('✏️ Narx oʻzgartirish', async (ctx) => {
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
+    ctx.session.mode = 'set_price';
     return ctx.reply(
-      `📊 BOTFACTORY STATISTIKA\n\n` +
-        `⏳ Kutilayotgan: ${pending}\n` +
-        `✅ Aktiv/tasdiqlangan: ${approved}\n` +
-        `❌ Rad etilgan: ${rejected}\n` +
-        `⏸ Toʻxtatilgan: ${disabled}\n` +
-        `👥 Barcha userlar: ${totalUsers}\n` +
-        `📦 Barcha kontentlar: ${totalContents}\n` +
-        `🎞 Barcha qismlar: ${totalParts}\n` +
-        `🚀 Hozir ishga tushgan botlar: ${activeBots.size}`,
-      userKeyboard(ctx)
+      `✏️ Tarif narxini o‘zgartirish.\n\nFormat:\ntur | narx | valyuta\n\nMisol:\nkino | 50000 | UZS\ndorama | 70000 | UZS\n\nTur kalitlari: ${Object.keys(TYPE_PRESETS).join(', ')}\n\n❌ Bekor qilish: /cancel`
     );
   });
 
@@ -1450,7 +1955,7 @@ function createFactoryBot() {
     return ctx.reply(
       `🤖 Yangi bot tayyorlash boshlandi.\n\n` +
         `BotFather’dan olingan bot tokenni yuboring.\n\n` +
-        `⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token admin tasdiqlamaguncha ishga tushmaydi va DB’da shifrlanadi.\n\n` +
+        `⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token DB’da shifrlanadi.\n\n` +
         `❌ Bekor qilish: /cancel`
     );
   });
@@ -1460,13 +1965,26 @@ function createFactoryBot() {
     const typeKey = ctx.match[1];
     if (!ctx.session.draft?.token_enc) return ctx.reply('❌ Sessiya tugagan. Qaytadan “🤖 Bot tayyorlash” bosing.');
     const preset = getPreset(typeKey);
+    const plan = await getOrCreatePlan(typeKey);
     ctx.session.draft.type_key = typeKey;
+    ctx.session.draft.monthly_price = plan.monthly_price;
+    ctx.session.draft.currency = plan.currency;
     ctx.session.mode = 'wait_title';
     return ctx.editMessageText(
-      `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}\n\n` +
+      `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}\n` +
+        `💰 Oylik tarif: ${formatMoney(plan.monthly_price, plan.currency)} / oy\n\n` +
         `Endi bot uchun ko‘rinadigan nom kiriting. Masalan:\n${preset.title}\n\n` +
         `Telegramdagi nomdan foydalanish uchun “-” yuboring.\n❌ Bekor qilish: /cancel`
     );
+  });
+
+  bot.action(/^factory:bot:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
+    const rec = await ManagedBot.findOne({ _id: ctx.match[1] });
+    if (!rec) return ctx.reply('❌ Bot topilmadi.');
+    await markRecordExpiredIfNeeded(rec);
+    return ctx.editMessageText(await botDetailText(rec), botActionKeyboard(rec));
   });
 
   bot.action(/^factory:approve:([a-f0-9]{24})$/, async (ctx) => {
@@ -1475,27 +1993,55 @@ function createFactoryBot() {
 
     const req = await ManagedBot.findOne({ _id: ctx.match[1] });
     if (!req) return ctx.reply('❌ Soʻrov topilmadi.');
-    if (req.status !== 'pending') return ctx.reply(`ℹ️ Bu soʻrov holati: ${req.status}`);
+    if (!['pending', 'expired', 'disabled'].includes(req.status)) return ctx.reply(`ℹ️ Bu soʻrov holati: ${req.status}`);
 
-    req.status = 'approved';
-    req.is_enabled = true;
-    req.bot_key = req.bot_key || `m_${String(req._id)}`;
     req.approved_by = ctx.from.id;
-    req.approved_at = new Date();
-    await req.save();
+    req.approved_at = req.approved_at || new Date();
+    await extendManagedBot(req, ctx.from.id, 1);
 
     try {
       await startManagedRecord(req, 'factory_approve');
-      await ctx.editMessageText(`✅ @${req.telegram_username} tasdiqlandi va ishga tushirildi.`);
+      await ctx.editMessageText(`✅ @${req.telegram_username} 1 oyga tasdiqlandi va ishga tushirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(req.current_period_end)}`);
       await bot.telegram.sendMessage(
         req.owner_user_id,
-        `✅ Sizning @${req.telegram_username} botingiz tasdiqlandi va ishga tushdi!\n\n` +
-          `Endi botga /start bosing. Admin panel ichidan kontent qo‘shasiz, qismli/qismsiz tanlaysiz, kanal/guruh obuna sozlaysiz.`
+        `✅ Sizning @${req.telegram_username} botingiz 1 oyga tasdiqlandi va ishga tushdi!\n\n` +
+          `⏳ Keyingi to‘lov sanasi: ${formatDate(req.current_period_end)}\n\n` +
+          `Botga /start bosing. Qolgan boshqaruv bot ichidagi admin paneldan qilinadi.`
       );
     } catch (error) {
       console.error('Approve/start xatosi:', error);
       await ctx.reply(`⚠️ So‘rov tasdiqlandi, lekin botni ishga tushirishda xatolik: ${error.message}`);
     }
+  });
+
+  bot.action(/^factory:extend:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uzaytira oladi.');
+    const rec = await ManagedBot.findOne({ _id: ctx.match[1] });
+    if (!rec) return ctx.reply('❌ Bot topilmadi.');
+
+    await extendManagedBot(rec, ctx.from.id, 1);
+    try {
+      await startManagedRecord(rec, 'factory_extend');
+    } catch (error) {
+      console.error('Extend/start xatosi:', error.message);
+    }
+    await ctx.editMessageText(`✅ @${rec.telegram_username} 1 oyga uzaytirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}`);
+    try {
+      await bot.telegram.sendMessage(rec.owner_user_id, `✅ @${rec.telegram_username} botingiz uchun oylik ruxsat uzaytirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}`);
+    } catch (_) {}
+  });
+
+  bot.action(/^factory:disable:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin to‘xtata oladi.');
+    const rec = await ManagedBot.findOne({ _id: ctx.match[1] });
+    if (!rec) return ctx.reply('❌ Bot topilmadi.');
+    await disableManagedBot(rec, ctx.from.id, 'admin_disabled');
+    await ctx.editMessageText(`⏸ @${rec.telegram_username} admin tomonidan to‘xtatildi. DB maʼlumotlari saqlandi.`);
+    try {
+      await bot.telegram.sendMessage(rec.owner_user_id, `⏸ @${rec.telegram_username} botingiz admin tomonidan vaqtincha to‘xtatildi. Maʼlumotlar saqlangan. ${OWNER_USERNAME} bilan bog‘laning.`);
+    } catch (_) {}
   });
 
   bot.action(/^factory:reject:([a-f0-9]{24})$/, async (ctx) => {
@@ -1521,16 +2067,45 @@ function createFactoryBot() {
       return ctx.reply('❌ Jarayon bekor qilindi.', userKeyboard(ctx));
     }
 
+    if (ctx.session.mode === 'global_broadcast') return sendGlobalBroadcast(ctx);
+
+    if (ctx.session.mode === 'search_bot') {
+      if (!isOwner(ctx.from.id)) return;
+      const list = await searchManagedBots(text);
+      reset(ctx);
+      if (!list.length) return ctx.reply('❌ Bot topilmadi.', userKeyboard(ctx));
+      for (const rec of list) await ctx.reply(await botDetailText(rec), botActionKeyboard(rec));
+      return ctx.reply('✅ Qidiruv yakunlandi.', userKeyboard(ctx));
+    }
+
+    if (ctx.session.mode === 'set_price') {
+      if (!isOwner(ctx.from.id)) return;
+      const [typeKeyRaw, priceRaw, currencyRaw] = text.split('|').map((x) => String(x || '').trim());
+      const typeKey = normalizeCode(typeKeyRaw);
+      const price = Number(String(priceRaw || '').replace(/\s/g, ''));
+      const currency = currencyRaw || 'UZS';
+      if (!TYPE_PRESETS[typeKey]) return ctx.reply(`❌ Tur topilmadi. Kalitlar: ${Object.keys(TYPE_PRESETS).join(', ')}`);
+      if (!Number.isFinite(price) || price < 0) return ctx.reply('❌ Narx noto‘g‘ri. Masalan: kino | 50000 | UZS');
+      const preset = getPreset(typeKey);
+      await BotPlan.updateOne(
+        { type_key: typeKey },
+        { $set: { title: preset.title || preset.itemTitle || typeKey, monthly_price: price, currency, is_active: true, updated_by: ctx.from.id } },
+        { upsert: true }
+      );
+      reset(ctx);
+      return ctx.reply(`✅ ${preset.title || typeKey} narxi yangilandi: ${formatMoney(price, currency)} / oy`, userKeyboard(ctx));
+    }
+
     if (ctx.session.mode === 'wait_token') {
       if (!hasUsableToken(text)) return ctx.reply('❌ Token noto‘g‘ri ko‘rinadi. BotFather bergan tokenni to‘liq yuboring.');
 
       try {
         const tmp = new Telegraf(text);
         const me = await tmp.telegram.getMe();
-        const exists = await ManagedBot.findOne({ telegram_bot_id: me.id, status: { $in: ['pending', 'approved', 'disabled'] } });
+        const exists = await ManagedBot.findOne({ telegram_bot_id: me.id, status: { $in: ['pending', 'approved', 'disabled', 'expired'] } });
         if (exists) {
           reset(ctx);
-          return ctx.reply(`ℹ️ @${me.username} bo‘yicha so‘rov/bot allaqachon mavjud. Holati: ${exists.status}`, userKeyboard(ctx));
+          return ctx.reply(`ℹ️ @${me.username} bo‘yicha so‘rov/bot allaqachon mavjud. Holati: ${botStatusLabel(exists)}`, userKeyboard(ctx));
         }
 
         ctx.session.draft = {
@@ -1541,10 +2116,7 @@ function createFactoryBot() {
           telegram_first_name: me.first_name
         };
         ctx.session.mode = 'wait_type';
-        return ctx.reply(
-          `✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`,
-          Markup.inlineKeyboard(typeRows())
-        );
+        return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard(typeRows()));
       } catch (error) {
         console.error('Factory token tekshirish xatosi:', error.message);
         return ctx.reply('❌ Tokenni tekshirib bo‘lmadi. Token xato, bot o‘chirilgan yoki internet/API javob bermayapti. Qayta yuboring:');
@@ -1574,6 +2146,7 @@ function createFactoryBot() {
       const draft = ctx.session.draft || {};
       if (!draft.telegram_bot_id || !draft.type_key || !draft.title) return ctx.reply('❌ Sessiya tugagan. Qaytadan boshlang.');
       const adminIds = Array.from(new Set([ctx.from.id, ...ids]));
+      const plan = await getOrCreatePlan(draft.type_key);
 
       const rec = await ManagedBot.create({
         owner_user_id: ctx.from.id,
@@ -1589,6 +2162,9 @@ function createFactoryBot() {
         token_iv: draft.token_iv,
         token_tag: draft.token_tag,
         token_mask: draft.token_mask,
+        monthly_price: Number(plan.monthly_price || 0),
+        currency: plan.currency || 'UZS',
+        payment_status: 'not_paid',
         status: 'pending',
         is_enabled: false
       });
@@ -1601,8 +2177,9 @@ function createFactoryBot() {
         `✅ Soʻrov qabul qilindi!\n\n` +
           `🤖 Bot: @${rec.telegram_username}\n` +
           `📦 Turi: ${preset.itemTitle || rec.type_key}\n` +
+          `💰 Oylik tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
           `👨‍💻 Admin IDlar: ${adminIds.join(', ')}\n\n` +
-          `Endi narx va shartlarni ${OWNER_USERNAME} bilan kelishing. Admin ruxsat bergach bot avtomatik ishga tushadi.`,
+          `Yaratish bepul. Bot ishlashi uchun oylik to‘lov/ruxsat ${OWNER_USERNAME} orqali kelishiladi. Admin ruxsat bergach bot avtomatik ishga tushadi.`,
         userKeyboard(ctx)
       );
 
@@ -1610,16 +2187,18 @@ function createFactoryBot() {
         `🛂 Yangi bot tayyorlash soʻrovi!\n\n` +
           `🤖 Bot: ${rec.title} (@${rec.telegram_username})\n` +
           `📦 Turi: ${preset.itemTitle || rec.type_key}\n` +
+          `💰 Tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
           `👤 Mijoz: ${rec.owner_first_name || ''} ${rec.owner_username ? '@' + rec.owner_username : ''}\n` +
           `🆔 Mijoz ID: ${rec.owner_user_id}\n` +
           `👨‍💻 Admin IDlar: ${adminIds.join(', ')}\n\n` +
-          `Narxni kelishib, ruxsat bering yoki rad eting.`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Ruxsat berish / ishga tushirish', `factory:approve:${String(rec._id)}`)],
-          [Markup.button.callback('❌ Rad etish', `factory:reject:${String(rec._id)}`)]
-        ])
+          `To‘lovni kelishib, 1 oyga ruxsat bering yoki rad eting.`,
+        botActionKeyboard(rec)
       );
     }
+  });
+
+  bot.on('message', async (ctx) => {
+    if (ctx.session.mode === 'global_broadcast') return sendGlobalBroadcast(ctx);
   });
 
   bot.catch((err, ctx) => {
@@ -1633,8 +2212,10 @@ function createFactoryBot() {
 // START: KO'P BOT + FACTORY BITTA SERVERDA
 // =========================
 async function start() {
-  await mongoose.connect(MONGODB_URL);
+  await mongoose.connect(MONGODB_URL, { serverSelectionTimeoutMS: 15000 });
   console.log('✅ MongoDB ulandi');
+  await seedDefaultPlans();
+  await expireDueManagedBots();
 
   if (URL) {
     expressApp = express();
@@ -1677,7 +2258,7 @@ async function start() {
     if (active) await activateBot(active, 'static_env');
   }
 
-  const approvedManaged = await ManagedBot.find({ status: 'approved', is_enabled: true });
+  const approvedManaged = await ManagedBot.find({ status: 'approved', is_enabled: true, $or: [{ current_period_end: { $gt: new Date() } }, { current_period_end: null }] });
   for (const record of approvedManaged) {
     try {
       await startManagedRecord(record, 'approved_db');
@@ -1685,6 +2266,10 @@ async function start() {
       console.error(`❌ Managed bot ishga tushmadi @${record.telegram_username}:`, error.message);
     }
   }
+
+  setInterval(() => {
+    expireDueManagedBots().catch((error) => console.error('Billing tekshirish xatosi:', error.message));
+  }, 5 * 60 * 1000);
 
   if (activeBots.size === 0) {
     throw new Error('Ishga tushadigan bot topilmadi. FACTORYBOT_TOKEN yoki boshqa bot tokenlaridan kamida bittasini .env ga yozing.');

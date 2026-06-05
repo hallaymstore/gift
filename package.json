@@ -1,8 +1,8 @@
 {
-  "name": "render-multi-bots-botfactory-social",
+  "name": "render-multi-telegram-mini-apps",
   "version": "1.0.0",
   "private": true,
-  "description": "GiftGo, KurslarGo, Akkount Savdo va BotFactory bot yaratuvchi platformasini bitta Render serverda ishlatish",
+  "description": "GiftGo, EduCourse va Garant Market botlarini bitta Render serverida ishga tushirish uchun multi-bot runner.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -14,12 +14,15 @@
   "dependencies": {
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
+    "crypto": "^1.0.1",
     "dotenv": "^16.6.1",
     "express": "^4.22.2",
     "express-rate-limit": "^7.5.1",
     "helmet": "^8.2.0",
+    "https": "^1.0.0",
     "mongoose": "^8.24.0",
     "multer": "^1.4.5-lts.1",
+    "path": "^0.12.7",
     "telegraf": "^4.16.3"
   }
 }
