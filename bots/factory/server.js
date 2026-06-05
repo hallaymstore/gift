@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
-const { Telegraf, Markup, session } = require('telegraf');
+const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -936,33 +936,22 @@ function createSharedUtils(bot, config, adminIds) {
 
   async function checkAllSubscriptions(userId) {
     if (isAdmin(userId)) return true;
-    if (!(mongoReady && mongoose.connection.readyState === 1)) return true;
 
-    const [localSubs, globalSubs] = await Promise.all([
-      Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 }),
-      Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 })
-    ]);
+    const globalResult = await checkGlobalSubscriptionsForUser(userId, bot.telegram);
+    if (!globalResult.ok) return false;
 
-    const allSubs = [
-      ...globalSubs.map((sub) => ({ sub, scope: 'global' })),
-      ...localSubs.map((sub) => ({ sub, scope: 'local' }))
-    ];
+    const ready = await waitForMongoConnection(3500);
+    if (!ready) return false;
 
-    if (allSubs.length === 0) return true;
+    const localSubs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 });
+    if (localSubs.length === 0) return true;
 
-    // Global obunalar barcha yaratilgan botlarda FactoryBot orqali tekshiriladi.
-    // Shuning uchun mijoz botlarni kanal/guruhlarga admin qilish shart emas.
-    const factoryActive = activeBots.get('factory');
-    const factoryTelegram = factoryActive?.bot?.telegram || bot.telegram;
-
-    for (const item of allSubs) {
-      const { sub, scope } = item;
+    for (const sub of localSubs) {
       try {
-        const telegram = scope === 'global' ? factoryTelegram : bot.telegram;
-        const member = await telegram.getChatMember(sub.chat_username, userId);
+        const member = await bot.telegram.getChatMember(sub.chat_username, userId);
         if (['left', 'kicked'].includes(member.status)) return false;
       } catch (error) {
-        console.error(`❌ ${config.title} ${scope === 'global' ? 'global' : 'local'} obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
+        console.error(`❌ ${config.title} local obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
         return false;
       }
     }
@@ -970,6 +959,9 @@ function createSharedUtils(bot, config, adminIds) {
   }
 
   async function getSubscriptionKeyboard() {
+    const ready = await waitForMongoConnection(3500);
+    if (!ready) return Markup.inlineKeyboard([[Markup.button.callback('✅ Obunani tekshirish', 'check_subscription')]]);
+
     const [globalSubs, localSubs] = await Promise.all([
       Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 }),
       Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 })
@@ -1731,12 +1723,121 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   return { key: config.key, title: config.title, bot, config };
 }
 
+
+// =========================
+// GLOBAL SUBSCRIPTION GATE FOR CREATED BOTS
+// =========================
+let factoryMembershipTelegram = null;
+
+async function waitForMongoConnection(timeoutMs = 3500) {
+  if (mongoReady && mongoose.connection.readyState === 1) return true;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    await sleep(120);
+    if (mongoReady && mongoose.connection.readyState === 1) return true;
+  }
+  return mongoReady && mongoose.connection.readyState === 1;
+}
+
+function getFactoryMembershipTelegram(fallbackTelegram = null) {
+  try {
+    const factoryActive = activeBots.get('factory');
+    if (factoryActive?.bot?.telegram) return factoryActive.bot.telegram;
+  } catch (_) {}
+
+  if (hasUsableToken(FACTORYBOT_TOKEN)) {
+    if (!factoryMembershipTelegram) factoryMembershipTelegram = new Telegram(FACTORYBOT_TOKEN);
+    return factoryMembershipTelegram;
+  }
+
+  return fallbackTelegram;
+}
+
+async function getGlobalSubscriptionsForGate() {
+  const ready = await waitForMongoConnection(3500);
+  if (!ready) return { ready: false, subs: [] };
+  const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
+  return { ready: true, subs };
+}
+
+async function checkGlobalSubscriptionsForUser(userId, fallbackTelegram = null) {
+  const { ready, subs } = await getGlobalSubscriptionsForGate();
+  if (!ready) return { ok: false, reason: 'db_not_ready', subs: [] };
+  if (!subs.length) return { ok: true, reason: 'no_global_subscriptions', subs: [] };
+
+  const telegram = getFactoryMembershipTelegram(fallbackTelegram);
+  if (!telegram) return { ok: false, reason: 'factory_token_missing', subs };
+
+  for (const sub of subs) {
+    try {
+      const member = await telegram.getChatMember(sub.chat_username, userId);
+      if (['left', 'kicked'].includes(member.status)) return { ok: false, reason: 'not_joined', subs };
+    } catch (error) {
+      console.error(`❌ Global obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
+      return { ok: false, reason: 'check_failed', subs };
+    }
+  }
+  return { ok: true, reason: 'joined', subs };
+}
+
+function globalSubscriptionKeyboardFromSubs(subs, checkAction = 'check_subscription') {
+  const rows = [];
+  for (const sub of subs || []) {
+    const url = subJoinUrl(sub.chat_username);
+    if (url) rows.push([Markup.button.url(`🌐 ${subLabel(sub)}`, url)]);
+    else rows.push([Markup.button.callback(`🌐 ${subLabel(sub)}`, 'noop')]);
+  }
+  rows.push([Markup.button.callback('✅ Obunani tekshirish', checkAction)]);
+  return Markup.inlineKeyboard(rows);
+}
+
+async function sendCreatedBotGlobalSubscriptionWarning(ctx, result = null) {
+  const info = result || await getGlobalSubscriptionsForGate();
+  const subs = info.subs || [];
+  const keyboard = globalSubscriptionKeyboardFromSubs(subs, 'check_subscription');
+  const extra = info.reason === 'db_not_ready'
+    ? '\n\n⏳ Obuna ro‘yxati bazadan yuklanmoqda. Bir necha soniyadan keyin “✅ Obunani tekshirish” tugmasini bosing.'
+    : '';
+  return ctx.reply(
+    '🔒 Botdan foydalanish uchun avval majburiy kanal/guruhlarga obuna bo‘ling.\n\n' +
+      '🌐 Bu global majburiy obuna barcha BotFactory orqali yaratilgan botlarda ishlaydi.\n' +
+      'Obuna bo‘lgach, “✅ Obunani tekshirish” tugmasini bosing.' + extra,
+    keyboard
+  );
+}
+
+function isSubscriptionCheckUpdate(ctx) {
+  const data = ctx.callbackQuery?.data || '';
+  return data === 'check_subscription' || data === 'factory_check_global_subscription' || data === 'noop';
+}
+
+function attachGlobalSubscriptionGate(bot, config, adminIds = []) {
+  if (!config.managed) return;
+  bot.use(async (ctx, next) => {
+    if (!ctx.from) return next();
+    if (isSubscriptionCheckUpdate(ctx)) return next();
+
+    const userId = Number(ctx.from.id);
+    const bypassIds = new Set([...(adminIds || []).map(Number), ...GLOBAL_ADMIN_IDS.map(Number)]);
+    if (bypassIds.has(userId)) return next();
+
+    const result = await checkGlobalSubscriptionsForUser(userId, bot.telegram);
+    if (result.ok) return next();
+    return sendCreatedBotGlobalSubscriptionWarning(ctx, result);
+  });
+}
+
 // =========================
 // MANAGED BOT ACCESS MIDDLEWARE
 // =========================
 function attachManagedAccess(bot, config) {
   if (!config.managed) return;
   bot.use(async (ctx, next) => {
+    const ready = await waitForMongoConnection(3500);
+    if (!ready) {
+      return ctx.reply('⏳ Bot maʼlumotlari bazadan yuklanmoqda. Iltimos, bir necha soniyadan keyin qayta urinib ko‘ring.');
+    }
+
     const rec = await ManagedBot.findOne({ bot_key: config.key });
     if (!rec) return;
     const expiredNow = await markRecordExpiredIfNeeded(rec);
@@ -1760,6 +1861,7 @@ function createBaseBot(token, config, adminIds, sessionDefault = {}) {
   const bot = new Telegraf(token);
   bot.use(session({ defaultSession: () => ({ mode: null, draft: {}, ...sessionDefault }) }));
   attachManagedAccess(bot, config);
+  attachGlobalSubscriptionGate(bot, config, adminIds);
   return bot;
 }
 
