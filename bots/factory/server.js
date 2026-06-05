@@ -317,6 +317,27 @@ async function safeDbWrite(label, task) {
   }
 }
 
+async function syncApprovedManagedBots(source = 'approved_db_sync') {
+  if (!(mongoReady && mongoose.connection.readyState === 1)) return 0;
+  const now = new Date();
+  const approvedManaged = await ManagedBot.find({
+    status: 'approved',
+    is_enabled: true,
+    $or: [{ current_period_end: { $gt: now } }, { current_period_end: null }]
+  }).sort({ updatedAt: -1 });
+
+  let okCount = 0;
+  for (const record of approvedManaged) {
+    try {
+      await startManagedRecord(record, source);
+      okCount += 1;
+    } catch (error) {
+      console.error(`❌ Managed bot ishga tushmadi @${record.telegram_username}:`, error.message);
+    }
+  }
+  return okCount;
+}
+
 async function afterMongoReadyStartup() {
   if (!(mongoReady && mongoose.connection.readyState === 1)) return;
   try {
@@ -324,14 +345,8 @@ async function afterMongoReadyStartup() {
     await expireDueManagedBots();
     if (!managedBotsLoadedAfterMongo) {
       managedBotsLoadedAfterMongo = true;
-      const approvedManaged = await ManagedBot.find({ status: 'approved', is_enabled: true, $or: [{ current_period_end: { $gt: new Date() } }, { current_period_end: null }] });
-      for (const record of approvedManaged) {
-        try {
-          await startManagedRecord(record, 'approved_db');
-        } catch (error) {
-          console.error(`❌ Managed bot ishga tushmadi @${record.telegram_username}:`, error.message);
-        }
-      }
+      const count = await syncApprovedManagedBots('approved_db_startup');
+      console.log(`✅ MongoDB’dan ${count} ta tasdiqlangan mijoz boti ishga tushirildi/resync qilindi.`);
     }
   } catch (error) {
     console.error('⚠️ BotFactory MongoDB startup vazifalari xatosi:', error.message);
@@ -2183,32 +2198,89 @@ function buildManagedConfig(record) {
   };
 }
 
-async function activateBot(active, source = 'manual') {
-  if (!active || !active.key || !active.bot) return false;
-  if (activeBots.has(active.key)) return true;
+function managedWebhookPath(botKey) {
+  return `/webhook/${encodeURIComponent(String(botKey || ''))}`;
+}
 
-  activeBots.set(active.key, active);
+async function ensureActiveManagedBot(botKey, source = 'lazy_webhook') {
+  const key = String(botKey || '').trim();
+  if (!key) return null;
+  if (activeBots.has(key)) return activeBots.get(key);
+  if (!(mongoReady && mongoose.connection.readyState === 1)) return null;
+
+  const record = await ManagedBot.findOne({ bot_key: key, status: 'approved', is_enabled: true });
+  if (!record) return null;
+  try {
+    await startManagedRecord(record, source);
+  } catch (error) {
+    console.error(`❌ Lazy managed bot start xatosi ${key}:`, error.message);
+  }
+  return activeBots.get(key) || null;
+}
+
+async function syncActiveBotWebhook(active, source = 'manual') {
+  if (!active || !active.key || !active.bot) return false;
 
   if (URL) {
-    if (!expressApp) throw new Error('Express app hali tayyor emas');
-    const webhookPath = `/webhook/${active.key}/${active.bot.secretPathComponent()}`;
+    const webhookPath = managedWebhookPath(active.key);
     const fullUrl = `${URL}${webhookPath}`;
-    const callback = active.bot.webhookCallback(webhookPath);
-
-    expressApp.post(webhookPath, (req, res) => {
-      if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).send('Forbidden');
-      return callback(req, res);
+    await active.bot.telegram.setWebhook(fullUrl, {
+      secret_token: WEBHOOK_SECRET,
+      drop_pending_updates: false,
+      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
     });
-
-    await active.bot.telegram.setWebhook(fullUrl, { secret_token: WEBHOOK_SECRET, drop_pending_updates: true });
     console.log(`🌐 ${active.title} webhook o'rnatildi (${source}): ${fullUrl}`);
   } else {
-    await active.bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await active.bot.telegram.deleteWebhook({ drop_pending_updates: false });
     await active.bot.launch();
     console.log(`🤖 ${active.title} polling rejimida ishga tushdi (${source})`);
   }
 
   return true;
+}
+
+async function activateBot(active, source = 'manual') {
+  if (!active || !active.key || !active.bot) return false;
+
+  const already = activeBots.get(active.key);
+  if (already) {
+    // Render qayta deploy yoki Telegram webhook boshqa joyga ketib qolgan bo‘lsa,
+    // har safar tasdiqlash/uzaytirishda webhookni qayta sinxron qilamiz.
+    await syncActiveBotWebhook(already, `${source}_resync`);
+    return true;
+  }
+
+  try {
+    await syncActiveBotWebhook(active, source);
+    activeBots.set(active.key, active);
+    return true;
+  } catch (error) {
+    activeBots.delete(active.key);
+    try { active.bot.stop?.('activation_failed'); } catch (_) {}
+    throw error;
+  }
+}
+
+async function handleRuntimeWebhook(req, res) {
+  if (req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) return res.status(403).send('Forbidden');
+
+  const botKey = String(req.params.botKey || '').trim();
+  let active = activeBots.get(botKey);
+  if (!active) active = await ensureActiveManagedBot(botKey, 'incoming_webhook');
+  if (!active || !active.bot) {
+    // Telegram qayta-qayta xato deb yubormasligi uchun 200 qaytaramiz,
+    // lekin logda sabab ko‘rinadi.
+    console.error(`⚠️ Webhook keldi, lekin aktiv bot topilmadi: ${botKey}. MongoDB: ${mongoReady ? 'connected' : 'connecting'}`);
+    return res.status(200).json({ ok: true, ignored: true, reason: 'bot_not_active' });
+  }
+
+  try {
+    await active.bot.handleUpdate(req.body, res);
+    if (!res.headersSent) res.sendStatus(200);
+  } catch (error) {
+    console.error(`❌ ${active.title || botKey} webhook update xatosi:`, error);
+    if (!res.headersSent) res.sendStatus(200);
+  }
 }
 
 
@@ -3425,6 +3497,11 @@ async function start() {
     expressApp = express();
     expressApp.use(express.json({ limit: '20mb' }));
 
+    // Barcha yaratilgan botlar uchun yagona barqaror webhook router.
+    // Oldingi versiyalardagi /webhook/:botKey/:secret yo‘li ham qo‘llab-quvvatlanadi.
+    expressApp.post('/webhook/:botKey', handleRuntimeWebhook);
+    expressApp.post('/webhook/:botKey/:legacySecret', handleRuntimeWebhook);
+
     expressApp.get('/', (_req, res) => {
       res.send(`✅ BotFactory server ishlamoqda. MongoDB: ${mongoReady ? 'ulangan' : 'ulanmoqda'}. Aktiv botlar: ${Array.from(activeBots.values()).map((b) => b.title).join(', ') || 'hali yo‘q'}`);
     });
@@ -3471,8 +3548,9 @@ async function start() {
   setInterval(() => {
     if (mongoReady && mongoose.connection.readyState === 1) {
       expireDueManagedBots().catch((error) => console.error('Billing tekshirish xatosi:', error.message));
+      syncApprovedManagedBots('periodic_webhook_resync').catch((error) => console.error('Managed bot webhook sync xatosi:', error.message));
     }
-  }, 5 * 60 * 1000);
+  }, 2 * 60 * 1000);
 
   if (activeBots.size === 0) {
     console.error('❌ Ishga tushadigan bot topilmadi. FACTORYBOT_TOKEN yoki boshqa bot tokenlaridan kamida bittasini Render env ichiga yozing.');
