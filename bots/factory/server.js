@@ -19,6 +19,13 @@ const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_webhook_secret';
 const BOT_TOKEN_SECRET = process.env.BOT_TOKEN_SECRET || WEBHOOK_SECRET;
 const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || process.env.BOT_FACTORY_TOKEN || process.env.BOTFACTORY_MAIN_TOKEN || process.env.FACTORY_MAIN_BOT_TOKEN || process.env.BOT_TOKEN_FACTORY || '').trim();
 const OWNER_USERNAME = String(process.env.OWNER_USERNAME || '@Qoryogdiyev').trim();
+const TRIAL_DAYS = Math.max(1, Number(process.env.FACTORY_TRIAL_DAYS || process.env.TRIAL_DAYS || 3));
+const BUILDER_BOT_USERNAME = String(process.env.BUILDER_BOT_USERNAME || process.env.FACTORY_BUILDER_USERNAME || '@quruvchiuzbot').replace(/^@?/, '@');
+const STANDARD_WATERMARK_TEXT = String(
+  process.env.STANDARD_WATERMARK_TEXT ||
+    `🤖 ${BUILDER_BOT_USERNAME} orqali tayyorlandi. Siz ham o‘z botingizni qurmoqchi bo‘lsangiz ${BUILDER_BOT_USERNAME} siz uchun.`
+).trim();
+const PLUS_PRICE_MULTIPLIER = Math.max(1, Number(process.env.FACTORY_PLUS_PRICE_MULTIPLIER || 2));
 
 function parseIds(value) {
   return String(value || '')
@@ -179,9 +186,12 @@ const managedBotSchema = new mongoose.Schema(
 
     // Oylik tarif / abonent tizimi
     plan_key: { type: String, default: 'monthly', index: true },
+    tariff_key: { type: String, enum: ['standard', 'plus'], default: 'standard', index: true },
+    trial_started_at: Date,
+    trial_ends_at: Date,
     monthly_price: { type: Number, default: 0 },
     currency: { type: String, default: 'UZS' },
-    payment_status: { type: String, enum: ['not_paid', 'paid', 'overdue'], default: 'not_paid', index: true },
+    payment_status: { type: String, enum: ['trial', 'not_paid', 'paid', 'overdue'], default: 'trial', index: true },
     billing_started_at: Date,
     current_period_start: Date,
     current_period_end: Date,
@@ -935,10 +945,12 @@ function createSharedUtils(bot, config, adminIds) {
   }
 
   async function checkAllSubscriptions(userId) {
-    if (isAdmin(userId)) return true;
-
     const globalResult = await checkGlobalSubscriptionsForUser(userId, bot.telegram);
     if (!globalResult.ok) return false;
+
+    // Global obuna hamma yaratilgan botlarda majburiy ishlaydi.
+    // Botning o‘z adminlari faqat o‘sha botning lokal obunalaridan ozod qilinadi.
+    if (isAdmin(userId)) return true;
 
     const ready = await waitForMongoConnection(3500);
     if (!ready) return false;
@@ -1054,6 +1066,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
   const bot = new Telegraf(token);
+  applyManagedPlanFeatures(bot, config, adminIds);
   const PAGE_SIZE = 3;
 
   bot.use(
@@ -1061,6 +1074,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null })
     })
   );
+  attachGlobalSubscriptionGate(bot, config, adminIds);
 
   const utils = createSharedUtils(bot, config, adminIds);
   const { isAdmin, saveUser, checkAllSubscriptions, sendSubscriptionWarning, broadcastMessage, handleSubscriptionCallback } = utils;
@@ -1818,7 +1832,9 @@ function attachGlobalSubscriptionGate(bot, config, adminIds = []) {
     if (isSubscriptionCheckUpdate(ctx)) return next();
 
     const userId = Number(ctx.from.id);
-    const bypassIds = new Set([...(adminIds || []).map(Number), ...GLOBAL_ADMIN_IDS.map(Number)]);
+    // Global majburiy obuna yaratilgan bot egasi/adminlariga ham ko‘rsatiladi.
+    // Faqat asosiy Factory adminlari bypass qilinadi.
+    const bypassIds = new Set(GLOBAL_ADMIN_IDS.map(Number));
     if (bypassIds.has(userId)) return next();
 
     const result = await checkGlobalSubscriptionsForUser(userId, bot.telegram);
@@ -1859,6 +1875,7 @@ function attachManagedAccess(bot, config) {
 
 function createBaseBot(token, config, adminIds, sessionDefault = {}) {
   const bot = new Telegraf(token);
+  applyManagedPlanFeatures(bot, config, adminIds);
   bot.use(session({ defaultSession: () => ({ mode: null, draft: {}, ...sessionDefault }) }));
   attachManagedAccess(bot, config);
   attachGlobalSubscriptionGate(bot, config, adminIds);
@@ -2296,7 +2313,8 @@ function buildManagedConfig(record) {
     title: record.title || preset.title,
     managed: true,
     ownerUserId: record.owner_user_id,
-    telegramUsername: record.telegram_username
+    telegramUsername: record.telegram_username,
+    tariffKey: record.tariff_key || 'standard'
   };
 }
 
@@ -2401,6 +2419,119 @@ function formatMoney(amount, currency = 'UZS') {
   return `${n.toLocaleString('uz-UZ')} ${currency}`;
 }
 
+function addDaysSafe(date, days = 3) {
+  const d = new Date(date || Date.now());
+  d.setDate(d.getDate() + Number(days || 0));
+  return d;
+}
+
+function normalizeTariffKey(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return raw === 'plus' ? 'plus' : 'standard';
+}
+
+function tariffTitle(key) {
+  return normalizeTariffKey(key) === 'plus' ? 'Plus — toza bot' : 'Standard — marketingli';
+}
+
+function tariffDescription(key) {
+  return normalizeTariffKey(key) === 'plus'
+    ? '✅ Plus: bot xabarlari toza bo‘ladi, reklama/watermark qo‘shilmaydi.'
+    : `✅ Standard: har bir foydalanuvchi xabari ostida ${BUILDER_BOT_USERNAME} reklama matni chiqadi.`;
+}
+
+function tariffPrice(basePrice, tariffKey) {
+  const base = Number(basePrice || 0);
+  if (normalizeTariffKey(tariffKey) === 'plus') {
+    const fixed = Number(process.env.FACTORY_PLUS_MONTHLY_PRICE || process.env.PLUS_MONTHLY_PRICE || 0);
+    return fixed > 0 ? fixed : Math.round(base * PLUS_PRICE_MULTIPLIER);
+  }
+  return base;
+}
+
+function tariffRows(basePrice = 0, currency = 'UZS') {
+  return [
+    [Markup.button.callback(`Standard • ${formatMoney(tariffPrice(basePrice, 'standard'), currency)} / oy`, 'factory:tariff:standard')],
+    [Markup.button.callback(`Plus • ${formatMoney(tariffPrice(basePrice, 'plus'), currency)} / oy`, 'factory:tariff:plus')]
+  ];
+}
+
+function shouldWatermarkRecord(recordOrConfig) {
+  if (!recordOrConfig) return false;
+  return normalizeTariffKey(recordOrConfig.tariff_key || recordOrConfig.tariffKey || 'standard') === 'standard';
+}
+
+function appendWatermarkText(text, maxLen = 4096) {
+  const base = String(text || '').trim();
+  const footer = `
+
+${STANDARD_WATERMARK_TEXT}`;
+  if (!STANDARD_WATERMARK_TEXT || base.includes(STANDARD_WATERMARK_TEXT)) return text;
+  const allowedBase = Math.max(0, maxLen - footer.length);
+  const safeBase = base.length > allowedBase ? `${base.slice(0, Math.max(0, allowedBase - 1))}…` : base;
+  return `${safeBase}${footer}`.trim();
+}
+
+async function getManagedTariffKey(botKey, fallback = 'standard') {
+  const key = String(botKey || '').trim();
+  if (!key) return normalizeTariffKey(fallback);
+  try {
+    if (mongoReady && mongoose.connection.readyState === 1) {
+      const rec = await ManagedBot.findOne({ bot_key: key }).select('tariff_key');
+      if (rec?.tariff_key) return normalizeTariffKey(rec.tariff_key);
+    }
+  } catch (_) {}
+  return normalizeTariffKey(fallback);
+}
+
+function applyManagedPlanFeatures(bot, config, adminIds = []) {
+  if (!bot || !config?.managed || bot.__managedPlanFeaturesApplied) return;
+  bot.__managedPlanFeaturesApplied = true;
+  const original = {
+    sendMessage: bot.telegram.sendMessage.bind(bot.telegram),
+    sendPhoto: bot.telegram.sendPhoto.bind(bot.telegram),
+    sendVideo: bot.telegram.sendVideo.bind(bot.telegram),
+    sendAnimation: bot.telegram.sendAnimation.bind(bot.telegram),
+    sendDocument: bot.telegram.sendDocument.bind(bot.telegram),
+    sendAudio: bot.telegram.sendAudio.bind(bot.telegram),
+    sendVoice: bot.telegram.sendVoice.bind(bot.telegram),
+    copyMessage: bot.telegram.copyMessage.bind(bot.telegram)
+  };
+  const excluded = new Set([...(GLOBAL_ADMIN_IDS || []), ...(adminIds || [])].map(Number).filter(Boolean));
+  const isPrivateUserChat = (chatId) => /^\d+$/.test(String(chatId || ''));
+  const shouldMark = async (chatId) => {
+    if (!isPrivateUserChat(chatId)) return false;
+    if (excluded.has(Number(chatId))) return false;
+    const tariff = await getManagedTariffKey(config.key, config.tariffKey || 'standard');
+    return tariff === 'standard';
+  };
+  const withCaption = async (chatId, extra = {}) => {
+    const nextExtra = { ...(extra || {}) };
+    if (await shouldMark(chatId)) {
+      nextExtra.caption = appendWatermarkText(nextExtra.caption || '', 1024);
+    }
+    return nextExtra;
+  };
+
+  bot.telegram.sendMessage = async (chatId, text, extra = {}) => {
+    const finalText = (await shouldMark(chatId)) ? appendWatermarkText(text, 4096) : text;
+    return original.sendMessage(chatId, finalText, extra);
+  };
+  bot.telegram.sendPhoto = async (chatId, photo, extra = {}) => original.sendPhoto(chatId, photo, await withCaption(chatId, extra));
+  bot.telegram.sendVideo = async (chatId, video, extra = {}) => original.sendVideo(chatId, video, await withCaption(chatId, extra));
+  bot.telegram.sendAnimation = async (chatId, animation, extra = {}) => original.sendAnimation(chatId, animation, await withCaption(chatId, extra));
+  bot.telegram.sendDocument = async (chatId, doc, extra = {}) => original.sendDocument(chatId, doc, await withCaption(chatId, extra));
+  bot.telegram.sendAudio = async (chatId, audio, extra = {}) => original.sendAudio(chatId, audio, await withCaption(chatId, extra));
+  bot.telegram.sendVoice = async (chatId, voice, extra = {}) => original.sendVoice(chatId, voice, await withCaption(chatId, extra));
+  bot.telegram.copyMessage = async (chatId, fromChatId, messageId, extra = {}) => {
+    const sent = await original.copyMessage(chatId, fromChatId, messageId, extra);
+    if (await shouldMark(chatId)) {
+      try { await original.sendMessage(chatId, STANDARD_WATERMARK_TEXT); } catch (_) {}
+    }
+    return sent;
+  };
+}
+
 function addMonthsSafe(date, months = 1) {
   const d = new Date(date || Date.now());
   const day = d.getDate();
@@ -2498,7 +2629,8 @@ async function expireDueManagedBots() {
             `⏳ Bot muddati tugadi: @${rec.telegram_username}\n` +
               `👤 Egasi: ${rec.owner_first_name || ''} ${rec.owner_username ? '@' + rec.owner_username : ''}\n` +
               `🆔 Egasi ID: ${rec.owner_user_id}\n` +
-              `💰 Tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
+              `🏷 Tarif: ${tariffTitle(rec.tariff_key)}\n` +
+          `💰 Oylik narx: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
               `📅 Tugagan sana: ${formatDate(rec.current_period_end)}`,
             Markup.inlineKeyboard([[Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${String(rec._id)}`)]])
           );
@@ -2519,7 +2651,7 @@ async function extendManagedBot(record, adminId, months = 1) {
   record.payment_status = 'paid';
   record.disabled_reason = null;
   record.expired_at = null;
-  record.monthly_price = Number(plan.monthly_price || record.monthly_price || 0);
+  record.monthly_price = Number(tariffPrice(plan.monthly_price || record.monthly_price || 0, record.tariff_key || 'standard'));
   record.currency = plan.currency || record.currency || 'UZS';
   record.billing_started_at = record.billing_started_at || now;
   record.current_period_start = base;
@@ -2587,6 +2719,9 @@ async function getBotStats(botKey) {
 }
 
 function botStatusLabel(record) {
+  if (record?.status === 'approved' && record?.is_enabled && record?.payment_status === 'trial') {
+    return `🎁 ${TRIAL_DAYS} kunlik sinov aktiv (${formatDate(record.current_period_end)})`;
+  }
   const map = {
     pending: '⏳ kutilmoqda',
     approved: record?.is_enabled ? '✅ aktiv' : '⏸ to‘xtatilgan',
@@ -2609,10 +2744,19 @@ async function botDetailText(record) {
     `👤 Egasi: ${record.owner_first_name || ''} ${record.owner_username ? '@' + record.owner_username : ''}\n` +
     `🆔 Egasi ID: ${record.owner_user_id}\n` +
     `👨‍💻 Admin IDlar: ${(record.admin_ids || []).join(', ') || '—'}\n\n` +
-    `💰 Tarif: ${formatMoney(record.monthly_price, record.currency)} / oy\n` +
-    `📅 Boshlangan: ${formatDate(record.billing_started_at)}\n` +
-    `⏳ Keyingi to‘lov: ${formatDate(record.current_period_end)}\n` +
-    `🧾 To‘lov holati: ${record.payment_status || '—'}\n\n` +
+    `💰 Oylik narx: ${formatMoney(record.monthly_price, record.currency)} / oy
+` +
+    `🏷 Tarif: ${tariffTitle(record.tariff_key)}
+` +
+    `🎁 Sinov: ${formatDate(record.trial_started_at)} — ${formatDate(record.trial_ends_at)}
+` +
+    `📅 Boshlangan: ${formatDate(record.billing_started_at)}
+` +
+    `⏳ Keyingi to‘lov: ${formatDate(record.current_period_end)}
+` +
+    `🧾 To‘lov holati: ${record.payment_status || '—'}
+
+` +
     (stats
       ? `📊 BOT STATISTIKASI\n` +
         `👥 Userlar: ${stats.users} | aktiv: ${stats.activeUsers} | blok: ${stats.blockedUsers}\n` +
@@ -3013,13 +3157,33 @@ function createFactoryBot() {
     if (!(await requireMongo(ctx, 'Tariflarni koʻrish uchun maʼlumotlar bazasi kerak'))) return;
     await seedDefaultPlans();
     const plans = await BotPlan.find({ is_active: true }).sort({ type_key: 1 });
-    const lines = plans.map((p, i) => `${i + 1}. ${getPreset(p.type_key).mainEmoji || '🤖'} ${p.title || p.type_key}: ${formatMoney(p.monthly_price, p.currency)} / oy`);
-    return ctx.reply(`💰 BOT TARIF NARXLARI
+    const lines = plans.map((p, i) => {
+      const base = Number(p.monthly_price || 0);
+      return `${i + 1}. ${getPreset(p.type_key).mainEmoji || '🤖'} ${p.title || p.type_key}
+` +
+        `   🏷 Standard: ${formatMoney(tariffPrice(base, 'standard'), p.currency)} / oy — marketingli
+` +
+        `   💎 Plus: ${formatMoney(tariffPrice(base, 'plus'), p.currency)} / oy — toza`;
+    });
+    return ctx.reply(
+      `💰 BOT TARIF NARXLARI
 
-Yaratish: bepul
-Oylik to‘lov: admin tasdiqlagandan keyin bot ishlaydi.
+` +
+        `🎁 Yaratish: bepul ${TRIAL_DAYS} kun sinov
+` +
+        `✅ Sinov muddati tugaguncha bot ishlaydi.
+` +
+        `💳 Keyin admin obunani 1 oyga uzaytiradi/tiklaydi.
 
-${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
+` +
+        `🏷 Standard — xabar ostida ${BUILDER_BOT_USERNAME} marketingi chiqadi.
+` +
+        `💎 Plus — xabarlar toza, reklamasiz bo‘ladi.
+
+` +
+        `${lines.join('\n\n') || 'Tariflar topilmadi.'}`,
+      userKeyboard(ctx)
+    );
   }
 
   async function showMyBots(ctx) {
@@ -3029,13 +3193,17 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
     const lines = list.map((b, i) => {
       const preset = getPreset(b.type_key);
       return (
-        `${i + 1}. ${preset.mainEmoji || '🤖'} ${b.title} — @${b.telegram_username}\n` +
-        `   Turi: ${preset.itemTitle || b.type_key} | Holat: ${botStatusLabel(b)}\n` +
-        `   💰 ${formatMoney(b.monthly_price, b.currency)} / oy | ⏳ ${formatDate(b.current_period_end)}`
+        `${i + 1}. ${preset.mainEmoji || '🤖'} ${b.title} — @${b.telegram_username}
+` +
+        `   Turi: ${preset.itemTitle || b.type_key} | Holat: ${botStatusLabel(b)}
+` +
+        `   🏷 ${tariffTitle(b.tariff_key)} | 💰 ${formatMoney(b.monthly_price, b.currency)} / oy | ⏳ ${formatDate(b.current_period_end)}`
       );
     });
 
-    return ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}\n\nTo‘lov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
+    return ctx.reply(`📋 Mening botlarim:
+
+${lines.join('\n\n')}\n\nObunani tiklash/uzaytirish uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
   }
 
   async function showPending(ctx) {
@@ -3052,9 +3220,10 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
           `👤 Mijoz: ${req.owner_first_name || ''} ${req.owner_username ? '@' + req.owner_username : ''}\n` +
           `🆔 Mijoz ID: ${req.owner_user_id}\n` +
           `👨‍💻 Admin IDlar: ${req.admin_ids.join(', ')}\n` +
-          `💰 Tarif: ${formatMoney(req.monthly_price, req.currency)} / oy\n` +
+          `🏷 Tarif: ${tariffTitle(req.tariff_key)}\n` +
+          `💰 Oylik narx: ${formatMoney(req.monthly_price, req.currency)} / oy\n` +
           `🔐 Token: ${req.token_mask || '***'}\n\n` +
-          `Yaratish bepul. Oylik to‘lov kelishilgach 1 oyga ruxsat bering.`,
+          `Yaratish bepul, yangi botlar ${TRIAL_DAYS} kun sinov bilan avtomatik ishlaydi. Kerak bo‘lsa 1 oyga uzaytiring yoki rad/to‘xtating.`,
         botActionKeyboard(req)
       );
     }
@@ -3337,14 +3506,51 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
     const preset = getPreset(typeKey);
     const plan = await getOrCreatePlan(typeKey);
     ctx.session.draft.type_key = typeKey;
-    ctx.session.draft.monthly_price = plan.monthly_price;
-    ctx.session.draft.currency = plan.currency;
+    ctx.session.draft.base_monthly_price = Number(plan.monthly_price || 0);
+    ctx.session.draft.currency = plan.currency || 'UZS';
+    ctx.session.mode = 'wait_tariff';
+    return ctx.editMessageText(
+      `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}
+
+` +
+        `Endi tarifni tanlang:
+
+` +
+        `🏷 Standard — arzon, xabarlar ostida ${BUILDER_BOT_USERNAME} marketingi chiqadi.
+` +
+        `💎 Plus — bot xabarlari toza, reklamasiz bo‘ladi.`,
+      Markup.inlineKeyboard(tariffRows(plan.monthly_price, plan.currency))
+    );
+  });
+
+  bot.action(/^factory:tariff:(standard|plus)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!ctx.session.draft?.token_enc || !ctx.session.draft?.type_key) return ctx.reply('❌ Sessiya tugagan. Qaytadan “🤖 Bot tayyorlash” bosing.');
+    const tariffKey = normalizeTariffKey(ctx.match[1]);
+    const preset = getPreset(ctx.session.draft.type_key);
+    const currency = ctx.session.draft.currency || 'UZS';
+    const price = tariffPrice(ctx.session.draft.base_monthly_price, tariffKey);
+    ctx.session.draft.tariff_key = tariffKey;
+    ctx.session.draft.monthly_price = price;
+    ctx.session.draft.currency = currency;
     ctx.session.mode = 'wait_title';
     return ctx.editMessageText(
-      `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}\n` +
-        `💰 Oylik tarif: ${formatMoney(plan.monthly_price, plan.currency)} / oy\n\n` +
-        `Endi bot uchun ko‘rinadigan nom kiriting. Masalan:\n${preset.title}\n\n` +
-        `Telegramdagi nomdan foydalanish uchun “-” yuboring.\n❌ Bekor qilish: /cancel`
+      `✅ Tarif tanlandi: ${tariffTitle(tariffKey)}
+` +
+        `💰 Oylik narx: ${formatMoney(price, currency)} / oy
+` +
+        `🎁 ${TRIAL_DAYS} kun sinov bepul.
+
+` +
+        `${tariffDescription(tariffKey)}
+
+` +
+        `Endi bot uchun ko‘rinadigan nom kiriting. Masalan:
+${preset.title}
+
+` +
+        `Telegramdagi nomdan foydalanish uchun “-” yuboring.
+❌ Bekor qilish: /cancel`
     );
   });
 
@@ -3363,7 +3569,7 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
 
     const req = await ManagedBot.findOne({ _id: ctx.match[1] });
     if (!req) return ctx.reply('❌ Soʻrov topilmadi.');
-    if (!['pending', 'expired', 'disabled'].includes(req.status)) return ctx.reply(`ℹ️ Bu soʻrov holati: ${req.status}`);
+    if (!['pending', 'approved', 'expired', 'disabled'].includes(req.status)) return ctx.reply(`ℹ️ Bu soʻrov holati: ${req.status}`);
 
     req.approved_by = ctx.from.id;
     req.approved_at = req.approved_at || new Date();
@@ -3522,6 +3728,10 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
       if (!draft.telegram_bot_id || !draft.type_key || !draft.title) return ctx.reply('❌ Sessiya tugagan. Qaytadan boshlang.');
       const adminIds = Array.from(new Set([ctx.from.id, ...ids]));
       const plan = await getOrCreatePlan(draft.type_key);
+      const tariffKey = normalizeTariffKey(draft.tariff_key || 'standard');
+      const now = new Date();
+      const trialEnd = addDaysSafe(now, TRIAL_DAYS);
+      const monthlyPrice = Number(draft.monthly_price ?? tariffPrice(plan.monthly_price, tariffKey) ?? 0);
 
       const rec = await ManagedBot.create({
         owner_user_id: ctx.from.id,
@@ -3537,44 +3747,64 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
         token_iv: draft.token_iv,
         token_tag: draft.token_tag,
         token_mask: draft.token_mask,
-        monthly_price: Number(plan.monthly_price || 0),
-        currency: plan.currency || 'UZS',
-        payment_status: 'not_paid',
-        status: 'pending',
-        is_enabled: false
+        tariff_key: tariffKey,
+        trial_started_at: now,
+        trial_ends_at: trialEnd,
+        billing_started_at: now,
+        current_period_start: now,
+        current_period_end: trialEnd,
+        next_payment_due_at: trialEnd,
+        monthly_price: monthlyPrice,
+        currency: draft.currency || plan.currency || 'UZS',
+        payment_status: 'trial',
+        status: 'approved',
+        is_enabled: true,
+        approved_at: now,
+        approved_by: 0,
+        price_note: `${TRIAL_DAYS} kunlik bepul sinov`
       });
       rec.bot_key = `m_${String(rec._id)}`;
       await rec.save();
+      try { await startManagedRecord(rec, 'factory_trial_created'); } catch (error) { console.error('Trial bot start xatosi:', error.message); }
       reset(ctx);
 
       const preset = getPreset(rec.type_key);
       await ctx.reply(
-        `✅ Soʻrov qabul qilindi!
+        `✅ Bot yaratildi va ${TRIAL_DAYS} kunlik bepul sinov boshlandi!
 
 ` +
           `🤖 Bot: @${rec.telegram_username}
 ` +
           `📦 Turi: ${preset.itemTitle || rec.type_key}
 ` +
-          `💰 Oylik tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy
+          `🏷 Tarif: ${tariffTitle(rec.tariff_key)}
+` +
+          `💰 Oylik narx: ${formatMoney(rec.monthly_price, rec.currency)} / oy
 ` +
           `👨‍💻 Admin IDlar: ${adminIds.join(', ')}
 
 ` +
-          `Endi to‘lov/ruxsat bo‘yicha admin bilan kelishing. Admin tasdiqlagandan keyin bot avtomatik ishga tushadi.`,
+          `🎁 Sinov tugash sanasi: ${formatDate(rec.current_period_end)}
+
+` +
+          `Bot hoziroq ishga tushdi. Sinov tugamasidan oldin yoki tugagach obunani tiklash/uzaytirish uchun admin bilan kelishing.`,
         Markup.inlineKeyboard([[Markup.button.url('💳 Toʻlov/ruxsat uchun admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]])
       );
       await ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
 
       await notifyOwners(
-        `🛂 Yangi bot tayyorlash soʻrovi!\n\n` +
+        `🎁 Yangi bot yaratildi — sinov muddati boshlandi!\n\n` +
           `🤖 Bot: ${rec.title} (@${rec.telegram_username})\n` +
           `📦 Turi: ${preset.itemTitle || rec.type_key}\n` +
-          `💰 Tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
+          `🏷 Tarif: ${tariffTitle(rec.tariff_key)}\n` +
+          `💰 Oylik narx: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
           `👤 Mijoz: ${rec.owner_first_name || ''} ${rec.owner_username ? '@' + rec.owner_username : ''}\n` +
           `🆔 Mijoz ID: ${rec.owner_user_id}\n` +
           `👨‍💻 Admin IDlar: ${adminIds.join(', ')}\n\n` +
-          `To‘lovni kelishib, 1 oyga ruxsat bering yoki rad eting.`,
+          `🎁 Sinov tugashi: ${formatDate(rec.current_period_end)}
+
+` +
+          `Mijoz to‘lov bo‘yicha yozsa, admin 1 oyga uzaytirishi yoki kerak bo‘lsa to‘xtatishi mumkin.`,
         botActionKeyboard(rec)
       );
     }
