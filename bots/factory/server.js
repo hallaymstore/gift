@@ -301,8 +301,7 @@ async function requireMongo(ctx, actionText = 'Bu amal uchun maʼlumotlar bazasi
 ` +
       `Hozir MongoDB ulanmoqda yoki Render endi uygʻondi. 10–20 soniyadan keyin qayta urinib koʻring.
 ` +
-      `Agar muammo davom etsa, admin bilan bogʻlaning: ${OWNER_USERNAME}`,
-      Markup.inlineKeyboard([[Markup.button.url('💳 Toʻlov/ruxsat uchun adminga murojaat qilish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]])
+      `Agar muammo davom etsa, admin bilan bogʻlaning: ${OWNER_USERNAME}`
     );
   }
   return false;
@@ -898,25 +897,31 @@ function createSharedUtils(bot, config, adminIds) {
 
   async function saveUser(ctx, incrementStart = false) {
     if (!ctx.from) return;
-    await User.updateOne(
-      { bot_key: config.key, user_id: ctx.from.id },
-      {
-        $set: {
-          username: ctx.from.username || null,
-          first_name: ctx.from.first_name || null,
-          last_name: ctx.from.last_name || null,
-          language_code: ctx.from.language_code || null,
-          last_active_at: new Date(),
-          is_blocked: false
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return;
+    try {
+      await User.updateOne(
+        { bot_key: config.key, user_id: ctx.from.id },
+        {
+          $set: {
+            username: ctx.from.username || null,
+            first_name: ctx.from.first_name || null,
+            last_name: ctx.from.last_name || null,
+            language_code: ctx.from.language_code || null,
+            last_active_at: new Date(),
+            is_blocked: false
+          },
+          ...(incrementStart ? { $inc: { starts: 1 } } : {})
         },
-        ...(incrementStart ? { $inc: { starts: 1 } } : {})
-      },
-      { upsert: true }
-    );
+        { upsert: true }
+      );
+    } catch (error) {
+      console.error(`⚠️ ${config.title} user saqlash xatosi:`, error.message);
+    }
   }
 
   async function checkAllSubscriptions(userId) {
     if (isAdmin(userId)) return true;
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return true;
 
     const [localSubs, globalSubs] = await Promise.all([
       Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 }),
@@ -1213,32 +1218,23 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   }
 
   bot.start(async (ctx) => {
-    await safeDbWrite('FactoryUser /start', () => FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true }));
-    reset(ctx);
-    await ctx.reply(
-      `🏭 Bot tayyorlovchi botga xush kelibsiz!
+    await saveUser(ctx, true);
+    resetSession(ctx);
+
+    if (isAdmin(ctx.from.id)) {
+      return ctx.reply(`🏠 ${config.title || config.itemTitle} admin paneli:`, adminKeyboard());
+    }
+
+    const ok = await checkAllSubscriptions(ctx.from.id);
+    if (!ok) return sendSubscriptionWarning(ctx);
+
+    return ctx.reply(
+      `${config.mainEmoji || '🤖'} ${config.title || config.itemTitle} botiga xush kelibsiz!
 
 ` +
-        `Yaratish bepul. Bot ishlashi uchun oylik tarif admin tomonidan tasdiqlanadi.
-
-` +
-        `Jarayon:
-` +
-        `1) BotFather’dan token olasiz
-` +
-        `2) Tokenni shu botga kiritasiz
-` +
-        `3) Bot turini tanlaysiz
-` +
-        `4) Bot nomi va admin ID kiritasiz
-` +
-        `5) ${OWNER_USERNAME} bilan narx/to‘lov kelishilgach admin 1 oyga ruxsat beradi
-
-` +
-        `Har oy muddati tugaganda bot avtomatik to‘xtaydi. Admin yana ruxsat bersa, bot ichidagi barcha maʼlumotlar saqlangan holda davom etadi.`,
-      userKeyboard(ctx)
+        `${config.welcomeLine || ((config.itemTitle || 'Kontent') + ' nomi yoki kodini yuboring.')}\n` +
+        `Masalan: ${config.codeExamples || 'kod'}`
     );
-    return sendAdminPaymentButton(ctx);
   });
 
   bot.command('cancel', async (ctx) => {
@@ -2719,16 +2715,6 @@ function createFactoryBot() {
     return Markup.keyboard(rows).resize().oneTime(false);
   }
 
-  function adminPaymentInlineKeyboard() {
-    return Markup.inlineKeyboard([
-      [Markup.button.url('💳 Toʻlov/ruxsat uchun adminga murojaat qilish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
-    ]);
-  }
-
-  async function sendAdminPaymentButton(ctx, note = 'Bot ishlashi uchun toʻlov/ruxsat admin orqali kelishiladi.') {
-    return ctx.reply(`💳 ${note}`, adminPaymentInlineKeyboard());
-  }
-
   async function notifyOwners(text, keyboard) {
     for (const adminId of GLOBAL_ADMIN_IDS) {
       try {
@@ -2854,13 +2840,12 @@ function createFactoryBot() {
     await seedDefaultPlans();
     const plans = await BotPlan.find({ is_active: true }).sort({ type_key: 1 });
     const lines = plans.map((p, i) => `${i + 1}. ${getPreset(p.type_key).mainEmoji || '🤖'} ${p.title || p.type_key}: ${formatMoney(p.monthly_price, p.currency)} / oy`);
-    await ctx.reply(`💰 BOT TARIF NARXLARI
+    return ctx.reply(`💰 BOT TARIF NARXLARI
 
 Yaratish: bepul
 Oylik to‘lov: admin tasdiqlagandan keyin bot ishlaydi.
 
 ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
-    return sendAdminPaymentButton(ctx, 'Toʻlov/ruxsatni admin bilan kelishish uchun quyidagi tugmani bosing.');
   }
 
   async function showMyBots(ctx) {
@@ -3073,7 +3058,7 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
   });
 
   bot.start(async (ctx) => {
-    await FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true });
+    await safeDbWrite('FactoryUser /start', () => FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true }));
     reset(ctx);
     return ctx.reply(
       `🏭 Bot tayyorlovchi botga xush kelibsiz!\n\n` +
@@ -3157,7 +3142,7 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
     if (!(await requireMongo(ctx, 'Bot yaratish uchun maʼlumotlar bazasi kerak'))) return;
     reset(ctx);
     ctx.session.mode = 'wait_token';
-    await ctx.reply(
+    return ctx.reply(
       `🤖 Yangi bot tayyorlash boshlandi.
 
 ` +
@@ -3169,7 +3154,6 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
 ` +
         `❌ Bekor qilish: /cancel`
     );
-    return sendAdminPaymentButton(ctx, 'Toʻlov/ruxsat uchun admin bilan oldindan kelishib oling.');
   });
 
   bot.action(/^factory:type:([a-z0-9_-]+)$/, async (ctx) => {
@@ -3391,15 +3375,22 @@ ${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
 
       const preset = getPreset(rec.type_key);
       await ctx.reply(
-        `✅ Soʻrov qabul qilindi!\n\n` +
-          `🤖 Bot: @${rec.telegram_username}\n` +
-          `📦 Turi: ${preset.itemTitle || rec.type_key}\n` +
-          `💰 Oylik tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy\n` +
-          `👨‍💻 Admin IDlar: ${adminIds.join(', ')}\n\n` +
-          `Yaratish bepul. Bot ishlashi uchun oylik to‘lov/ruxsat ${OWNER_USERNAME} orqali kelishiladi. Admin ruxsat bergach bot avtomatik ishga tushadi.`,
-        userKeyboard(ctx)
+        `✅ Soʻrov qabul qilindi!
+
+` +
+          `🤖 Bot: @${rec.telegram_username}
+` +
+          `📦 Turi: ${preset.itemTitle || rec.type_key}
+` +
+          `💰 Oylik tarif: ${formatMoney(rec.monthly_price, rec.currency)} / oy
+` +
+          `👨‍💻 Admin IDlar: ${adminIds.join(', ')}
+
+` +
+          `Endi to‘lov/ruxsat bo‘yicha admin bilan kelishing. Admin tasdiqlagandan keyin bot avtomatik ishga tushadi.`,
+        Markup.inlineKeyboard([[Markup.button.url('💳 Toʻlov/ruxsat uchun admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]])
       );
-      await sendAdminPaymentButton(ctx, `Soʻrov qabul qilindi. Toʻlov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`);
+      await ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
 
       await notifyOwners(
         `🛂 Yangi bot tayyorlash soʻrovi!\n\n` +
