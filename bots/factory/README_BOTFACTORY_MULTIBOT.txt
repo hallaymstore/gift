@@ -1,154 +1,145 @@
-BOTFACTORY MULTIBOT PLATFORM — OYLIK TARIFLI SAAS
+BOTFACTORY SAAS — FACTORY BOT YANGILANGAN VERSIYA
 =================================================
 
-Bu loyiha bitta Render servisida quyidagilarni ishlatadi:
+Bu papkadagi o‘zgarishlar FAQAT bots/factory ichiga qilindi.
+GiftGo / Course / Social Garant botlariga tegilmagan.
 
-1) FactoryBot — bot tayyorlovchi asosiy bot
-2) KinoBot / MultfilmBot / SerialBot / DoramaBot / AnimeBot / KursBot / KitobBot va boshqalar
-3) Mijoz yaratgan botlar — har biri alohida token bilan, lekin bitta server va bitta MongoDB ichida
+ASOSIY G‘OYA
+------------
+Bitta Render server ichida FactoryBot ishlaydi. Mijoz BotFather tokenini kiritadi, bot turini tanlaydi, admin IDlarini kiritadi. So‘rov bosh adminlarga keladi. Bosh admin 1 oyga ruxsat bersa, mijozning boti avtomatik ishga tushadi.
 
-ASOSIY YANGILIKLAR
-==================
+Oylik muddati tugasa bot to‘xtaydi, lekin MongoDB’dagi barcha ma’lumotlar saqlanadi. Admin yana 1 oyga uzaytirsa, bot eski joyidan davom etadi.
 
-✅ Yaratish bepul, ishlashi oylik tarif/ruxsat bilan
-✅ Admin har bir botni 1 oyga tasdiqlaydi
-✅ Har oyning bot tasdiqlangan sanasida muddat tugaydi
-✅ Muddat tugasa bot funksiyalari to'xtaydi
-✅ Admin "1 oyga uzaytirish" bossa bot yana kelgan joyidan ishlaydi
-✅ Server qayta deploy/restart bo'lsa ham ma'lumotlar yo'qolmaydi
-✅ Kinolar, qismlar, userlar, statistikalar MongoDB'da saqlanadi
-✅ Barcha yaratilgan botlarga umumiy e'lon yuborish bor
-✅ Har bir botning alohida statistikasi bor
-✅ Umumiy statistika bor
-✅ FactoryBot'ning o'z statistikasi bor
-✅ Bot username, owner username, owner ID yoki bot nomi orqali qidirish bor
-✅ Bot tarif narxlarini admin paneldan o'zgartirish mumkin
+YANGI BOT TURLARI
+-----------------
+1) Media/kontent botlar:
+   - KinoBot
+   - MultfilmBot
+   - SerialBot
+   - DoramaBot
+   - AnimeBot
+   - TurkSerialBot
+   - KursBot
+   - KitobBot
+   - FaylBot
+   - MusicBot
 
-ENV SOZLASH
-===========
+2) Kanal egalari uchun:
+   - VIP Obuna Bot
+     Maxfiy kanal/guruhga vaqtlik invite link beradi. Foydalanuvchi so‘rov yuboradi, shifr oladi, admin tasdiqlasa bot 1 martalik/vaqtlik invite link yaratadi.
+   - Konkurs / Giveaway Bot
+     Majburiy obuna, qatnashish tugmasi, qatnashchilar, random g‘olib tanlash.
+   - Kanal Ariza + Autopost Bot
+     Admin o‘zi inputlar qo‘shadi, nomini/tartibini/turini o‘zgartiradi. Foydalanuvchi ariza to‘ldiradi, har so‘rovga maxfiy shifr beriladi. Admin arizani ko‘radi. Autopost uchun kanal, post va interval sozlanadi.
+   - Reklama Buyurtma Bot
+     Kanal Ariza bot bilan bir xil engine’da ishlaydi. Reklama/akkount savdo/kanal buyurtmalari uchun custom inputlar mos keladi.
 
-.env faylda eng muhim sozlamalar:
+3) Guruh egalari uchun:
+   - Guruh Tozalovchi + AntiSpam Bot
+     Kirdi/chiqdi xabarlarini o‘chiradi, linklarni bloklaydi, taqiqlangan so‘zlarni o‘chiradi, salomlashuv, qoidalar va FAQ ishlaydi.
+   - FAQ + Support Guruh Bot
+     FAQ, salomlashuv, qoidalar va oddiy antispam funksiyalari.
 
-MONGODB_URL=...
-ADMIN_IDS=6606638731,901126203
-FACTORYBOT_TOKEN=...
-OWNER_USERNAME=@Qoryogdiyev
-BOT_TOKEN_SECRET=uzun_random_secret
-WEBHOOK_SECRET=uzun_random_webhook_secret
+HAMMA MIJOZ BOTLARIDA BOR FUNKSIYALAR
+-------------------------------------
+- Bot egasi admin paneli
+- Statistika
+- Broadcast / e’lon yuborish
+- Mahalliy majburiy obuna qo‘shish/o‘chirish
+- Factory global majburiy obunalari bilan birga ishlash
+- Oylik tarif nazorati
+- Server restart/deploydan keyin MongoDB’dan tiklanish
+- Tokenlar DB’da AES-256-GCM bilan shifrlangan holda saqlanishi
 
-Oylik tariflar:
+VIP OBUNA BOT
+-------------
+Admin sozlaydi:
+- Maxfiy kanal/guruh: @username yoki -100 chat_id
+- To‘lov/narx matni
+- Dostup muddati: masalan 30 kun
+- Invite link muddati: masalan 30 daqiqa
+- To‘lov uchun admin username
 
-DEFAULT_MONTHLY_PRICE=50000
-KINO_MONTHLY_PRICE=50000
-MULTFILM_MONTHLY_PRICE=50000
-SERIAL_MONTHLY_PRICE=70000
-DORAMA_MONTHLY_PRICE=70000
-KURS_MONTHLY_PRICE=100000
+Foydalanuvchi:
+- VIP so‘rov yuboradi
+- Maxfiy shifr oladi: VIP-AB12CD34
+- To‘lovda shu shifrni adminga yuboradi
 
-ESLATMA: BOT_TOKEN_SECRET ni keyin almashtirmang. Aks holda DB'da shifrlangan mijoz tokenlarini qayta o'qib bo'lmaydi.
+Admin:
+- So‘rovni ko‘radi
+- “Link berish” bosadi
+- Bot maxfiy kanal/guruhga vaqtlik invite link yaratadi
 
-ISHGA TUSHIRISH
-===============
+MUHIM: VIP bot maxfiy kanal/guruhda admin bo‘lishi va Invite link yaratish huquqiga ega bo‘lishi kerak.
 
-npm install
-npm start
+KANAL ARIZA + AUTOPOST BOT
+--------------------------
+Admin inputlarni o‘zi sozlaydi:
+Format:
+Label | type | required | order | placeholder
 
-Render:
+Type variantlari:
+text, number, phone, url, location, photo, document
 
-Build command: npm install
-Start command: npm start
+Misol:
+Kanal nomi | text | ha | 1 | Kanalingiz nomini yozing
+Obunachilar soni | number | ha | 2 | Masalan: 15000
+Kanal linki | url | ha | 3 | https://t.me/...
+Joylashuv | location | yoq | 4 | Lokatsiya yuboring
+Skrinshot | photo | yoq | 5 | Rasm yuboring
 
-FactoryBot menyusi:
+Har bir input alohida qadam bo‘lib chiqadi. Foydalanuvchi bittadan javob beradi.
+Oxirida adminlarga ariza yuboriladi va foydalanuvchiga maxfiy shifr beriladi.
 
-- 🤖 Bot tayyorlash
-- 📋 Mening botlarim
-- 💰 Narxlar
-- ☎️ Admin bilan kelishish
+Maxfiy shifr misol:
+REQ-AB12CD34
 
-Asosiy admin menyusi:
+Foydalanuvchi to‘lov/admin bilan yozishganda shu shifrni yuboradi.
 
-- ✏️ Narx o'zgartirish
-- 💰 Tarif narxlari
-- 📣 Umumiy e'lon
-- 🔍 Bot qidirish
-- 📋 Barcha botlar
-- 📊 Umumiy statistika
-- 🏭 Factory statistikasi
-- 🛂 Kutilayotgan so'rovlar
-- ⏳ To'lovi tugaganlar
+Autopost:
+- Admin target kanal/guruhni kiritadi
+- Post yuboradi/forward qiladi
+- Nomi | interval_daqiqa | target_chat yuboradi
+- Bot interval bo‘yicha postni kanalga yuboradi
 
-MIJOZ BOT YARATISH TARTIBI
-==========================
+MUHIM: Autopost uchun bot kanal/guruhda admin bo‘lishi kerak.
 
-1. Mijoz BotFather'dan yangi bot ochadi va token oladi.
-2. FactoryBot ichida "🤖 Bot tayyorlash" bosadi.
-3. Tokenni yuboradi.
-4. Bot turini tanlaydi: KinoBot, MultfilmBot, SerialBot, DoramaBot...
-5. Bot nomini kiritadi.
-6. Admin ID kiritadi.
-7. So'rov asosiy adminlarga keladi.
-8. Admin mijoz bilan narx/to'lovni kelishadi.
-9. Admin "✅ Ruxsat berish / 1 oy aktiv qilish" tugmasini bosadi.
-10. Bot ishga tushadi.
+KONKURS BOT
+-----------
+Admin:
+Konkurs yaratish formati:
+Nomi | g‘oliblar soni | tavsif
 
-OYLIK TO'LOV LOGIKASI
-=====================
+Misol:
+iPhone konkursi | 3 | Kanalga obuna bo‘lib qatnashing
 
-- Birinchi tasdiqlash vaqti: billing_started_at
-- Keyingi to'lov sanasi: current_period_end
-- Bot 1 oyga aktiv bo'ladi.
-- current_period_end kelganda bot holati expired bo'ladi.
-- Bot ichidagi kontent/userlar o'chmaydi.
-- Admin "✅ 1 oyga uzaytirish" bossa current_period_end yana 1 oyga cho'ziladi.
-- Bot yana ishlashda davom etadi.
+Foydalanuvchi “Qatnashish” tugmasini bosadi. Majburiy obuna tekshiriladi.
+Admin “G‘olib tanlash” bosganda random g‘oliblar chiqadi.
 
-BOT ICHIDAGI KONTENT STRUKTURASI
-================================
+GURUH BOT
+---------
+Funksiyalar:
+- Kirdi/chiqdi xabarlarni o‘chirish
+- Anti-link
+- Taqiqlangan so‘zlar
+- Salomlashuv
+- /rules
+- FAQ: kalit so‘z | javob
+- Broadcast
+- Statistika
 
-Hamma botlar bir xil universal strukturada:
+MUHIM: Guruh bot guruhda admin bo‘lishi kerak. Xabarlarni o‘chirish uchun delete huquqi bo‘lishi kerak.
 
-1) Qismsiz kontent
-   - Kod/nom yuborilsa post darrov yuboriladi.
+.ENV YANGI NARXLAR
+------------------
+VIP_OBUNA_MONTHLY_PRICE=100000
+KONKURS_MONTHLY_PRICE=70000
+KANAL_ARIZA_MONTHLY_PRICE=120000
+REKLAMA_BUYURTMA_MONTHLY_PRICE=120000
+GROUP_CLEANER_MONTHLY_PRICE=70000
+FAQ_SUPPORT_MONTHLY_PRICE=70000
 
-2) Qismli kontent
-   - Kod/nom yuborilsa 3 tadan inline tugma chiqadi.
-   - Oldingi/Keyingi tugmalari bor.
-   - 50, 100, 1000 ta qism bo'lsa ham bot RAM'ga hammasini yuklamaydi.
-   - MongoDB'dan faqat kerakli 3 ta qism olinadi.
-
-UMUMIY E'LON
-============
-
-Asosiy admin "📣 Umumiy e'lon" bosadi va matn/rasm/video/fayl/forward yuboradi.
-E'lon barcha aktiv yaratilgan botlarning foydalanuvchilariga o'sha bot nomidan yuboriladi.
-
-STATISTIKA
-==========
-
-Umumiy statistika:
-- jami yaratilgan botlar
-- aktiv botlar
-- kutilayotgan botlar
-- muddati tugagan botlar
-- barcha userlar
-- barcha kontentlar
-- barcha qismlar
-- FactoryBot userlari
-- umumiy e'lonlar soni
-
-Har bir bot statistikasi:
-- userlar
-- aktiv/bloklagan userlar
-- kontentlar
-- qismli/qismsiz kontent
-- qismlar
-- majburiy obunalar
-- ko'rishlar/qidiruvlar
-
-MUHIM XAVFSIZLIK
-================
-
-- Mijoz tokenlari MongoDB'da ochiq saqlanmaydi.
-- Tokenlar BOT_TOKEN_SECRET bilan AES-256-GCM orqali shifrlanadi.
-- Eski token/parollar chatda ko'rinib qolgan bo'lsa BotFather va MongoDB parollarini almashtiring.
+TEKSHIRILDI
+-----------
+npm run check orqali root server, giftgo, course, social va factory sintaksisi tekshirildi.
 

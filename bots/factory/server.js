@@ -17,7 +17,7 @@ const PORT = Number(process.env.PORT || 3000);
 const URL = String(process.env.URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_webhook_secret';
 const BOT_TOKEN_SECRET = process.env.BOT_TOKEN_SECRET || WEBHOOK_SECRET;
-const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || '').trim();
+const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || process.env.BOT_FACTORY_TOKEN || process.env.BOTFACTORY_MAIN_TOKEN || process.env.FACTORY_MAIN_BOT_TOKEN || process.env.BOT_TOKEN_FACTORY || '').trim();
 const OWNER_USERNAME = String(process.env.OWNER_USERNAME || '@Qoryogdiyev').trim();
 
 function parseIds(value) {
@@ -29,9 +29,12 @@ function parseIds(value) {
 
 const GLOBAL_ADMIN_IDS = parseIds(process.env.ADMIN_IDS || process.env.FACTORY_ADMIN_IDS || process.env.ADMIN_TELEGRAM_IDS || process.env.ADMIN_TELEGRAM_CHAT_ID);
 
-if (!MONGODB_URL) throw new Error('MONGODB_URL/MONGODB_URI .env ichida berilmagan');
+if (!MONGODB_URL) {
+  console.warn('⚠️ MONGODB_URL/MONGODB_URI topilmadi. FactoryBot /start javob beradi, lekin bot yaratish/saqlash MongoDB ulanganidan keyin ishlaydi.');
+}
 if (GLOBAL_ADMIN_IDS.length === 0) {
-  throw new Error('ADMIN_IDS .env ichida berilmagan. Masalan: ADMIN_IDS=6606638731,901126203');
+  GLOBAL_ADMIN_IDS.push(6606638731);
+  console.warn('⚠️ ADMIN_IDS topilmadi. Vaqtinchalik admin sifatida 6606638731 ishlatiladi. Render env ichida ADMIN_TELEGRAM_IDS yoki ADMIN_IDS qoʻying.');
 }
 
 // BotFactory orqali boshqariladigan umumiy majburiy obuna kaliti.
@@ -42,6 +45,10 @@ const GLOBAL_SUBSCRIPTION_BOT_KEY = '__global__';
 // MONGODB MODELLAR
 // =========================
 mongoose.set('strictQuery', true);
+mongoose.set('bufferCommands', false);
+let mongoReady = false;
+let mongoConnecting = false;
+let managedBotsLoadedAfterMongo = false;
 
 const storedMessageFields = {
   source_chat_id: { type: Number, required: true },
@@ -247,6 +254,244 @@ const broadcastLogSchema = new mongoose.Schema(
 const BroadcastLog = mongoose.model('BroadcastLog', broadcastLogSchema);
 
 
+async function connectMongoOnce() {
+  if (!MONGODB_URL) return false;
+  if (mongoose.connection.readyState === 1) {
+    mongoReady = true;
+    return true;
+  }
+  if (mongoConnecting) return false;
+  mongoConnecting = true;
+  try {
+    await mongoose.connect(MONGODB_URL, {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10
+    });
+    mongoReady = true;
+    console.log('✅ BotFactory MongoDB ulandi');
+    return true;
+  } catch (error) {
+    mongoReady = false;
+    console.error('❌ BotFactory MongoDB ulanish xatosi:', error.message);
+    return false;
+  } finally {
+    mongoConnecting = false;
+  }
+}
+
+async function waitForMongoReady(timeoutMs = 3000) {
+  if (mongoReady && mongoose.connection.readyState === 1) return true;
+  const started = Date.now();
+  await connectMongoOnce();
+  while (!(mongoReady && mongoose.connection.readyState === 1) && Date.now() - started < timeoutMs) {
+    await sleep(250);
+  }
+  return mongoReady && mongoose.connection.readyState === 1;
+}
+
+async function requireMongo(ctx, actionText = 'Bu amal uchun maʼlumotlar bazasi ulanishi kerak') {
+  const ok = await waitForMongoReady(3500);
+  if (ok) return true;
+  if (ctx) {
+    await ctx.reply(
+      `⏳ ${actionText}.
+
+` +
+      `Hozir MongoDB ulanmoqda yoki Render endi uygʻondi. 10–20 soniyadan keyin qayta urinib koʻring.
+` +
+      `Agar muammo davom etsa, admin bilan bogʻlaning: ${OWNER_USERNAME}`,
+      Markup.inlineKeyboard([[Markup.button.url('💳 Toʻlov/ruxsat uchun adminga murojaat qilish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]])
+    );
+  }
+  return false;
+}
+
+async function safeDbWrite(label, task) {
+  if (!(mongoReady && mongoose.connection.readyState === 1)) return null;
+  try {
+    return await task();
+  } catch (error) {
+    console.error(`⚠️ ${label} DB xatosi:`, error.message);
+    return null;
+  }
+}
+
+async function afterMongoReadyStartup() {
+  if (!(mongoReady && mongoose.connection.readyState === 1)) return;
+  try {
+    await seedDefaultPlans();
+    await expireDueManagedBots();
+    if (!managedBotsLoadedAfterMongo) {
+      managedBotsLoadedAfterMongo = true;
+      const approvedManaged = await ManagedBot.find({ status: 'approved', is_enabled: true, $or: [{ current_period_end: { $gt: new Date() } }, { current_period_end: null }] });
+      for (const record of approvedManaged) {
+        try {
+          await startManagedRecord(record, 'approved_db');
+        } catch (error) {
+          console.error(`❌ Managed bot ishga tushmadi @${record.telegram_username}:`, error.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('⚠️ BotFactory MongoDB startup vazifalari xatosi:', error.message);
+  }
+}
+
+function startMongoBackgroundLoop() {
+  const run = async () => {
+    const ok = await connectMongoOnce();
+    if (ok) await afterMongoReadyStartup();
+  };
+  run().catch((error) => console.error('Mongo background start xatosi:', error.message));
+  setInterval(() => {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) {
+      run().catch((error) => console.error('Mongo reconnect xatosi:', error.message));
+    }
+  }, 15000);
+}
+
+
+// =========================
+// QO'SHIMCHA FACTORY BOT TURLARI UCHUN MODELLAR
+// =========================
+const botSettingSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, unique: true, index: true },
+    settings: { type: mongoose.Schema.Types.Mixed, default: {} }
+  },
+  { timestamps: true, collection: 'multibot_bot_settings' }
+);
+const BotSetting = mongoose.model('BotSetting', botSettingSchema);
+
+const formFieldSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    label: { type: String, required: true },
+    key: { type: String, required: true },
+    type: { type: String, enum: ['text', 'number', 'phone', 'url', 'location', 'photo', 'document'], default: 'text' },
+    order: { type: Number, default: 1, index: true },
+    required: { type: Boolean, default: true },
+    placeholder: String,
+    is_active: { type: Boolean, default: true, index: true }
+  },
+  { timestamps: true, collection: 'multibot_form_fields' }
+);
+formFieldSchema.index({ bot_key: 1, key: 1 }, { unique: true, partialFilterExpression: { is_active: true } });
+const FormField = mongoose.model('FormField', formFieldSchema);
+
+const formSubmissionSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    answers: { type: Array, default: [] },
+    secret_code: { type: String, required: true, index: true },
+    secret_hash: String,
+    status: { type: String, enum: ['new', 'sent_to_admin', 'approved', 'rejected', 'paid'], default: 'new', index: true },
+    admin_note: String
+  },
+  { timestamps: true, collection: 'multibot_form_submissions' }
+);
+const FormSubmission = mongoose.model('FormSubmission', formSubmissionSchema);
+
+const autoPostSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    title: { type: String, required: true },
+    target_chat: { type: String, required: true },
+    interval_minutes: { type: Number, default: 60 },
+    next_send_at: { type: Date, index: true },
+    last_sent_at: Date,
+    sent_count: { type: Number, default: 0 },
+    is_active: { type: Boolean, default: true, index: true },
+    ...storedMessageFields,
+    added_by: Number
+  },
+  { timestamps: true, collection: 'multibot_auto_posts' }
+);
+const AutoPost = mongoose.model('AutoPost', autoPostSchema);
+
+const vipRequestSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    secret_code: { type: String, required: true, index: true },
+    status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending', index: true },
+    approved_by: Number,
+    invite_link: String,
+    expires_at: Date,
+    access_until: Date
+  },
+  { timestamps: true, collection: 'multibot_vip_requests' }
+);
+const VipRequest = mongoose.model('VipRequest', vipRequestSchema);
+
+const vipMemberSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    channel_chat: String,
+    access_until: { type: Date, index: true },
+    is_active: { type: Boolean, default: true, index: true },
+    removed_at: Date,
+    last_request_id: mongoose.Schema.Types.ObjectId
+  },
+  { timestamps: true, collection: 'multibot_vip_members' }
+);
+vipMemberSchema.index({ bot_key: 1, user_id: 1, channel_chat: 1 }, { unique: true });
+const VipMember = mongoose.model('VipMember', vipMemberSchema);
+
+const giveawaySchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    title: { type: String, required: true },
+    description: String,
+    winners_count: { type: Number, default: 1 },
+    status: { type: String, enum: ['active', 'closed'], default: 'active', index: true },
+    created_by: Number,
+    drawn_by: Number,
+    drawn_at: Date,
+    winner_user_ids: { type: [Number], default: [] }
+  },
+  { timestamps: true, collection: 'multibot_giveaways' }
+);
+const Giveaway = mongoose.model('Giveaway', giveawaySchema);
+
+const giveawayParticipantSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    giveaway_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String
+  },
+  { timestamps: true, collection: 'multibot_giveaway_participants' }
+);
+giveawayParticipantSchema.index({ bot_key: 1, giveaway_id: 1, user_id: 1 }, { unique: true });
+const GiveawayParticipant = mongoose.model('GiveawayParticipant', giveawayParticipantSchema);
+
+const faqSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    keyword: { type: String, required: true },
+    keyword_norm: { type: String, required: true, index: true },
+    answer: { type: String, required: true },
+    is_active: { type: Boolean, default: true, index: true },
+    added_by: Number
+  },
+  { timestamps: true, collection: 'multibot_group_faqs' }
+);
+faqSchema.index({ bot_key: 1, keyword_norm: 1 }, { unique: true, partialFilterExpression: { is_active: true } });
+const GroupFaq = mongoose.model('GroupFaq', faqSchema);
+
+
 // =========================
 // HELPERLAR
 // =========================
@@ -333,6 +578,90 @@ function escapeRegex(text) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+function makeSecretCode(prefix = 'REQ') {
+  return `${prefix}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+}
+
+function secretHash(code) {
+  return crypto.createHmac('sha256', cryptoKey()).update(String(code || '')).digest('hex');
+}
+
+function parseBool(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const v = String(value).trim().toLowerCase();
+  return ['1', 'true', 'ha', 'yes', 'on', 'yoqil', 'yoqilgan'].includes(v);
+}
+
+function safeJson(value, fallback = {}) {
+  try {
+    if (!value) return fallback;
+    if (typeof value === 'object') return value;
+    return JSON.parse(String(value));
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function getBotSettings(botKey) {
+  const doc = await BotSetting.findOne({ bot_key: botKey });
+  return doc?.settings || {};
+}
+
+async function updateBotSettings(botKey, patch) {
+  const current = await getBotSettings(botKey);
+  const next = { ...current, ...patch };
+  await BotSetting.updateOne({ bot_key: botKey }, { $set: { settings: next } }, { upsert: true });
+  return next;
+}
+
+function parseKeyValueLines(text) {
+  const obj = {};
+  for (const line of String(text || '').split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (key) obj[key] = value;
+  }
+  return obj;
+}
+
+function parseFieldLine(text) {
+  const parts = String(text || '').split('|').map((x) => x.trim());
+  const label = parts[0] || '';
+  const type = (parts[1] || 'text').toLowerCase();
+  const requiredRaw = parts[2] || 'ha';
+  const order = Number(parts[3] || 0);
+  const placeholder = parts.slice(4).join(' | ').trim();
+  const key = slugifyCode(label || `field_${Date.now()}`) || `field_${Date.now()}`;
+  return { label, key, type, required: !/^yo'q|yoq|no|0|false$/i.test(requiredRaw), order, placeholder };
+}
+
+function formAnswerToText(answer) {
+  if (!answer) return '';
+  if (answer.type === 'location' && answer.value?.latitude) return `${answer.value.latitude}, ${answer.value.longitude}`;
+  if (answer.type === 'photo') return '[photo yuborilgan]';
+  if (answer.type === 'document') return `[fayl: ${answer.value?.file_name || 'document'}]`;
+  return String(answer.value ?? '');
+}
+
+function isLinkText(text) {
+  return /(https?:\/\/|t\.me\/|telegram\.me\/|www\.|@\w{5,})/i.test(String(text || ''));
+}
+
+function nowPlusMinutes(mins) {
+  return new Date(Date.now() + Number(mins || 0) * 60 * 1000);
+}
+
+function nowPlusDays(days) {
+  return new Date(Date.now() + Number(days || 0) * 24 * 60 * 60 * 1000);
+}
+
+async function safeDelete(ctx) {
+  try { await ctx.deleteMessage(); } catch (_) {}
 }
 
 function hasUsableToken(value) {
@@ -509,6 +838,30 @@ function storedInfoText(stored) {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+
+async function sendStoredMessageToChat(telegram, chatId, stored) {
+  try {
+    await telegram.copyMessage(chatId, stored.source_chat_id, stored.source_message_id);
+    return true;
+  } catch (error) {
+    console.error('copyMessage to chat xatosi:', error.message);
+  }
+
+  const captionExtra = {
+    caption: stored.caption || undefined,
+    caption_entities: stored.caption_entities || undefined
+  };
+  if (stored.message_type === 'text') return telegram.sendMessage(chatId, stored.text || ' ', { entities: stored.entities || undefined });
+  if (stored.message_type === 'photo') return telegram.sendPhoto(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'video') return telegram.sendVideo(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'animation') return telegram.sendAnimation(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'document') return telegram.sendDocument(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'audio') return telegram.sendAudio(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'voice') return telegram.sendVoice(chatId, stored.file_id, captionExtra);
+  if (stored.message_type === 'sticker') return telegram.sendSticker(chatId, stored.file_id);
+  throw new Error('Saqlangan xabar turi yuborilmadi');
 }
 
 async function copyStoredMessage(ctx, stored) {
@@ -860,18 +1213,32 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   }
 
   bot.start(async (ctx) => {
-    await saveUser(ctx, true);
+    await safeDbWrite('FactoryUser /start', () => FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true }));
+    reset(ctx);
+    await ctx.reply(
+      `🏭 Bot tayyorlovchi botga xush kelibsiz!
 
-    if (isAdmin(ctx.from.id)) {
-      return ctx.reply(`👨‍💻 ${config.title} admin paneliga xush kelibsiz!`, adminKeyboard());
-    }
+` +
+        `Yaratish bepul. Bot ishlashi uchun oylik tarif admin tomonidan tasdiqlanadi.
 
-    const ok = await checkAllSubscriptions(ctx.from.id);
-    if (!ok) return sendSubscriptionWarning(ctx);
+` +
+        `Jarayon:
+` +
+        `1) BotFather’dan token olasiz
+` +
+        `2) Tokenni shu botga kiritasiz
+` +
+        `3) Bot turini tanlaysiz
+` +
+        `4) Bot nomi va admin ID kiritasiz
+` +
+        `5) ${OWNER_USERNAME} bilan narx/to‘lov kelishilgach admin 1 oyga ruxsat beradi
 
-    return ctx.reply(
-      `${config.mainEmoji} ${config.title}ga xush kelibsiz!\n\n${config.welcomeLine}\nMasalan: ${config.codeExamples}\n\nAgar ${config.item} qismli bo‘lsa, qismlar inline tugma bo‘lib chiqadi. Qismsiz bo‘lsa, post darrov yuboriladi.\n\n/start — botni qayta ishga tushirish`
+` +
+        `Har oy muddati tugaganda bot avtomatik to‘xtaydi. Admin yana ruxsat bersa, bot ichidagi barcha maʼlumotlar saqlangan holda davom etadi.`,
+      userKeyboard(ctx)
     );
+    return sendAdminPaymentButton(ctx);
   });
 
   bot.command('cancel', async (ctx) => {
@@ -1353,6 +1720,412 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   return { key: config.key, title: config.title, bot, config };
 }
 
+// =========================
+// MANAGED BOT ACCESS MIDDLEWARE
+// =========================
+function attachManagedAccess(bot, config) {
+  if (!config.managed) return;
+  bot.use(async (ctx, next) => {
+    const rec = await ManagedBot.findOne({ bot_key: config.key });
+    if (!rec) return;
+    const expiredNow = await markRecordExpiredIfNeeded(rec);
+    const allowed = !expiredNow && rec.status === 'approved' && rec.is_enabled;
+    if (!allowed) {
+      const ownerOrAdmin = ctx.from && (Number(ctx.from.id) === Number(rec.owner_user_id) || (rec.admin_ids || []).map(Number).includes(Number(ctx.from.id)) || GLOBAL_ADMIN_IDS.includes(Number(ctx.from.id)));
+      if (ownerOrAdmin) {
+        return ctx.reply(
+          `⏳ @${rec.telegram_username} botining oylik muddati tugagan yoki admin tomonidan to‘xtatilgan.\n\n` +
+            `Bot ichidagi maʼlumotlar MongoDB’da saqlangan. Admin ruxsat/oylik to‘lovni tasdiqlagach bot yana shu joyidan ishlaydi.\n\n` +
+            `Kelishish: ${OWNER_USERNAME}`
+        );
+      }
+      return;
+    }
+    return next();
+  });
+}
+
+function createBaseBot(token, config, adminIds, sessionDefault = {}) {
+  const bot = new Telegraf(token);
+  bot.use(session({ defaultSession: () => ({ mode: null, draft: {}, ...sessionDefault }) }));
+  attachManagedAccess(bot, config);
+  return bot;
+}
+
+function commonAdminRows(extraRows = []) {
+  return [
+    ...extraRows,
+    ['📊 Statistika', '📢 Broadcast'],
+    ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
+    ['📋 Obunalar', '➖ Obuna oʻchirish'],
+    ['🏠 Bosh menyu']
+  ];
+}
+
+async function handleCommonAdminText(ctx, config, utils, adminKeyboard) {
+  const text = ctx.message.text.trim();
+  if (ctx.session.mode === 'add_channel') return addSubscriptionForBot(ctx, config.key, text, 'channel', adminKeyboard);
+  if (ctx.session.mode === 'add_group') return addSubscriptionForBot(ctx, config.key, text, 'group', adminKeyboard);
+  if (ctx.session.mode === 'delete_subscription') {
+    const username = normalizeUsername(text);
+    const result = await Subscription.deleteOne({ bot_key: config.key, chat_username: username });
+    ctx.session.mode = null;
+    ctx.session.draft = {};
+    if (result.deletedCount) return ctx.reply(`✅ ${username} o‘chirildi.`, adminKeyboard());
+    return ctx.reply('❌ Bunday obuna topilmadi.', adminKeyboard());
+  }
+  return null;
+}
+
+async function addSubscriptionForBot(ctx, botKey, text, type, adminKeyboard) {
+  const username = normalizeUsername(text);
+  if (!username) return ctx.reply('❌ Username/chat ID notoʻgʻri. Qayta yuboring:');
+  try {
+    await Subscription.create({ bot_key: botKey, chat_username: username, type, added_by: ctx.from.id });
+    ctx.session.mode = null;
+    ctx.session.draft = {};
+    return ctx.reply(`✅ ${username} majburiy obunaga qo‘shildi.`, adminKeyboard());
+  } catch (error) {
+    if (error.code === 11000) return ctx.reply(`❌ ${username} allaqachon roʻyxatda bor.`);
+    console.error(error);
+    return ctx.reply('❌ Saqlashda xatolik. Qayta urinib koʻring.');
+  }
+}
+
+function registerCommonAdminHandlers(bot, config, utils, adminKeyboard) {
+  bot.hears('🏠 Bosh menyu', async (ctx) => ctx.reply('🏠 Admin menyu:', adminKeyboard()));
+  bot.hears('📢 Broadcast', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'broadcasting';
+    ctx.session.draft = {};
+    return ctx.reply('📢 Broadcast rejimi yoqildi. Matn, rasm, video, fayl yoki forward yuboring.\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('➕ Kanal qoʻshish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'add_channel';
+    ctx.session.draft = {};
+    return ctx.reply('➕ Majburiy obuna uchun kanal username yoki chat ID yuboring. Masalan: @kanal yoki -100...\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('➕ Guruh qoʻshish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'add_group';
+    ctx.session.draft = {};
+    return ctx.reply('➕ Majburiy obuna uchun guruh username yoki chat ID yuboring. Masalan: @guruh yoki -100...\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('📋 Obunalar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 });
+    if (!subs.length) return ctx.reply('📭 Hozircha majburiy obuna yoʻq.');
+    return ctx.reply(`📋 Majburiy obunalar:\n\n${subs.map((s, i) => `${i + 1}. ${s.type === 'channel' ? '📢' : '👥'} ${s.chat_username}`).join('\n')}`);
+  });
+  bot.hears('➖ Obuna oʻchirish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'delete_subscription';
+    ctx.session.draft = {};
+    return ctx.reply('➖ O‘chiriladigan username/chat ID yuboring.\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.action('check_subscription', async (ctx) => utils.handleSubscriptionCallback(ctx, adminKeyboard, '✅ Obuna tasdiqlandi!'));
+  bot.action('noop', async (ctx) => ctx.answerCbQuery('Private chat uchun admin bergan ko‘rsatma bo‘yicha obuna bo‘ling.'));
+}
+
+// =========================
+// VIP / MAXFIY KANALGA VAQTLIK LINK BOT
+// =========================
+function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds);
+  const utils = createSharedUtils(bot, config, adminIds);
+
+  function adminKeyboard() {
+    return Markup.keyboard(commonAdminRows([
+      ['⚙️ VIP sozlamalar', '📋 VIP soʻrovlar'],
+      ['👥 VIP aʼzolar', '💳 Toʻlov matni']
+    ])).resize().oneTime(false);
+  }
+
+  async function settingsText() {
+    const st = await getBotSettings(config.key);
+    return `⚙️ VIP SOZLAMALAR\n\n` +
+      `🔐 Maxfiy kanal/guruh: ${st.vip_chat || 'kiritilmagan'}\n` +
+      `💰 Narx matni: ${st.price_text || 'kiritilmagan'}\n` +
+      `⏳ Dostup muddati: ${Number(st.access_days || 30)} kun\n` +
+      `🔗 Link yashash muddati: ${Number(st.link_minutes || 30)} daqiqa\n` +
+      `👨‍💻 To‘lov/admin username: ${st.admin_contact || OWNER_USERNAME}\n\n` +
+      `Sozlash uchun tugmalardan foydalaning.`;
+  }
+
+  async function expireVipMembers() {
+    const expired = await VipMember.find({ bot_key: config.key, is_active: true, access_until: { $lte: new Date() } }).limit(50);
+    for (const member of expired) {
+      try {
+        if (member.channel_chat) {
+          await bot.telegram.banChatMember(member.channel_chat, member.user_id);
+          await bot.telegram.unbanChatMember(member.channel_chat, member.user_id, { only_if_banned: true }).catch(() => null);
+        }
+      } catch (error) {
+        console.error(`${config.title} VIP chiqarish xatosi:`, error.message);
+      }
+      member.is_active = false;
+      member.removed_at = new Date();
+      await member.save();
+      try { await bot.telegram.sendMessage(member.user_id, '⏳ VIP obunangiz muddati tugadi. Uzaytirish uchun admin bilan bog‘laning.'); } catch (_) {}
+    }
+  }
+  const timer = setInterval(() => expireVipMembers().catch((e) => console.error('VIP expire xatosi:', e.message)), 10 * 60 * 1000);
+  timer.unref?.();
+
+  bot.start(async (ctx) => {
+    await utils.saveUser(ctx, true);
+    if (utils.isAdmin(ctx.from.id)) return ctx.reply(`💎 ${config.title} admin paneli`, adminKeyboard());
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
+    const st = await getBotSettings(config.key);
+    return ctx.reply(
+      `💎 VIP obuna botiga xush kelibsiz!\n\n${st.price_text || 'VIP kanalga kirish uchun so‘rov yuboring. Admin tasdiqlagach vaqtlik maxfiy link beriladi.'}`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('💎 VIPga kirish uchun soʻrov', 'vip:req')],
+        [Markup.button.url('☎️ Admin bilan toʻlovni kelishish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@', '')}`)]
+      ])
+    );
+  });
+
+  bot.hears('⚙️ VIP sozlamalar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    return ctx.reply(await settingsText(), Markup.inlineKeyboard([
+      [Markup.button.callback('🔐 Maxfiy kanal/guruh', 'vipset:chat')],
+      [Markup.button.callback('💰 Narx/toʻlov matni', 'vipset:pay')],
+      [Markup.button.callback('⏳ Dostup kunlari', 'vipset:days'), Markup.button.callback('🔗 Link daqiqasi', 'vipset:link')],
+      [Markup.button.callback('👨‍💻 Admin username', 'vipset:admin')]
+    ]));
+  });
+  bot.hears('💳 Toʻlov matni', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'vip_set_pay';
+    return ctx.reply('💳 Foydalanuvchiga ko‘rinadigan to‘lov/narx matnini yuboring.\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('📋 VIP soʻrovlar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const list = await VipRequest.find({ bot_key: config.key }).sort({ createdAt: -1 }).limit(15);
+    if (!list.length) return ctx.reply('📭 VIP so‘rovlar yo‘q.');
+    for (const r of list) {
+      await ctx.reply(`💎 VIP SOʻROV\n\n👤 ${r.first_name || ''} ${r.username ? '@' + r.username : ''}\n🆔 ${r.user_id}\n🔐 Shifr: ${r.secret_code}\n📌 Holat: ${r.status}\n🕒 ${formatDate(r.createdAt)}`,
+        Markup.inlineKeyboard([[Markup.button.callback('✅ Link berish', `vip:approve:${String(r._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(r._id)}`)]]));
+    }
+  });
+  bot.hears('👥 VIP aʼzolar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const list = await VipMember.find({ bot_key: config.key, is_active: true }).sort({ access_until: 1 }).limit(30);
+    if (!list.length) return ctx.reply('📭 Aktiv VIP aʼzolar yo‘q.');
+    return ctx.reply(`👥 VIP AʼZOLAR\n\n${list.map((m, i) => `${i + 1}. ${m.first_name || ''} ${m.username ? '@' + m.username : ''} — ${formatDate(m.access_until)}`).join('\n')}`);
+  });
+  bot.hears('📊 Statistika', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const [users, active, blocked, reqs, pending, members, subs] = await Promise.all([
+      User.countDocuments({ bot_key: config.key }), User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }), User.countDocuments({ bot_key: config.key, is_blocked: true }),
+      VipRequest.countDocuments({ bot_key: config.key }), VipRequest.countDocuments({ bot_key: config.key, status: 'pending' }), VipMember.countDocuments({ bot_key: config.key, is_active: true }), Subscription.countDocuments({ bot_key: config.key })
+    ]);
+    return ctx.reply(`📊 VIP BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n📋 So‘rovlar: ${reqs}\n⏳ Kutilayotgan: ${pending}\n💎 Aktiv VIP: ${members}\n🔒 Majburiy obuna: ${subs}`);
+  });
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
+
+  bot.action(/^vipset:(chat|pay|days|link|admin)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const map = { chat: 'vip_set_chat', pay: 'vip_set_pay', days: 'vip_set_days', link: 'vip_set_link', admin: 'vip_set_admin' };
+    ctx.session.mode = map[ctx.match[1]];
+    const prompts = {
+      chat: '🔐 Maxfiy kanal/guruh username yoki chat ID yuboring. Masalan: @vipkanal yoki -1001234567890. Bot o‘sha kanal/guruhda invite link yaratishga admin bo‘lishi shart.',
+      pay: '💳 Narx/to‘lov matnini yuboring.',
+      days: '⏳ Dostup necha kun bo‘lsin? Masalan: 30',
+      link: '🔗 Invite link necha daqiqa ishlasin? Masalan: 30',
+      admin: '👨‍💻 To‘lov uchun admin username yuboring. Masalan: @Qoryogdiyev'
+    };
+    return ctx.reply(`${prompts[ctx.match[1]]}\n\n❌ Bekor qilish: /cancel`);
+  });
+
+  bot.action('vip:req', async (ctx) => {
+    await ctx.answerCbQuery();
+    await utils.saveUser(ctx);
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
+    const st = await getBotSettings(config.key);
+    const secret = makeSecretCode('VIP');
+    const req = await VipRequest.create({ bot_key: config.key, user_id: ctx.from.id, username: ctx.from.username || null, first_name: ctx.from.first_name || null, secret_code: secret });
+    const adminText = `💎 YANGI VIP SOʻROV\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@' + ctx.from.username : ''}\n🆔 User ID: ${ctx.from.id}\n🔐 Maxfiy shifr: ${secret}\n\nFoydalanuvchi to‘lov qilganda shu shifrni yuboradi.`;
+    for (const id of adminIds) {
+      try { await bot.telegram.sendMessage(id, adminText, Markup.inlineKeyboard([[Markup.button.callback('✅ Link berish', `vip:approve:${String(req._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(req._id)}`)]])); } catch (_) {}
+    }
+    return ctx.reply(
+      `✅ So‘rov yuborildi!\n\n🔐 Sizning maxfiy shifringiz: ${secret}\n\nTo‘lov/admin bilan kelishganda aynan shu shifrni yuboring — admin bu so‘rov sizniki ekanini biladi.`,
+      Markup.inlineKeyboard([[Markup.button.url('💳 Admin bilan toʻlov qilish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@', '')}`)]])
+    );
+  });
+
+  bot.action(/^vip:approve:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const req = await VipRequest.findOne({ _id: ctx.match[1], bot_key: config.key });
+    if (!req) return ctx.reply('❌ So‘rov topilmadi.');
+    const st = await getBotSettings(config.key);
+    const chat = st.vip_chat;
+    if (!chat) return ctx.reply('❌ Avval “⚙️ VIP sozlamalar”dan maxfiy kanal/guruhni kiriting.');
+    try {
+      const expireDate = Math.floor(nowPlusMinutes(Number(st.link_minutes || 30)).getTime() / 1000);
+      const invite = await bot.telegram.createChatInviteLink(chat, { expire_date: expireDate, member_limit: 1, creates_join_request: false, name: `VIP ${req.user_id} ${req.secret_code}` });
+      const accessUntil = nowPlusDays(Number(st.access_days || 30));
+      req.status = 'approved'; req.approved_by = ctx.from.id; req.invite_link = invite.invite_link; req.expires_at = new Date(expireDate * 1000); req.access_until = accessUntil; await req.save();
+      await VipMember.updateOne({ bot_key: config.key, user_id: req.user_id, channel_chat: chat }, { $set: { username: req.username, first_name: req.first_name, access_until: accessUntil, is_active: true, removed_at: null, last_request_id: req._id } }, { upsert: true });
+      await bot.telegram.sendMessage(req.user_id, `✅ VIP ruxsat tasdiqlandi!\n\n🔗 Vaqtlik maxfiy link: ${invite.invite_link}\n⏳ Link tugashi: ${formatDate(req.expires_at)}\n💎 Dostup muddati: ${formatDate(accessUntil)}`);
+      return ctx.editMessageText(`✅ Link yuborildi.\n\n👤 ${req.first_name || ''} ${req.username ? '@' + req.username : ''}\n🔐 ${req.secret_code}\n⏳ ${formatDate(accessUntil)}`);
+    } catch (error) {
+      console.error('VIP approve xatosi:', error);
+      return ctx.reply(`❌ Link yaratishda xatolik: ${error.message}\n\nBot maxfiy kanal/guruhda admin bo‘lishi va invite link yaratish huquqiga ega bo‘lishi kerak.`);
+    }
+  });
+  bot.action(/^vip:reject:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const req = await VipRequest.findOne({ _id: ctx.match[1], bot_key: config.key });
+    if (!req) return ctx.reply('❌ So‘rov topilmadi.');
+    req.status = 'rejected'; await req.save();
+    try { await bot.telegram.sendMessage(req.user_id, '❌ VIP so‘rovingiz rad etildi. Admin bilan bog‘laning.'); } catch (_) {}
+    return ctx.editMessageText(`❌ So‘rov rad etildi: ${req.secret_code}`);
+  });
+
+  bot.command('cancel', async (ctx) => { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : undefined); });
+  bot.on('text', async (ctx) => {
+    await utils.saveUser(ctx);
+    const text = ctx.message.text.trim();
+    if (text === '/cancel') { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : undefined); }
+    if (utils.isAdmin(ctx.from.id)) {
+      const common = await handleCommonAdminText(ctx, config, utils, adminKeyboard); if (common) return common;
+      if (ctx.session.mode === 'broadcasting') { const r = await utils.broadcastMessage(ctx, adminKeyboard); ctx.session.mode = null; return r; }
+      if (ctx.session.mode === 'vip_set_chat') { const v = normalizeUsername(text); if (!v) return ctx.reply('❌ Username/chat ID noto‘g‘ri. Qayta yuboring.'); await updateBotSettings(config.key, { vip_chat: v }); ctx.session.mode = null; return ctx.reply('✅ Maxfiy kanal/guruh saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_pay') { await updateBotSettings(config.key, { price_text: text }); ctx.session.mode = null; return ctx.reply('✅ To‘lov/narx matni saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_days') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Kun noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { access_days: n }); ctx.session.mode = null; return ctx.reply('✅ Dostup muddati saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_link') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Daqiqa noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { link_minutes: n }); ctx.session.mode = null; return ctx.reply('✅ Link muddati saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_admin') { await updateBotSettings(config.key, { admin_contact: text.startsWith('@') ? text : `@${text}` }); ctx.session.mode = null; return ctx.reply('✅ Admin username saqlandi.', adminKeyboard()); }
+    }
+    const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok && !utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx);
+    return ctx.reply('💎 VIPga kirish uchun /start bosing va “VIPga kirish” tugmasini tanlang.');
+  });
+  bot.on('message', async (ctx) => {
+    await utils.saveUser(ctx);
+    if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'broadcasting') { const r = await utils.broadcastMessage(ctx, adminKeyboard); ctx.session.mode = null; return r; }
+  });
+  bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
+  return { key: config.key, title: config.title, bot, config };
+}
+
+// =========================
+// KONKURS / GIVEAWAY BOT
+// =========================
+function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds);
+  const utils = createSharedUtils(bot, config, adminIds);
+  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['🎁 Konkurs yaratish', '🎲 Gʻolib tanlash'], ['📋 Aktiv konkurs', '👥 Qatnashchilar']])).resize().oneTime(false); }
+  async function activeGiveaway() { return Giveaway.findOne({ bot_key: config.key, status: 'active' }).sort({ createdAt: -1 }); }
+  async function showActive(ctx) {
+    const g = await activeGiveaway();
+    if (!g) return ctx.reply('📭 Hozir aktiv konkurs yo‘q.');
+    const count = await GiveawayParticipant.countDocuments({ bot_key: config.key, giveaway_id: g._id });
+    return ctx.reply(`🎁 ${g.title}\n\n${g.description || ''}\n\n👥 Qatnashchilar: ${count}\n🏆 G‘oliblar soni: ${g.winners_count}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Qatnashish', `gw:join:${String(g._id)}`)]]));
+  }
+  bot.start(async (ctx) => { await utils.saveUser(ctx, true); if (utils.isAdmin(ctx.from.id)) return ctx.reply('🎁 Konkurs bot admin paneli', adminKeyboard()); const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok) return utils.sendSubscriptionWarning(ctx); return showActive(ctx); });
+  bot.hears('🎁 Konkurs yaratish', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'gw_create'; return ctx.reply('🎁 Konkurs yaratish.\n\nFormat:\nNomi | g‘oliblar soni | tavsif\n\nMisol:\niPhone konkursi | 3 | Kanalga obuna bo‘lib qatnashing\n\n❌ Bekor qilish: /cancel'); });
+  bot.hears('📋 Aktiv konkurs', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; return showActive(ctx); });
+  bot.hears('👥 Qatnashchilar', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const list = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }).sort({ createdAt: -1 }).limit(50); return ctx.reply(`👥 So‘nggi qatnashchilar (${list.length}):\n\n${list.map((p,i)=>`${i+1}. ${p.first_name || ''} ${p.username ? '@'+p.username : ''} — ${p.user_id}`).join('\n') || '—'}`); });
+  bot.hears('🎲 Gʻolib tanlash', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const participants = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }); if (participants.length < 1) return ctx.reply('Qatnashchi yo‘q.'); const shuffled = participants.sort(() => Math.random() - 0.5); const winners = shuffled.slice(0, Math.min(g.winners_count, participants.length)); g.status = 'closed'; g.drawn_by = ctx.from.id; g.drawn_at = new Date(); g.winner_user_ids = winners.map(w=>w.user_id); await g.save(); const lines = winners.map((w,i)=>`${i+1}. ${w.first_name || ''} ${w.username ? '@'+w.username : ''} — ${w.user_id}`).join('\n'); return ctx.reply(`🏆 GʻOLIBLAR\n\n🎁 ${g.title}\n\n${lines}`); });
+  bot.hears('📊 Statistika', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const [users, active, blocked, giveaways, participants, subs] = await Promise.all([User.countDocuments({bot_key:config.key}), User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}), User.countDocuments({bot_key:config.key,is_blocked:true}), Giveaway.countDocuments({bot_key:config.key}), GiveawayParticipant.countDocuments({bot_key:config.key}), Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 KONKURS BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🎁 Konkurslar: ${giveaways}\n👥 Qatnashuvlar: ${participants}\n🔒 Majburiy obuna: ${subs}`); });
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
+  bot.action(/^gw:join:([a-f0-9]{24})$/, async (ctx) => { await ctx.answerCbQuery(); await utils.saveUser(ctx); const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok) return utils.sendSubscriptionWarning(ctx); const g = await Giveaway.findOne({_id:ctx.match[1],bot_key:config.key,status:'active'}); if (!g) return ctx.reply('❌ Konkurs tugagan yoki topilmadi.'); try { await GiveawayParticipant.create({bot_key:config.key,giveaway_id:g._id,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null}); return ctx.reply('✅ Siz konkursda qatnashyapsiz! Omad 🍀'); } catch(e) { if (e.code===11000) return ctx.reply('ℹ️ Siz allaqachon qatnashyapsiz.'); throw e; } });
+  bot.command('cancel', async (ctx)=>{ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
+  bot.on('text', async (ctx) => { await utils.saveUser(ctx); const text = ctx.message.text.trim(); if (text === '/cancel') {ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if (utils.isAdmin(ctx.from.id)) { const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common) return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='gw_create'){ const [titleRaw,wRaw,...descParts]=text.split('|').map(x=>x.trim()); const winners=Number(wRaw||1); if(!titleRaw||!Number.isFinite(winners)||winners<1) return ctx.reply('❌ Format noto‘g‘ri. Misol: iPhone konkursi | 3 | tavsif'); await Giveaway.updateMany({bot_key:config.key,status:'active'},{$set:{status:'closed'}}); await Giveaway.create({bot_key:config.key,title:titleRaw,winners_count:winners,description:descParts.join(' | '),created_by:ctx.from.id}); ctx.session.mode=null; return ctx.reply('✅ Konkurs yaratildi va aktiv qilindi.', adminKeyboard()); } } const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok&&!utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx); return showActive(ctx); });
+  bot.on('message', async (ctx)=>{await utils.saveUser(ctx); if(utils.isAdmin(ctx.from.id)&&ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;}});
+  bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
+  return { key: config.key, title: config.title, bot, config };
+}
+
+// =========================
+// KANAL EGALARI UCHUN CUSTOM INPUT + AUTPOST BOT
+// =========================
+function createChannelFormBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds, { formIndex: 0, formAnswers: [] });
+  const utils = createSharedUtils(bot, config, adminIds);
+  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['📝 Forma sozlash', '👁 Forma koʻrish'], ['➕ Input qoʻshish', '✏️ Input tahrirlash'], ['🔀 Input tartibi', '🗑 Input oʻchirish'], ['📨 Soʻrovlar', '💳 Toʻlov/admin matni'], ['📣 Autopost qoʻshish', '📋 Autopostlar'], ['🎯 Autopost kanal', '🗑 Autopost oʻchirish']])).resize().oneTime(false); }
+  async function askField(ctx) { const fields = await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); const i=ctx.session.formIndex||0; if(i>=fields.length) return finishForm(ctx, fields); const f=fields[i]; const required = f.required ? 'majburiy' : 'ixtiyoriy'; return ctx.reply(`📝 ${i+1}/${fields.length}. ${f.label}\n${f.placeholder || ''}\n\nTur: ${f.type} | ${required}${f.type==='location'?'\n📍 Telegram lokatsiya yuboring.':''}${f.type==='photo'?'\n🖼 Rasm yuboring.':''}${f.type==='document'?'\n📄 Fayl yuboring.':''}`); }
+  async function finishForm(ctx, fields) { const st=await getBotSettings(config.key); const secret=makeSecretCode('REQ'); const answers = ctx.session.formAnswers || []; const sub = await FormSubmission.create({bot_key:config.key,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null,answers,secret_code:secret,secret_hash:secretHash(secret),status:'sent_to_admin'}); const lines=answers.map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n'); const msg=`📨 YANGI ARIZA\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@'+ctx.from.username : ''}\n🆔 ${ctx.from.id}\n🔐 Shifr: ${secret}\n\n${lines}\n\nMijoz to‘lovda aynan shu shifrni yuborsa, ariza shu ekanini isbotlaydi.`; for(const id of adminIds){ try{ await bot.telegram.sendMessage(id,msg,Markup.inlineKeyboard([[Markup.button.callback('✅ Tasdiqlash',`form:ok:${String(sub._id)}`),Markup.button.callback('❌ Rad etish',`form:no:${String(sub._id)}`)]])); }catch(_){} } ctx.session.mode=null; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return ctx.reply(`✅ Arizangiz adminga yuborildi!\n\n🔐 Maxfiy shifr: ${secret}\n\nTo‘lov/admin bilan yozishganda shu shifrni yuboring.`, Markup.inlineKeyboard([[Markup.button.url('💳 Adminga toʻlov/yuborish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@','')}`)]])); }
+  async function autoPostTick() { const due = await AutoPost.find({bot_key:config.key,is_active:true,next_send_at:{$lte:new Date()}}).limit(10); for(const p of due){ try{ await sendStoredMessageToChat(bot.telegram,p.target_chat,p); p.last_sent_at=new Date(); p.sent_count+=1; p.next_send_at=nowPlusMinutes(p.interval_minutes); await p.save(); } catch(e){ console.error(`${config.title} autopost xatosi:`, e.message); p.next_send_at=nowPlusMinutes(Math.max(5, p.interval_minutes)); await p.save(); } } }
+  const timer=setInterval(()=>autoPostTick().catch(e=>console.error('autopost tick:',e.message)),60*1000); timer.unref?.();
+  bot.start(async(ctx)=>{ await utils.saveUser(ctx,true); if(utils.isAdmin(ctx.from.id)) return ctx.reply('📢 Kanal ariza/autopost admin paneli',adminKeyboard()); const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const st=await getBotSettings(config.key); return ctx.reply(`${st.welcome_text || 'Ariza yuborish uchun tugmani bosing.'}`, Markup.inlineKeyboard([[Markup.button.callback('📝 Ariza yuborish','form:start')],[Markup.button.url('☎️ Admin bilan bogʻlanish',`https://t.me/${String(st.admin_contact||OWNER_USERNAME).replace('@','')}`)]])); });
+  bot.hears('📝 Forma sozlash', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; return ctx.reply('📝 Forma sozlash uchun input qo‘shing/tahrirlang.\n\nInput formati:\nLabel | type | required | order | placeholder\n\nType: text, number, phone, url, location, photo, document\nMisol:\nKanal nomi | text | ha | 1 | Kanalingiz nomini yozing', adminKeyboard()); });
+  bot.hears('👁 Forma koʻrish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const fields=await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); if(!fields.length) return ctx.reply('📭 Forma inputlari yo‘q.'); return ctx.reply(`👁 FORMADAGI INPUTLAR\n\n${fields.map(f=>`${f.order}. ${f.label}\n   key: ${f.key} | type: ${f.type} | ${f.required?'majburiy':'ixtiyoriy'}`).join('\n\n')}`); });
+  bot.hears('➕ Input qoʻshish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_add'; return ctx.reply('➕ Input qo‘shish.\n\nFormat:\nLabel | type | required | order | placeholder\n\nMisol:\nObunachilar soni | number | ha | 2 | Masalan: 15000\n\n❌ Bekor qilish: /cancel'); });
+  bot.hears('✏️ Input tahrirlash', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_edit'; return ctx.reply('✏️ Input tahrirlash.\n\nFormat:\nkey | yangi label | type | required | order | placeholder\n\nKeyni “👁 Forma ko‘rish”dan olasiz.\nMisol:\nobunachilar_soni | Obunachilar soni | number | ha | 2 | Masalan: 15000'); });
+  bot.hears('🔀 Input tartibi', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_order'; return ctx.reply('🔀 Tartib o‘zgartirish.\n\nFormat:\nkey | order\n\nMisol:\nlink | 3'); });
+  bot.hears('🗑 Input oʻchirish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_delete'; return ctx.reply('🗑 O‘chiriladigan input key yoki label yuboring.'); });
+  bot.hears('💳 Toʻlov/admin matni', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='set_form_settings'; return ctx.reply('💳 Sozlamalarni yuboring. Har qatorda key: value\n\nadmin: @username\nwelcome: Ariza yuborish uchun tugmani bosing\npayment: To‘lov uchun admin bilan bog‘laning'); });
+  bot.hears('📨 Soʻrovlar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await FormSubmission.find({bot_key:config.key}).sort({createdAt:-1}).limit(15); if(!list.length) return ctx.reply('📭 So‘rovlar yo‘q.'); for(const sub of list){ await ctx.reply(`📨 ARIZA\n\n👤 ${sub.first_name||''} ${sub.username?'@'+sub.username:''}\n🆔 ${sub.user_id}\n🔐 ${sub.secret_code}\n📌 ${sub.status}\n🕒 ${formatDate(sub.createdAt)}\n\n${sub.answers.map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n')}`); } });
+  bot.hears('🎯 Autopost kanal', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='set_autopost_target'; return ctx.reply('🎯 Autopost yuboriladigan kanal/guruh username yoki chat ID yuboring. Bot u yerda admin bo‘lishi kerak.'); });
+  bot.hears('📣 Autopost qoʻshish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='autopost_wait_message'; return ctx.reply('📣 Autopost uchun yuboriladigan postni yuboring yoki forward qiling. Keyin nom va interval so‘raladi.'); });
+  bot.hears('📋 Autopostlar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await AutoPost.find({bot_key:config.key,is_active:true}).sort({createdAt:-1}).limit(20); if(!list.length) return ctx.reply('📭 Autopost yo‘q.'); return ctx.reply(`📋 AUTOPOSTLAR\n\n${list.map((p,i)=>`${i+1}. ${p.title}\n   target: ${p.target_chat} | interval: ${p.interval_minutes} daq | yuborildi: ${p.sent_count} | keyingi: ${formatDate(p.next_send_at)}`).join('\n\n')}`); });
+  bot.hears('🗑 Autopost oʻchirish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='autopost_delete'; return ctx.reply('🗑 O‘chiriladigan autopost nomini yuboring.'); });
+  bot.hears('📊 Statistika', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const [users,active,blocked,fields,subs,forms,autos]=await Promise.all([User.countDocuments({bot_key:config.key}),User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}),User.countDocuments({bot_key:config.key,is_blocked:true}),FormField.countDocuments({bot_key:config.key,is_active:true}),Subscription.countDocuments({bot_key:config.key}),FormSubmission.countDocuments({bot_key:config.key}),AutoPost.countDocuments({bot_key:config.key,is_active:true})]); return ctx.reply(`📊 KANAL BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🧩 Inputlar: ${fields}\n📨 Arizalar: ${forms}\n📣 Autopostlar: ${autos}\n🔒 Majburiy obuna: ${subs}`); });
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
+  bot.action('form:start', async(ctx)=>{ await ctx.answerCbQuery(); await utils.saveUser(ctx); const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const fields=await FormField.countDocuments({bot_key:config.key,is_active:true}); if(!fields) return ctx.reply('📭 Forma hali sozlanmagan. Admin bilan bog‘laning.'); ctx.session.mode='form_answer'; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return askField(ctx); });
+  bot.action(/^form:(ok|no):([a-f0-9]{24})$/, async(ctx)=>{ await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id)) return; const sub=await FormSubmission.findOne({_id:ctx.match[2],bot_key:config.key}); if(!sub) return ctx.reply('Topilmadi.'); sub.status=ctx.match[1]==='ok'?'approved':'rejected'; await sub.save(); try{ await bot.telegram.sendMessage(sub.user_id, ctx.match[1]==='ok'?'✅ Arizangiz tasdiqlandi. Admin bilan aloqada bo‘ling.':'❌ Arizangiz rad etildi.'); }catch(_){} return ctx.editMessageText(`${ctx.match[1]==='ok'?'✅':'❌'} Ariza holati yangilandi: ${sub.secret_code}`); });
+  bot.command('cancel',async(ctx)=>{ctx.session.mode=null;ctx.session.draft={};ctx.session.formAnswers=[];ctx.session.formIndex=0;return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
+  async function handleFormAnswer(ctx) { const fields=await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); const i=ctx.session.formIndex||0; const f=fields[i]; if(!f) return finishForm(ctx, fields); let value=null; if(f.type==='location'){ if(!ctx.message.location) return ctx.reply('📍 Iltimos, Telegram lokatsiya yuboring.'); value={latitude:ctx.message.location.latitude,longitude:ctx.message.location.longitude}; } else if(f.type==='photo'){ if(!ctx.message.photo?.length) return ctx.reply('🖼 Iltimos, rasm yuboring.'); const ph=getLargestPhoto(ctx.message); value={file_id:ph.file_id,file_unique_id:ph.file_unique_id}; } else if(f.type==='document'){ if(!ctx.message.document) return ctx.reply('📄 Iltimos, fayl/document yuboring.'); value={file_id:ctx.message.document.file_id,file_name:ctx.message.document.file_name}; } else { const t=ctx.message.text?.trim(); if(f.required && !t) return ctx.reply('❌ Bu maydon majburiy. Javob yuboring.'); if(f.type==='number' && t && !Number.isFinite(Number(t.replace(/\s/g,'')))) return ctx.reply('❌ Raqam kiriting.'); if(f.type==='url' && t && !/^https?:\/\//i.test(t)) return ctx.reply('❌ Link http:// yoki https:// bilan boshlansin.'); value=t || ''; } ctx.session.formAnswers.push({key:f.key,label:f.label,type:f.type,value}); ctx.session.formIndex=i+1; return askField(ctx); }
+  bot.on(['photo','document','video','animation','audio','voice','sticker','location'], async(ctx)=>{ await utils.saveUser(ctx); if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id) && ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(utils.isAdmin(ctx.from.id)&&ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } });
+  bot.on('text', async(ctx)=>{ await utils.saveUser(ctx); const text=ctx.message.text.trim(); if(text==='/cancel'){ctx.session.mode=null;ctx.session.draft={};ctx.session.formAnswers=[];ctx.session.formIndex=0;return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id)){ const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common) return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Text-post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } if(ctx.session.mode==='field_add'){ const f=parseFieldLine(text); if(!f.label) return ctx.reply('❌ Label kiritilmadi.'); if(!['text','number','phone','url','location','photo','document'].includes(f.type)) return ctx.reply('❌ Type noto‘g‘ri.'); if(!f.order) f.order=(await FormField.countDocuments({bot_key:config.key}))+1; await FormField.create({bot_key:config.key,...f}); ctx.session.mode=null; return ctx.reply('✅ Input qo‘shildi.',adminKeyboard()); } if(ctx.session.mode==='field_edit'){ const parts=text.split('|').map(x=>x.trim()); const key=parts[0]; const f=parseFieldLine(parts.slice(1).join('|')); const doc=await FormField.findOne({bot_key:config.key,key,is_active:true}); if(!doc) return ctx.reply('❌ Input topilmadi.'); Object.assign(doc,{label:f.label||doc.label,type:f.type||doc.type,required:f.required,order:f.order||doc.order,placeholder:f.placeholder}); await doc.save(); ctx.session.mode=null; return ctx.reply('✅ Input tahrirlandi.',adminKeyboard()); } if(ctx.session.mode==='field_order'){ const [key,ordRaw]=text.split('|').map(x=>x.trim()); const ord=Number(ordRaw); if(!key||!Number.isFinite(ord)) return ctx.reply('❌ Format: key | order'); await FormField.updateOne({bot_key:config.key,key,is_active:true},{$set:{order:ord}}); ctx.session.mode=null; return ctx.reply('✅ Tartib yangilandi.',adminKeyboard()); } if(ctx.session.mode==='field_delete'){ const q=normalizeTitle(text); const res=await FormField.updateOne({bot_key:config.key,is_active:true,$or:[{key:text},{label:new RegExp(escapeRegex(text),'i')},{label:new RegExp(escapeRegex(q),'i')}]},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Input o‘chirildi.':'❌ Input topilmadi.',adminKeyboard()); } if(ctx.session.mode==='set_form_settings'){ const kv=parseKeyValueLines(text); const patch={}; if(kv.admin) patch.admin_contact=kv.admin.startsWith('@')?kv.admin:`@${kv.admin}`; if(kv.welcome) patch.welcome_text=kv.welcome; if(kv.payment) patch.payment_text=kv.payment; await updateBotSettings(config.key,patch); ctx.session.mode=null; return ctx.reply('✅ Sozlamalar saqlandi.',adminKeyboard()); } if(ctx.session.mode==='set_autopost_target'){ const v=normalizeUsername(text); if(!v) return ctx.reply('❌ Chat noto‘g‘ri. @kanal yoki -100... yuboring.'); await updateBotSettings(config.key,{autopost_target:v}); ctx.session.mode=null; return ctx.reply('✅ Autopost target saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_wait_meta'){ const [title,intervalRaw,targetRaw]=text.split('|').map(x=>x.trim()); const interval=Number(intervalRaw); const st=await getBotSettings(config.key); const target=normalizeUsername(targetRaw||st.autopost_target); if(!title||!Number.isFinite(interval)||interval<1||!target) return ctx.reply('❌ Format noto‘g‘ri yoki target yo‘q. Misol: Kunlik post | 1440 | @kanal'); await AutoPost.create({...ctx.session.draft.stored,bot_key:config.key,title,target_chat:target,interval_minutes:interval,next_send_at:nowPlusMinutes(interval),added_by:ctx.from.id,is_active:true}); ctx.session.mode=null; ctx.session.draft={}; return ctx.reply('✅ Autopost saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_delete'){ const res=await AutoPost.updateOne({bot_key:config.key,is_active:true,title:new RegExp(escapeRegex(text),'i')},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Autopost o‘chirildi.':'❌ Topilmadi.',adminKeyboard()); } } const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok&&!utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx); return ctx.reply('📝 Ariza yuborish uchun /start bosing.'); });
+  bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
+  return { key: config.key, title: config.title, bot, config };
+}
+
+// =========================
+// GURUH TOZALOVCHI / ANTISPAM / FAQ BOT
+// =========================
+function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds);
+  const utils = createSharedUtils(bot, config, adminIds);
+  function adminKeyboard(){return Markup.keyboard(commonAdminRows([['⚙️ Guruh sozlamalar','📜 Qoidalar'],['➕ FAQ qoʻshish','📋 FAQlar'],['🗑 FAQ oʻchirish','👋 Salomlashuv'],['🚫 Taqiqlangan soʻzlar','🛡 Anti-link']])).resize().oneTime(false);}
+  bot.start(async(ctx)=>{await utils.saveUser(ctx,true); if(utils.isAdmin(ctx.from.id)) return ctx.reply('🛡 Guruh bot admin paneli',adminKeyboard()); return ctx.reply('🛡 Bu bot guruhni tozalash, anti-spam, FAQ va salomlashuv uchun. Botni guruhga admin qilib qo‘shing.');});
+  async function settingsLine(){const st=await getBotSettings(config.key); return `⚙️ GURUH SOZLAMALAR\n\n🧹 Kirdi/chiqdi tozalash: ${st.clean_join!==false?'yoqilgan':'o‘chirilgan'}\n🛡 Anti-link: ${st.anti_link!==false?'yoqilgan':'o‘chirilgan'}\n👋 Salomlashuv: ${st.welcome_text?'bor':'yo‘q'}\n📜 Qoidalar: ${st.rules_text?'bor':'yo‘q'}\n🚫 Taqiqlangan so‘zlar: ${(st.badwords||[]).length} ta`;}
+  bot.hears('⚙️ Guruh sozlamalar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; return ctx.reply(await settingsLine(),Markup.inlineKeyboard([[Markup.button.callback('🧹 Kirdi/chiqdi ON/OFF','grp:toggle:clean_join'),Markup.button.callback('🛡 Anti-link ON/OFF','grp:toggle:anti_link')]]));});
+  bot.hears('👋 Salomlashuv',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_welcome'; return ctx.reply('👋 Yangi a’zoga salomlashuv matnini yuboring. {name} ishlatishingiz mumkin.');});
+  bot.hears('📜 Qoidalar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_rules'; return ctx.reply('📜 Guruh qoidalari matnini yuboring. Foydalanuvchi /rules yozsa chiqadi.');});
+  bot.hears('🛡 Anti-link',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const st=await getBotSettings(config.key); await updateBotSettings(config.key,{anti_link:st.anti_link===false}); return ctx.reply('✅ Anti-link holati o‘zgartirildi.',adminKeyboard());});
+  bot.hears('🚫 Taqiqlangan soʻzlar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_badwords'; return ctx.reply('🚫 Taqiqlangan so‘zlarni vergul bilan yuboring.\nMisol: spam, reklama, haqorat');});
+  bot.hears('➕ FAQ qoʻshish',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='faq_add'; return ctx.reply('➕ FAQ qo‘shish.\n\nFormat:\nkalit so‘z | javob\n\nMisol:\nnarx | Narxlar admin bilan kelishiladi.');});
+  bot.hears('📋 FAQlar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const list=await GroupFaq.find({bot_key:config.key,is_active:true}).sort({createdAt:-1}).limit(50); if(!list.length)return ctx.reply('📭 FAQ yo‘q.'); return ctx.reply(`📋 FAQlar\n\n${list.map((f,i)=>`${i+1}. ${f.keyword}\n${f.answer}`).join('\n\n')}`);});
+  bot.hears('🗑 FAQ oʻchirish',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='faq_delete'; return ctx.reply('🗑 O‘chiriladigan FAQ kalit so‘zini yuboring.');});
+  bot.hears('📊 Statistika',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const [users,active,blocked,faqs,subs]=await Promise.all([User.countDocuments({bot_key:config.key}),User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}),User.countDocuments({bot_key:config.key,is_blocked:true}),GroupFaq.countDocuments({bot_key:config.key,is_active:true}),Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 GURUH BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n❓ FAQ: ${faqs}\n🔒 Majburiy obuna: ${subs}`);});
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
+  bot.action(/^grp:toggle:(clean_join|anti_link)$/,async(ctx)=>{await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id))return; const st=await getBotSettings(config.key); const k=ctx.match[1]; await updateBotSettings(config.key,{[k]:st[k]===false}); return ctx.editMessageText(await settingsLine());});
+  bot.command('rules',async(ctx)=>{const st=await getBotSettings(config.key); return ctx.reply(st.rules_text||'📜 Qoidalar hali kiritilmagan.');});
+  bot.command('cancel',async(ctx)=>{ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
+  bot.on('new_chat_members',async(ctx)=>{await utils.saveUser(ctx); const st=await getBotSettings(config.key); if(st.clean_join!==false) await safeDelete(ctx); if(st.welcome_text){ for(const u of ctx.message.new_chat_members||[]){ try{ await ctx.reply(st.welcome_text.replace(/\{name\}/g,u.first_name||'do‘st')); }catch(_){} } }});
+  bot.on('left_chat_member',async(ctx)=>{const st=await getBotSettings(config.key); if(st.clean_join!==false) await safeDelete(ctx);});
+  bot.on('text',async(ctx)=>{await utils.saveUser(ctx); const text=ctx.message.text.trim(); if(text==='/cancel'){ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if(ctx.chat.type==='private' && utils.isAdmin(ctx.from.id)){ const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common)return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='grp_welcome'){await updateBotSettings(config.key,{welcome_text:text});ctx.session.mode=null;return ctx.reply('✅ Salomlashuv saqlandi.',adminKeyboard());} if(ctx.session.mode==='grp_rules'){await updateBotSettings(config.key,{rules_text:text});ctx.session.mode=null;return ctx.reply('✅ Qoidalar saqlandi.',adminKeyboard());} if(ctx.session.mode==='grp_badwords'){const words=text.split(',').map(x=>normalizeTitle(x)).filter(Boolean); await updateBotSettings(config.key,{badwords:words});ctx.session.mode=null;return ctx.reply('✅ Taqiqlangan so‘zlar saqlandi.',adminKeyboard());} if(ctx.session.mode==='faq_add'){const [kw,...ans]=text.split('|').map(x=>x.trim()); if(!kw||!ans.join('|'))return ctx.reply('❌ Format: kalit | javob'); await GroupFaq.updateOne({bot_key:config.key,keyword_norm:normalizeTitle(kw)},{$set:{keyword:kw,answer:ans.join(' | '),is_active:true,added_by:ctx.from.id}},{upsert:true});ctx.session.mode=null;return ctx.reply('✅ FAQ saqlandi.',adminKeyboard());} if(ctx.session.mode==='faq_delete'){const res=await GroupFaq.updateOne({bot_key:config.key,keyword_norm:normalizeTitle(text),is_active:true},{$set:{is_active:false}});ctx.session.mode=null;return ctx.reply(res.modifiedCount?'✅ FAQ o‘chirildi.':'❌ Topilmadi.',adminKeyboard());} }
+    if(ctx.chat.type!=='private'){ const st=await getBotSettings(config.key); const norm=normalizeTitle(text); if(st.anti_link!==false && isLinkText(text)){ await safeDelete(ctx); try{await ctx.reply('🛡 Link/reklama yuborish mumkin emas.');}catch(_){} return; } const bad=(st.badwords||[]).some(w=>w&&norm.includes(w)); if(bad){ await safeDelete(ctx); try{await ctx.reply('🚫 Guruh qoidalariga zid so‘z o‘chirildi.');}catch(_){} return; } const faq=await GroupFaq.findOne({bot_key:config.key,is_active:true,keyword_norm:norm}); if(faq) return ctx.reply(faq.answer); }
+  });
+  bot.on('message',async(ctx)=>{await utils.saveUser(ctx); if(ctx.chat.type==='private'&&utils.isAdmin(ctx.from.id)&&ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;}});
+  bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
+  return { key: config.key, title: config.title, bot, config };
+}
+
+
 
 // =========================
 // BOT FACTORY / BOT TAYYORLOVCHI BOT
@@ -1600,7 +2373,7 @@ async function disableManagedBot(record, adminId, reason = 'admin_disabled') {
 }
 
 async function getBotStats(botKey) {
-  const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, viewsAgg, partViewsAgg] = await Promise.all([
+  const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, viewsAgg, partViewsAgg, formFields, formSubs, autoPosts, vipReqs, vipMembers, giveaways, giveawayParts, faqs] = await Promise.all([
     User.countDocuments({ bot_key: botKey }),
     User.countDocuments({ bot_key: botKey, is_blocked: { $ne: true } }),
     User.countDocuments({ bot_key: botKey, is_blocked: true }),
@@ -1610,7 +2383,15 @@ async function getBotStats(botKey) {
     ContentPart.countDocuments({ bot_key: botKey, is_active: true }),
     Subscription.countDocuments({ bot_key: botKey }),
     Content.aggregate([{ $match: { bot_key: botKey, is_active: true } }, { $group: { _id: null, total: { $sum: '$views' }, searches: { $sum: '$search_count' } } }]),
-    ContentPart.aggregate([{ $match: { bot_key: botKey, is_active: true } }, { $group: { _id: null, total: { $sum: '$views' } } }])
+    ContentPart.aggregate([{ $match: { bot_key: botKey, is_active: true } }, { $group: { _id: null, total: { $sum: '$views' } } }]),
+    FormField.countDocuments({ bot_key: botKey, is_active: true }),
+    FormSubmission.countDocuments({ bot_key: botKey }),
+    AutoPost.countDocuments({ bot_key: botKey, is_active: true }),
+    VipRequest.countDocuments({ bot_key: botKey }),
+    VipMember.countDocuments({ bot_key: botKey, is_active: true }),
+    Giveaway.countDocuments({ bot_key: botKey }),
+    GiveawayParticipant.countDocuments({ bot_key: botKey }),
+    GroupFaq.countDocuments({ bot_key: botKey, is_active: true })
   ]);
   return {
     users,
@@ -1623,7 +2404,15 @@ async function getBotStats(botKey) {
     subscriptions: subs,
     contentViews: viewsAgg[0]?.total || 0,
     searches: viewsAgg[0]?.searches || 0,
-    partViews: partViewsAgg[0]?.total || 0
+    partViews: partViewsAgg[0]?.total || 0,
+    formFields,
+    formSubmissions: formSubs,
+    autoPosts,
+    vipRequests: vipReqs,
+    vipMembers,
+    giveaways,
+    giveawayParticipants: giveawayParts,
+    faqs
   };
 }
 
@@ -1699,16 +2488,26 @@ async function startManagedRecord(record, source = 'db') {
   const token = decryptToken(record);
   const config = buildManagedConfig(record);
   const adminIds = Array.from(new Set([...GLOBAL_ADMIN_IDS, ...record.admin_ids.map(Number).filter(Boolean)]));
-  const active = createContentBot(config, token, adminIds);
+  const preset = getPreset(record.type_key);
+  const engine = preset.engine || 'content';
+  let active = null;
+  if (engine === 'vip') active = createVipBot(config, token, adminIds);
+  else if (engine === 'giveaway') active = createGiveawayBot(config, token, adminIds);
+  else if (engine === 'channel_form') active = createChannelFormBot(config, token, adminIds);
+  else if (engine === 'group_tools') active = createGroupToolsBot(config, token, adminIds);
+  else active = createContentBot(config, token, adminIds);
   if (!active) return null;
   await activateBot(active, source);
   return active;
 }
 
 function typeRows(prefix = 'factory:type') {
-  const entries = Object.entries(TYPE_PRESETS).filter(([key]) => ['kino', 'multfilm', 'serial', 'dorama', 'anime', 'turkserial', 'kurs', 'kitob', 'fayl', 'music'].includes(key));
+  const entries = Object.entries(TYPE_PRESETS).filter(([, preset]) => preset && preset.title);
   const rows = [];
-  for (const [key, preset] of entries) rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}`, `${prefix}:${key}`)]);
+  for (const [key, preset] of entries) {
+    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : 'Media';
+    rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
+  }
   return rows;
 }
 
@@ -1876,7 +2675,7 @@ function createFactoryBot() {
 
   bot.use(async (ctx, next) => {
     if (ctx.from) {
-      await FactoryUser.updateOne(
+      await safeDbWrite('FactoryUser activity', () => FactoryUser.updateOne(
         { user_id: ctx.from.id },
         {
           $set: {
@@ -1889,7 +2688,7 @@ function createFactoryBot() {
           }
         },
         { upsert: true }
-      );
+      ));
     }
     return next();
   });
@@ -1920,19 +2719,14 @@ function createFactoryBot() {
     return Markup.keyboard(rows).resize().oneTime(false);
   }
 
-  function ownerTelegramUrl() {
-    return `https://t.me/${OWNER_USERNAME.replace('@', '').trim() || 'Qoryogdiyev'}`;
-  }
-
-  function adminContactInlineKeyboard(extraRows = []) {
+  function adminPaymentInlineKeyboard() {
     return Markup.inlineKeyboard([
-      ...extraRows,
-      [Markup.button.url('💳 To‘lov/ruxsat uchun adminga murojaat qilish', ownerTelegramUrl())]
+      [Markup.button.url('💳 Toʻlov/ruxsat uchun adminga murojaat qilish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
     ]);
   }
 
-  function adminContactInlineRow(label = '💳 To‘lov uchun admin') {
-    return [Markup.button.url(label, ownerTelegramUrl())];
+  async function sendAdminPaymentButton(ctx, note = 'Bot ishlashi uchun toʻlov/ruxsat admin orqali kelishiladi.') {
+    return ctx.reply(`💳 ${note}`, adminPaymentInlineKeyboard());
   }
 
   async function notifyOwners(text, keyboard) {
@@ -1995,6 +2789,7 @@ function createFactoryBot() {
 
   async function checkFactoryGlobalSubscriptions(userId) {
     if (isOwner(userId)) return true;
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return true;
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     if (!subs.length) return true;
     for (const sub of subs) {
@@ -2010,6 +2805,7 @@ function createFactoryBot() {
   }
 
   async function factoryGlobalSubscriptionKeyboard() {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return Markup.inlineKeyboard([[Markup.button.callback('✅ Obunani tekshirish', 'factory_check_global_subscription')]]);
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     const rows = [];
     for (const sub of subs) {
@@ -2054,11 +2850,17 @@ function createFactoryBot() {
   });
 
   async function showPlans(ctx) {
+    if (!(await requireMongo(ctx, 'Tariflarni koʻrish uchun maʼlumotlar bazasi kerak'))) return;
     await seedDefaultPlans();
     const plans = await BotPlan.find({ is_active: true }).sort({ type_key: 1 });
     const lines = plans.map((p, i) => `${i + 1}. ${getPreset(p.type_key).mainEmoji || '🤖'} ${p.title || p.type_key}: ${formatMoney(p.monthly_price, p.currency)} / oy`);
-    await ctx.reply(`💰 BOT TARIF NARXLARI\n\nYaratish: bepul\nOylik to‘lov: admin tasdiqlagandan keyin bot ishlaydi.\n\n${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
-    return ctx.reply(`💳 To‘lov/ruxsat uchun admin bilan kelishing: ${OWNER_USERNAME}`, adminContactInlineKeyboard());
+    await ctx.reply(`💰 BOT TARIF NARXLARI
+
+Yaratish: bepul
+Oylik to‘lov: admin tasdiqlagandan keyin bot ishlaydi.
+
+${lines.join('\n') || 'Tariflar topilmadi.'}`, userKeyboard(ctx));
+    return sendAdminPaymentButton(ctx, 'Toʻlov/ruxsatni admin bilan kelishish uchun quyidagi tugmani bosing.');
   }
 
   async function showMyBots(ctx) {
@@ -2074,8 +2876,7 @@ function createFactoryBot() {
       );
     });
 
-    await ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}\n\nTo‘lov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
-    return ctx.reply('💳 To‘lov yoki ruxsatni uzaytirish uchun admin bilan bog‘laning:', adminContactInlineKeyboard());
+    return ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}\n\nTo‘lov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
   }
 
   async function showPending(ctx) {
@@ -2123,7 +2924,7 @@ function createFactoryBot() {
   async function showOverallStats(ctx) {
     if (!isOwner(ctx.from.id)) return;
     await expireDueManagedBots();
-    const [total, pending, approved, expired, rejected, disabled, totalUsers, activeUsers, totalContents, totalParts, factoryUsers, broadcasts, globalSubs] = await Promise.all([
+    const [total, pending, approved, expired, rejected, disabled, totalUsers, activeUsers, totalContents, totalParts, formSubs, autoPosts, vipReqs, vipMembers, giveaways, giveawayParts, faqs, factoryUsers, broadcasts, globalSubs] = await Promise.all([
       ManagedBot.countDocuments(),
       ManagedBot.countDocuments({ status: 'pending' }),
       ManagedBot.countDocuments({ status: 'approved', is_enabled: true }),
@@ -2134,6 +2935,13 @@ function createFactoryBot() {
       User.countDocuments({ is_blocked: { $ne: true } }),
       Content.countDocuments({ is_active: true }),
       ContentPart.countDocuments({ is_active: true }),
+      FormSubmission.countDocuments(),
+      AutoPost.countDocuments({ is_active: true }),
+      VipRequest.countDocuments(),
+      VipMember.countDocuments({ is_active: true }),
+      Giveaway.countDocuments(),
+      GiveawayParticipant.countDocuments(),
+      GroupFaq.countDocuments({ is_active: true }),
       FactoryUser.countDocuments(),
       BroadcastLog.countDocuments({ type: 'global' }),
       Subscription.countDocuments({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY })
@@ -2267,7 +3075,7 @@ function createFactoryBot() {
   bot.start(async (ctx) => {
     await FactoryUser.updateOne({ user_id: ctx.from.id }, { $inc: { starts: 1 }, $set: { last_active_at: new Date(), is_blocked: false } }, { upsert: true });
     reset(ctx);
-    await ctx.reply(
+    return ctx.reply(
       `🏭 Bot tayyorlovchi botga xush kelibsiz!\n\n` +
         `Yaratish bepul. Bot ishlashi uchun oylik tarif admin tomonidan tasdiqlanadi.\n\n` +
         `Jarayon:\n` +
@@ -2279,10 +3087,6 @@ function createFactoryBot() {
         `Har oy muddati tugaganda bot avtomatik to‘xtaydi. Admin yana ruxsat bersa, bot ichidagi barcha maʼlumotlar saqlangan holda davom etadi.`,
       userKeyboard(ctx)
     );
-    return ctx.reply(
-      `💳 To‘lov, narx yoki ruxsat bo‘yicha tez kelishish uchun admin bilan bog‘laning: ${OWNER_USERNAME}`,
-      adminContactInlineKeyboard()
-    );
   });
 
   bot.command('cancel', async (ctx) => {
@@ -2291,10 +3095,7 @@ function createFactoryBot() {
   });
 
   bot.hears('☎️ Admin bilan kelishish', async (ctx) => {
-    return ctx.reply(
-      `💳 Narx, muddat, to‘lov va ruxsat uchun admin bilan bog‘laning: ${OWNER_USERNAME}`,
-      adminContactInlineKeyboard()
-    );
+    return ctx.reply(`Narx, muddat va ruxsat uchun admin bilan bog‘laning: ${OWNER_USERNAME}`, Markup.inlineKeyboard([[Markup.button.url('Admin bilan yozishish', `https://t.me/${OWNER_USERNAME.replace('@', '')}`)]]));
   });
 
   bot.hears('💰 Narxlar', showPlans);
@@ -2353,16 +3154,22 @@ function createFactoryBot() {
   });
 
   bot.hears('🤖 Bot tayyorlash', async (ctx) => {
+    if (!(await requireMongo(ctx, 'Bot yaratish uchun maʼlumotlar bazasi kerak'))) return;
     reset(ctx);
     ctx.session.mode = 'wait_token';
-    return ctx.reply(
-      `🤖 Yangi bot tayyorlash boshlandi.\n\n` +
-        `BotFather’dan olingan bot tokenni yuboring.\n\n` +
-        `💳 To‘lov/ruxsat bo‘yicha savol bo‘lsa, pastdagi tugma orqali admin bilan bog‘laning.\n\n` +
-        `⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token DB’da shifrlanadi.\n\n` +
-        `❌ Bekor qilish: /cancel`,
-      adminContactInlineKeyboard()
+    await ctx.reply(
+      `🤖 Yangi bot tayyorlash boshlandi.
+
+` +
+        `BotFather’dan olingan bot tokenni yuboring.
+
+` +
+        `⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token DB’da shifrlanadi.
+
+` +
+        `❌ Bekor qilish: /cancel`
     );
+    return sendAdminPaymentButton(ctx, 'Toʻlov/ruxsat uchun admin bilan oldindan kelishib oling.');
   });
 
   bot.action(/^factory:type:([a-z0-9_-]+)$/, async (ctx) => {
@@ -2445,7 +3252,7 @@ function createFactoryBot() {
     await disableManagedBot(rec, ctx.from.id, 'admin_disabled');
     await ctx.editMessageText(`⏸ @${rec.telegram_username} admin tomonidan to‘xtatildi. DB maʼlumotlari saqlandi.`);
     try {
-      await bot.telegram.sendMessage(rec.owner_user_id, `⏸ @${rec.telegram_username} botingiz admin tomonidan vaqtincha to‘xtatildi. Maʼlumotlar saqlangan. ${OWNER_USERNAME} bilan bog‘laning.`, adminContactInlineKeyboard());
+      await bot.telegram.sendMessage(rec.owner_user_id, `⏸ @${rec.telegram_username} botingiz admin tomonidan vaqtincha to‘xtatildi. Maʼlumotlar saqlangan. ${OWNER_USERNAME} bilan bog‘laning.`);
     } catch (_) {}
   });
 
@@ -2461,7 +3268,7 @@ function createFactoryBot() {
     await req.save();
     await ctx.editMessageText(`❌ @${req.telegram_username} so‘rovi rad etildi.`);
     try {
-      await bot.telegram.sendMessage(req.owner_user_id, `❌ @${req.telegram_username} bot so‘rovingiz rad etildi. Batafsil kelishish uchun ${OWNER_USERNAME} ga yozing.`, adminContactInlineKeyboard());
+      await bot.telegram.sendMessage(req.owner_user_id, `❌ @${req.telegram_username} bot so‘rovingiz rad etildi. Batafsil kelishish uchun ${OWNER_USERNAME} ga yozing.`);
     } catch (_) {}
   });
 
@@ -2472,7 +3279,7 @@ function createFactoryBot() {
       return ctx.reply('❌ Jarayon bekor qilindi.', userKeyboard(ctx));
     }
 
-    if (ctx.session.mode === 'global_broadcast') return sendGlobalBroadcast(ctx);
+    if (ctx.session.mode === 'global_broadcast') { if (!(await requireMongo(ctx, 'Umumiy eʼlon uchun DB kerak'))) return; return sendGlobalBroadcast(ctx); }
 
     if (ctx.session.mode === 'global_add_channel') return addGlobalSubscription(ctx, text, 'channel');
     if (ctx.session.mode === 'global_add_group') return addGlobalSubscription(ctx, text, 'group');
@@ -2506,6 +3313,7 @@ function createFactoryBot() {
     }
 
     if (ctx.session.mode === 'wait_token') {
+      if (!(await requireMongo(ctx, 'Tokenni tekshirish va soʻrovni saqlash uchun DB kerak'))) return;
       if (!hasUsableToken(text)) return ctx.reply('❌ Token noto‘g‘ri ko‘rinadi. BotFather bergan tokenni to‘liq yuboring.');
 
       try {
@@ -2525,7 +3333,7 @@ function createFactoryBot() {
           telegram_first_name: me.first_name
         };
         ctx.session.mode = 'wait_type';
-        return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard([...typeRows(), adminContactInlineRow()]));
+        return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard(typeRows()));
       } catch (error) {
         console.error('Factory token tekshirish xatosi:', error.message);
         return ctx.reply('❌ Tokenni tekshirib bo‘lmadi. Token xato, bot o‘chirilgan yoki internet/API javob bermayapti. Qayta yuboring:');
@@ -2591,10 +3399,7 @@ function createFactoryBot() {
           `Yaratish bepul. Bot ishlashi uchun oylik to‘lov/ruxsat ${OWNER_USERNAME} orqali kelishiladi. Admin ruxsat bergach bot avtomatik ishga tushadi.`,
         userKeyboard(ctx)
       );
-      await ctx.reply(
-        `💳 To‘lov/ruxsatni tezlashtirish uchun admin bilan bog‘laning: ${OWNER_USERNAME}`,
-        adminContactInlineKeyboard()
-      );
+      await sendAdminPaymentButton(ctx, `Soʻrov qabul qilindi. Toʻlov/ruxsat uchun ${OWNER_USERNAME} ga yozing.`);
 
       await notifyOwners(
         `🛂 Yangi bot tayyorlash soʻrovi!\n\n` +
@@ -2625,41 +3430,39 @@ function createFactoryBot() {
 // START: KO'P BOT + FACTORY BITTA SERVERDA
 // =========================
 async function start() {
-  await mongoose.connect(MONGODB_URL, { serverSelectionTimeoutMS: 15000 });
-  console.log('✅ MongoDB ulandi');
-  await seedDefaultPlans();
-  await expireDueManagedBots();
-
   if (URL) {
     expressApp = express();
-    expressApp.use(express.json());
+    expressApp.use(express.json({ limit: '20mb' }));
 
-    expressApp.get('/', (req, res) => {
-      res.send(`✅ BotFactory MultiBot server ishlamoqda. Aktiv botlar: ${Array.from(activeBots.values()).map((b) => b.title).join(', ') || 'hali yo‘q'}`);
+    expressApp.get('/', (_req, res) => {
+      res.send(`✅ BotFactory server ishlamoqda. MongoDB: ${mongoReady ? 'ulangan' : 'ulanmoqda'}. Aktiv botlar: ${Array.from(activeBots.values()).map((b) => b.title).join(', ') || 'hali yo‘q'}`);
     });
 
-    expressApp.get('/status', async (req, res) => {
+    expressApp.get('/status', async (_req, res) => {
       try {
         const bots = [];
-        for (const active of activeBots.values()) {
-          const [users, subs, contents, singles, withParts, parts] = await Promise.all([
-            User.countDocuments({ bot_key: active.key }),
-            Subscription.countDocuments({ bot_key: active.key }),
-            Content.countDocuments({ bot_key: active.key, is_active: true }),
-            Content.countDocuments({ bot_key: active.key, has_parts: false, is_active: true }),
-            Content.countDocuments({ bot_key: active.key, has_parts: true, is_active: true }),
-            ContentPart.countDocuments({ bot_key: active.key, is_active: true })
+        if (mongoReady && mongoose.connection.readyState === 1) {
+          for (const active of activeBots.values()) {
+            const [users, subs, contents, singles, withParts, parts] = await Promise.all([
+              User.countDocuments({ bot_key: active.key }),
+              Subscription.countDocuments({ bot_key: active.key }),
+              Content.countDocuments({ bot_key: active.key, is_active: true }),
+              Content.countDocuments({ bot_key: active.key, has_parts: false, is_active: true }),
+              Content.countDocuments({ bot_key: active.key, has_parts: true, is_active: true }),
+              ContentPart.countDocuments({ bot_key: active.key, is_active: true })
+            ]);
+            bots.push({ key: active.key, title: active.title, users, contents, singles, with_parts: withParts, parts, subscriptions: subs });
+          }
+          const [pending, approved, global_subscriptions] = await Promise.all([
+            ManagedBot.countDocuments({ status: 'pending' }),
+            ManagedBot.countDocuments({ status: 'approved', is_enabled: true }),
+            Subscription.countDocuments({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY })
           ]);
-          bots.push({ key: active.key, title: active.title, users, contents, singles, with_parts: withParts, parts, subscriptions: subs });
+          return res.json({ status: 'online', mode: 'webhook', mongo: 'connected', active_bots: bots.length, pending_requests: pending, approved_managed_bots: approved, global_subscriptions, bots, uptime: process.uptime() });
         }
-        const [pending, approved] = await Promise.all([
-          ManagedBot.countDocuments({ status: 'pending' }),
-          ManagedBot.countDocuments({ status: 'approved', is_enabled: true })
-        ]);
-        const global_subscriptions = await Subscription.countDocuments({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY });
-        res.json({ status: 'online', mode: 'webhook', active_bots: bots.length, pending_requests: pending, approved_managed_bots: approved, global_subscriptions, bots, uptime: process.uptime() });
+        return res.json({ status: 'online', mode: 'webhook', mongo: 'connecting', active_bots: activeBots.size, bots: Array.from(activeBots.values()).map((b) => ({ key: b.key, title: b.title })), uptime: process.uptime() });
       } catch (error) {
-        res.status(500).json({ status: 'error', message: error.message });
+        res.status(500).json({ status: 'error', message: error.message, mongo: mongoReady ? 'connected' : 'connecting' });
       }
     });
   }
@@ -2672,47 +3475,42 @@ async function start() {
     if (active) await activateBot(active, 'static_env');
   }
 
-  const approvedManaged = await ManagedBot.find({ status: 'approved', is_enabled: true, $or: [{ current_period_end: { $gt: new Date() } }, { current_period_end: null }] });
-  for (const record of approvedManaged) {
-    try {
-      await startManagedRecord(record, 'approved_db');
-    } catch (error) {
-      console.error(`❌ Managed bot ishga tushmadi @${record.telegram_username}:`, error.message);
-    }
-  }
+  startMongoBackgroundLoop();
 
   setInterval(() => {
-    expireDueManagedBots().catch((error) => console.error('Billing tekshirish xatosi:', error.message));
+    if (mongoReady && mongoose.connection.readyState === 1) {
+      expireDueManagedBots().catch((error) => console.error('Billing tekshirish xatosi:', error.message));
+    }
   }, 5 * 60 * 1000);
 
   if (activeBots.size === 0) {
-    throw new Error('Ishga tushadigan bot topilmadi. FACTORYBOT_TOKEN yoki boshqa bot tokenlaridan kamida bittasini .env ga yozing.');
+    console.error('❌ Ishga tushadigan bot topilmadi. FACTORYBOT_TOKEN yoki boshqa bot tokenlaridan kamida bittasini Render env ichiga yozing.');
   }
 
   if (URL && expressApp && !serverStarted) {
     expressApp.listen(PORT, () => {
       serverStarted = true;
-      console.log(`🚀 BotFactory MultiBot server ${PORT} portda ishga tushdi`);
-      console.log(`🤖 Aktiv botlar: ${Array.from(activeBots.values()).map((b) => b.title).join(', ')}`);
+      console.log(`🚀 BotFactory server ${PORT} portda ishga tushdi`);
+      console.log(`🤖 Aktiv botlar: ${Array.from(activeBots.values()).map((b) => b.title).join(', ') || 'hali yoʻq'}`);
+      console.log(`🗄 MongoDB: ${MONGODB_URL ? 'background ulanish rejimida' : 'URL berilmagan'}`);
     });
   }
 
   process.once('SIGINT', async () => {
     console.log('Botlar toʻxtatilmoqda...');
     for (const active of activeBots.values()) active.bot.stop('SIGINT');
-    await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) await mongoose.connection.close().catch(() => {});
     process.exit(0);
   });
 
   process.once('SIGTERM', async () => {
     console.log('Botlar toʻxtatilmoqda...');
     for (const active of activeBots.values()) active.bot.stop('SIGTERM');
-    await mongoose.connection.close();
+    if (mongoose.connection.readyState !== 0) await mongoose.connection.close().catch(() => {});
     process.exit(0);
   });
 }
 
 start().catch((error) => {
   console.error('❌ Start xatosi:', error);
-  process.exit(1);
 });

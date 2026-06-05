@@ -90,14 +90,20 @@ function makeBotEnv(bot) {
     env.RENDER_EXTERNAL_URL = env.PUBLIC_URL;
 
     const mongo = process.env.FACTORY_MONGODB_URL || process.env.FACTORY_MONGODB_URI || process.env.MONGODB_URL || process.env.MONGODB_URI || process.env.MONGO_URI || '';
-    env.MONGODB_URL = mongo;
-    env.MONGODB_URI = mongo;
+    if (mongo) {
+      env.MONGODB_URL = mongo;
+      env.MONGODB_URI = mongo;
+    } else {
+      // Boʻsh env qiymat child process ichidagi bots/factory/.env faylini toʻsib qoʻymasligi kerak.
+      delete env.MONGODB_URL;
+      delete env.MONGODB_URI;
+    }
 
     const adminIds = process.env.FACTORY_ADMIN_IDS || process.env.ADMIN_IDS || process.env.ADMIN_TELEGRAM_IDS || process.env.ADMIN_TELEGRAM_CHAT_ID || '';
     if (adminIds) env.ADMIN_IDS = adminIds;
     else delete env.ADMIN_IDS;
 
-    const factoryToken = process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || '';
+    const factoryToken = process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || process.env.BOT_FACTORY_TOKEN || process.env.BOTFACTORY_MAIN_TOKEN || process.env.FACTORY_MAIN_BOT_TOKEN || process.env.BOT_TOKEN_FACTORY || '';
     if (factoryToken) env.FACTORYBOT_TOKEN = factoryToken;
     else delete env.FACTORYBOT_TOKEN;
 
