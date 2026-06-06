@@ -101,6 +101,18 @@ const subscriptionSchema = new mongoose.Schema(
     bot_key: { type: String, required: true, index: true },
     chat_username: { type: String, required: true, index: true },
     type: { type: String, enum: ['channel', 'group'], required: true },
+
+    // Public, private invite va zayavka kanal/guruhlari uchun kengaytirilgan maydonlar.
+    title: String,
+    chat_ref: { type: String, index: true },
+    chat_id: { type: String, index: true },
+    join_url: String,
+    invite_link: String,
+    is_private_link: { type: Boolean, default: false, index: true },
+    requires_request: { type: Boolean, default: false, index: true },
+    allow_join_request: { type: Boolean, default: true },
+    note: String,
+
     added_by: Number
   },
   { timestamps: true, collection: 'multibot_subscriptions' }
@@ -161,6 +173,26 @@ partSchema.index(
 
 const User = mongoose.model('MultiBotUser', userSchema);
 const Subscription = mongoose.model('MultiBotSubscription', subscriptionSchema);
+
+const joinRequestSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    last_name: String,
+    chat_id: { type: String, required: true, index: true },
+    chat_title: String,
+    chat_username: String,
+    invite_link: String,
+    status: { type: String, enum: ['requested', 'approved', 'declined'], default: 'requested', index: true },
+    requested_at: { type: Date, default: Date.now }
+  },
+  { timestamps: true, collection: 'multibot_join_requests' }
+);
+joinRequestSchema.index({ bot_key: 1, user_id: 1, chat_id: 1 }, { unique: true });
+const JoinRequest = mongoose.model('MultiBotJoinRequest', joinRequestSchema);
+
 const Content = mongoose.model('MultiBotContent', contentSchema);
 const ContentPart = mongoose.model('MultiBotContentPart', partSchema);
 
@@ -565,7 +597,6 @@ function normalizeUsername(input) {
   const raw = String(input || '').trim();
   if (!raw) return null;
 
-  // Public kanal/guruh: @username yoki https://t.me/username
   let clean = raw
     .replace(/^https?:\/\/t\.me\//i, '')
     .replace(/^tg:\/\/resolve\?domain=/i, '')
@@ -574,26 +605,175 @@ function normalizeUsername(input) {
     .replace(/\/$/, '')
     .trim();
 
-  // Private kanal/guruh uchun Telegram chat ID: -1001234567890
   if (/^-?\d{6,}$/.test(clean)) return clean;
-
-  // Invite linklar bilan getChatMember ishlamaydi. Admin @username yoki -100 chat_id kiritishi kerak.
   if (clean.startsWith('+') || clean.includes('/+')) return null;
-
   if (!clean || !/^[a-zA-Z0-9_]{5,32}$/.test(clean)) return null;
   return `@${clean}`;
 }
 
-function subJoinUrl(chatRef) {
-  const ref = String(chatRef || '').trim();
+function looksLikePrivateInviteLink(text) {
+  const raw = String(text || '').trim();
+  return /^https?:\/\/t\.me\/(\+|joinchat\/)/i.test(raw) || /^t\.me\/(\+|joinchat\/)/i.test(raw);
+}
+
+function normalizeTelegramUrl(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^t\.me\//i.test(raw)) return `https://${raw}`;
+  if (/^@?[a-zA-Z0-9_]{5,32}$/.test(raw.replace(/^@/, ''))) return `https://t.me/${raw.replace(/^@/, '')}`;
+  return raw;
+}
+
+function parseRequestFlag(value) {
+  const v = String(value || '').toLowerCase();
+  return /(zayavka|so[‘'`ʼ]?rov|request|join request|private|invite|maxfiy|ha|yes|true|1)/i.test(v);
+}
+
+function parseSubscriptionInput(text, type = 'channel') {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const parts = raw.split('|').map((x) => x.trim()).filter(Boolean);
+  let title = '';
+  let target = raw;
+  let flag = '';
+  if (parts.length >= 2) {
+    title = parts[0];
+    target = parts[1];
+    flag = parts.slice(2).join(' ');
+  }
+
+  const normalizedPublic = normalizeUsername(target);
+  const isPrivate = looksLikePrivateInviteLink(target);
+  const url = normalizeTelegramUrl(target);
+  const requiresRequest = parseRequestFlag(flag) || isPrivate;
+
+  if (normalizedPublic) {
+    return {
+      chat_username: normalizedPublic,
+      chat_ref: normalizedPublic,
+      chat_id: /^-?\d{6,}$/.test(normalizedPublic) ? normalizedPublic : undefined,
+      title: title || normalizedPublic,
+      type,
+      join_url: normalizedPublic.startsWith('@') ? `https://t.me/${normalizedPublic.replace('@', '')}` : undefined,
+      is_private_link: false,
+      requires_request: requiresRequest,
+      allow_join_request: true
+    };
+  }
+
+  if (isPrivate) {
+    const fallbackTitle = title || (type === 'group' ? 'Maxfiy guruh' : 'Maxfiy kanal');
+    return {
+      chat_username: fallbackTitle,
+      title: fallbackTitle,
+      type,
+      join_url: url,
+      invite_link: url,
+      is_private_link: true,
+      requires_request: true,
+      allow_join_request: true,
+      note: 'Private invite/zayavka link. Tekshiruv chat_join_request orqali yoziladi.'
+    };
+  }
+  return null;
+}
+
+function subJoinUrl(subOrRef) {
+  if (subOrRef && typeof subOrRef === 'object') {
+    if (subOrRef.join_url) return subOrRef.join_url;
+    if (subOrRef.invite_link) return subOrRef.invite_link;
+    const refObj = String(subOrRef.chat_ref || subOrRef.chat_username || '').trim();
+    if (refObj.startsWith('@')) return `https://t.me/${refObj.replace('@', '')}`;
+    return null;
+  }
+  const ref = String(subOrRef || '').trim();
   if (!ref) return null;
+  if (/^https?:\/\/t\.me\//i.test(ref) || /^t\.me\//i.test(ref)) return normalizeTelegramUrl(ref);
   if (ref.startsWith('@')) return `https://t.me/${ref.replace('@', '')}`;
   return null;
 }
 
 function subLabel(sub) {
   const icon = sub?.type === 'group' ? '👥' : '📢';
-  return `${icon} ${sub?.chat_username || 'nomaʼlum'}`;
+  const label = sub?.title || sub?.chat_username || sub?.chat_ref || 'nomaʼlum';
+  const req = sub?.requires_request ? ' · zayavka' : '';
+  return `${icon} ${label}${req}`;
+}
+
+function subscriptionCheckRef(sub) {
+  const ref = String(sub?.chat_ref || sub?.chat_id || sub?.chat_username || '').trim();
+  if (/^-?\d{6,}$/.test(ref)) return ref;
+  if (ref.startsWith('@')) return ref;
+  return null;
+}
+
+async function recordJoinRequestForBot(botKey, req) {
+  if (!(mongoReady && mongoose.connection.readyState === 1) || !botKey || !req?.from || !req?.chat) return null;
+  const invite = req.invite_link?.invite_link || req.invite_link?.name || '';
+  const chatId = String(req.chat.id || '');
+  const chatUsername = req.chat.username ? `@${req.chat.username}` : '';
+  const chatTitle = req.chat.title || chatUsername || chatId;
+  const payload = {
+    bot_key: botKey,
+    user_id: req.from.id,
+    username: req.from.username || null,
+    first_name: req.from.first_name || null,
+    last_name: req.from.last_name || null,
+    chat_id: chatId,
+    chat_title: chatTitle,
+    chat_username: chatUsername || null,
+    invite_link: invite || null,
+    status: 'requested',
+    requested_at: new Date()
+  };
+  const doc = await JoinRequest.findOneAndUpdate(
+    { bot_key: botKey, user_id: req.from.id, chat_id: chatId },
+    { $set: payload },
+    { upsert: true, new: true }
+  );
+  const ors = [];
+  if (invite) ors.push({ invite_link: invite }, { join_url: invite });
+  if (chatUsername) ors.push({ chat_username: chatUsername }, { chat_ref: chatUsername });
+  if (ors.length) {
+    await Subscription.updateMany(
+      { bot_key: botKey, $or: ors },
+      { $set: { chat_id: chatId, chat_ref: chatId, title: chatTitle, requires_request: true } }
+    ).catch(() => null);
+  }
+  return doc;
+}
+
+async function hasRecordedJoinRequest(sub, userId) {
+  if (!(mongoReady && mongoose.connection.readyState === 1)) return false;
+  const ors = [];
+  if (sub?.chat_id) ors.push({ chat_id: String(sub.chat_id) });
+  if (sub?.chat_ref && /^-?\d{6,}$/.test(String(sub.chat_ref))) ors.push({ chat_id: String(sub.chat_ref) });
+  if (sub?.chat_ref && String(sub.chat_ref).startsWith('@')) ors.push({ chat_username: String(sub.chat_ref) });
+  if (sub?.chat_username && String(sub.chat_username).startsWith('@')) ors.push({ chat_username: String(sub.chat_username) });
+  if (sub?.invite_link) ors.push({ invite_link: String(sub.invite_link) });
+  if (sub?.join_url) ors.push({ invite_link: String(sub.join_url) });
+  if (!ors.length) return false;
+  const req = await JoinRequest.findOne({ bot_key: sub.bot_key, user_id: Number(userId), status: { $in: ['requested', 'approved'] }, $or: ors });
+  return !!req;
+}
+
+async function checkOneSubscription(sub, telegram, userId) {
+  const ref = subscriptionCheckRef(sub);
+  if (ref && telegram) {
+    try {
+      const member = await telegram.getChatMember(ref, userId);
+      if (!['left', 'kicked'].includes(member.status)) return { ok: true, reason: 'member' };
+    } catch (error) {
+      console.error(`❌ Obuna getChatMember xatosi ${subLabel(sub)}:`, error.message);
+    }
+  }
+  if (sub.requires_request || sub.is_private_link) {
+    const requested = await hasRecordedJoinRequest(sub, userId);
+    if (requested) return { ok: true, reason: 'join_request_recorded' };
+    return { ok: false, reason: 'join_request_missing' };
+  }
+  return { ok: false, reason: ref ? 'not_joined' : 'not_checkable' };
 }
 
 function escapeRegex(text) {
@@ -959,13 +1139,8 @@ function createSharedUtils(bot, config, adminIds) {
     if (localSubs.length === 0) return true;
 
     for (const sub of localSubs) {
-      try {
-        const member = await bot.telegram.getChatMember(sub.chat_username, userId);
-        if (['left', 'kicked'].includes(member.status)) return false;
-      } catch (error) {
-        console.error(`❌ ${config.title} local obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
-        return false;
-      }
+      const checked = await checkOneSubscription(sub, bot.telegram, userId);
+      if (!checked.ok) return false;
     }
     return true;
   }
@@ -981,12 +1156,12 @@ function createSharedUtils(bot, config, adminIds) {
 
     const rows = [];
     for (const sub of globalSubs) {
-      const url = subJoinUrl(sub.chat_username);
+      const url = subJoinUrl(sub);
       if (url) rows.push([Markup.button.url(`🌐 ${subLabel(sub)}`, url)]);
       else rows.push([Markup.button.callback(`🌐 ${subLabel(sub)}`, 'noop')]);
     }
     for (const sub of localSubs) {
-      const url = subJoinUrl(sub.chat_username);
+      const url = subJoinUrl(sub);
       if (url) rows.push([Markup.button.url(subLabel(sub), url)]);
       else rows.push([Markup.button.callback(subLabel(sub), 'noop')]);
     }
@@ -997,7 +1172,7 @@ function createSharedUtils(bot, config, adminIds) {
   async function sendSubscriptionWarning(ctx) {
     const keyboard = await getSubscriptionKeyboard();
     return ctx.reply(
-      '🔒 Botdan foydalanish uchun avval majburiy kanal/guruhlarga obuna boʻling.\n\n🌐 Umumiy obunalar BotFactory orqali barcha yaratilgan botlar uchun tekshiriladi. Obuna boʻlgach, “✅ Obunani tekshirish” tugmasini bosing.',
+      '🔒 Botdan foydalanish uchun avval majburiy kanal/guruhlarga obuna bo‘ling yoki zayavka yuboring.\n\n🌐 Umumiy obunalar BotFactory orqali barcha yaratilgan botlar uchun tekshiriladi. Private/zayavka kanalda so‘rov yuborgan bo‘lsangiz, “✅ Obunani tekshirish” tugmasini bosing.',
       keyboard
     );
   }
@@ -1075,6 +1250,17 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
+  bot.on('chat_join_request', async (ctx) => {
+    try {
+      const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
+      const doc = await recordJoinRequestForBot(config.key, req);
+      if (doc?.user_id) {
+        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} uchun zayavkangiz qabul qilindi. Endi botga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+      }
+    } catch (error) {
+      console.error(`${config.title} chat_join_request saqlash xatosi:`, error.message);
+    }
+  });
 
   const utils = createSharedUtils(bot, config, adminIds);
   const { isAdmin, saveUser, checkAllSubscriptions, sendSubscriptionWarning, broadcastMessage, handleSubscriptionCallback } = utils;
@@ -1783,21 +1969,16 @@ async function checkGlobalSubscriptionsForUser(userId, fallbackTelegram = null) 
   if (!telegram) return { ok: false, reason: 'factory_token_missing', subs };
 
   for (const sub of subs) {
-    try {
-      const member = await telegram.getChatMember(sub.chat_username, userId);
-      if (['left', 'kicked'].includes(member.status)) return { ok: false, reason: 'not_joined', subs };
-    } catch (error) {
-      console.error(`❌ Global obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
-      return { ok: false, reason: 'check_failed', subs };
-    }
+    const checked = await checkOneSubscription(sub, telegram, userId);
+    if (!checked.ok) return { ok: false, reason: checked.reason || 'not_joined', subs };
   }
-  return { ok: true, reason: 'joined', subs };
+  return { ok: true, reason: 'joined_or_requested', subs };
 }
 
 function globalSubscriptionKeyboardFromSubs(subs, checkAction = 'check_subscription') {
   const rows = [];
   for (const sub of subs || []) {
-    const url = subJoinUrl(sub.chat_username);
+    const url = subJoinUrl(sub);
     if (url) rows.push([Markup.button.url(`🌐 ${subLabel(sub)}`, url)]);
     else rows.push([Markup.button.callback(`🌐 ${subLabel(sub)}`, 'noop')]);
   }
@@ -1815,7 +1996,7 @@ async function sendCreatedBotGlobalSubscriptionWarning(ctx, result = null) {
   return ctx.reply(
     '🔒 Botdan foydalanish uchun avval majburiy kanal/guruhlarga obuna bo‘ling.\n\n' +
       '🌐 Bu global majburiy obuna barcha BotFactory orqali yaratilgan botlarda ishlaydi.\n' +
-      'Obuna bo‘lgach, “✅ Obunani tekshirish” tugmasini bosing.' + extra,
+      'Obuna yoki zayavka yuborgach, “✅ Obunani tekshirish” tugmasini bosing.' + extra,
     keyboard
   );
 }
@@ -1879,6 +2060,17 @@ function createBaseBot(token, config, adminIds, sessionDefault = {}) {
   bot.use(session({ defaultSession: () => ({ mode: null, draft: {}, ...sessionDefault }) }));
   attachManagedAccess(bot, config);
   attachGlobalSubscriptionGate(bot, config, adminIds);
+  bot.on('chat_join_request', async (ctx) => {
+    try {
+      const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
+      const doc = await recordJoinRequestForBot(config.key, req);
+      if (doc?.user_id) {
+        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} uchun zayavkangiz qabul qilindi. Endi botga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+      }
+    } catch (error) {
+      console.error(`${config.title} chat_join_request saqlash xatosi:`, error.message);
+    }
+  });
   return bot;
 }
 
@@ -1897,29 +2089,56 @@ async function handleCommonAdminText(ctx, config, utils, adminKeyboard) {
   if (ctx.session.mode === 'add_channel') return addSubscriptionForBot(ctx, config.key, text, 'channel', adminKeyboard);
   if (ctx.session.mode === 'add_group') return addSubscriptionForBot(ctx, config.key, text, 'group', adminKeyboard);
   if (ctx.session.mode === 'delete_subscription') {
-    const username = normalizeUsername(text);
-    const result = await Subscription.deleteOne({ bot_key: config.key, chat_username: username });
-    ctx.session.mode = null;
-    ctx.session.draft = {};
-    if (result.deletedCount) return ctx.reply(`✅ ${username} o‘chirildi.`, adminKeyboard());
-    return ctx.reply('❌ Bunday obuna topilmadi.', adminKeyboard());
+    return deleteSubscriptionForBot(ctx, config.key, text, adminKeyboard);
   }
   return null;
 }
 
 async function addSubscriptionForBot(ctx, botKey, text, type, adminKeyboard) {
-  const username = normalizeUsername(text);
-  if (!username) return ctx.reply('❌ Username/chat ID notoʻgʻri. Qayta yuboring:');
+  const parsed = parseSubscriptionInput(text, type);
+  if (!parsed) {
+    return ctx.reply(
+      '❌ Kanal/guruh notoʻgʻri. Qayta yuboring:\n\n' +
+        'Public: @kanal yoki https://t.me/kanal\n' +
+        'Private/zayavka: Kanal nomi | https://t.me/+invite | zayavka\n' +
+        'Aniq tekshiruv uchun: Kanal nomi | -1001234567890 | zayavka'
+    );
+  }
   try {
-    await Subscription.create({ bot_key: botKey, chat_username: username, type, added_by: ctx.from.id });
+    await Subscription.updateOne(
+      { bot_key: botKey, chat_username: parsed.chat_username },
+      { $set: { ...parsed, added_by: ctx.from.id } },
+      { upsert: true }
+    );
     ctx.session.mode = null;
     ctx.session.draft = {};
-    return ctx.reply(`✅ ${username} majburiy obunaga qo‘shildi.`, adminKeyboard());
+    const hint = parsed.requires_request
+      ? '\n\n⚠️ Zayavka/private obuna tekshiruvi ishlashi uchun shu bot kanal/guruhda admin bo‘lsin va chat_join_request update olsin. User zayavka yuborsa, bot DB’da yozib qo‘yadi va ruxsat beradi.'
+      : '\n\n⚠️ Tekshiruv uchun bot o‘sha kanal/guruhda admin bo‘lgani yaxshi.';
+    return ctx.reply(`✅ ${subLabel(parsed)} majburiy obunaga qo‘shildi.${hint}`, adminKeyboard());
   } catch (error) {
-    if (error.code === 11000) return ctx.reply(`❌ ${username} allaqachon roʻyxatda bor.`);
+    if (error.code === 11000) return ctx.reply(`❌ ${parsed.chat_username} allaqachon roʻyxatda bor.`);
     console.error(error);
     return ctx.reply('❌ Saqlashda xatolik. Qayta urinib koʻring.');
   }
+}
+
+async function deleteSubscriptionForBot(ctx, botKey, text, adminKeyboard) {
+  const q = String(text || '').trim();
+  const parsed = parseSubscriptionInput(q, 'channel');
+  const ors = [];
+  if (parsed?.chat_username) ors.push({ chat_username: parsed.chat_username });
+  if (parsed?.chat_ref) ors.push({ chat_ref: parsed.chat_ref });
+  if (parsed?.join_url) ors.push({ join_url: parsed.join_url }, { invite_link: parsed.join_url });
+  const norm = normalizeUsername(q);
+  if (norm) ors.push({ chat_username: norm }, { chat_ref: norm }, { chat_id: norm });
+  if (q) ors.push({ chat_username: q }, { title: new RegExp(escapeRegex(q), 'i') });
+  if (!ors.length) return ctx.reply('❌ O‘chirish uchun nom, @username, -100... yoki invite link yuboring.');
+  const result = await Subscription.deleteOne({ bot_key: botKey, $or: ors });
+  ctx.session.mode = null;
+  ctx.session.draft = {};
+  if (result.deletedCount) return ctx.reply('✅ Obuna o‘chirildi.', adminKeyboard());
+  return ctx.reply('❌ Bunday obuna topilmadi.', adminKeyboard());
 }
 
 function registerCommonAdminHandlers(bot, config, utils, adminKeyboard) {
@@ -1934,25 +2153,25 @@ function registerCommonAdminHandlers(bot, config, utils, adminKeyboard) {
     if (!utils.isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'add_channel';
     ctx.session.draft = {};
-    return ctx.reply('➕ Majburiy obuna uchun kanal username yoki chat ID yuboring. Masalan: @kanal yoki -100...\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('➕ Majburiy obuna uchun kanal yuboring.\n\nFormatlar:\n@kanal\nhttps://t.me/kanal\nKanal nomi | https://t.me/+privateInvite | zayavka\nKanal nomi | -1001234567890 | zayavka\n\n❌ Bekor qilish: /cancel');
   });
   bot.hears('➕ Guruh qoʻshish', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'add_group';
     ctx.session.draft = {};
-    return ctx.reply('➕ Majburiy obuna uchun guruh username yoki chat ID yuboring. Masalan: @guruh yoki -100...\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('➕ Majburiy obuna uchun guruh yuboring.\n\nFormatlar:\n@guruh\nhttps://t.me/guruh\nGuruh nomi | https://t.me/+privateInvite | zayavka\nGuruh nomi | -1001234567890 | zayavka\n\n❌ Bekor qilish: /cancel');
   });
   bot.hears('📋 Obunalar', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
     const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 });
     if (!subs.length) return ctx.reply('📭 Hozircha majburiy obuna yoʻq.');
-    return ctx.reply(`📋 Majburiy obunalar:\n\n${subs.map((s, i) => `${i + 1}. ${s.type === 'channel' ? '📢' : '👥'} ${s.chat_username}`).join('\n')}`);
+    return ctx.reply(`📋 Majburiy obunalar:\n\n${subs.map((s, i) => `${i + 1}. ${subLabel(s)}${s.join_url ? `\n   🔗 ${s.join_url}` : ''}${s.chat_ref ? `\n   🆔 ${s.chat_ref}` : ''}`).join('\n')}`);
   });
   bot.hears('➖ Obuna oʻchirish', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'delete_subscription';
     ctx.session.draft = {};
-    return ctx.reply('➖ O‘chiriladigan username/chat ID yuboring.\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('➖ O‘chiriladigan obuna nomi, @username, -100... yoki invite link yuboring.\n\n❌ Bekor qilish: /cancel');
   });
   bot.action('check_subscription', async (ctx) => utils.handleSubscriptionCallback(ctx, adminKeyboard, '✅ Obuna tasdiqlandi!'));
   bot.action('noop', async (ctx) => ctx.answerCbQuery('Private chat uchun admin bergan ko‘rsatma bo‘yicha obuna bo‘ling.'));
@@ -2132,7 +2351,7 @@ function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
     if (utils.isAdmin(ctx.from.id)) {
       const common = await handleCommonAdminText(ctx, config, utils, adminKeyboard); if (common) return common;
       if (ctx.session.mode === 'broadcasting') { const r = await utils.broadcastMessage(ctx, adminKeyboard); ctx.session.mode = null; return r; }
-      if (ctx.session.mode === 'vip_set_chat') { const v = normalizeUsername(text); if (!v) return ctx.reply('❌ Username/chat ID noto‘g‘ri. Qayta yuboring.'); await updateBotSettings(config.key, { vip_chat: v }); ctx.session.mode = null; return ctx.reply('✅ Maxfiy kanal/guruh saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_chat') { const parsed = parseSubscriptionInput(text, 'channel'); const v = parsed?.chat_ref || parsed?.chat_id || normalizeUsername(text); if (!v) return ctx.reply('❌ VIP link yaratish uchun @username yoki -100... chat ID kerak. Private invite link majburiy obunada ishlaydi, lekin yangi invite link yaratish uchun botga kanal/guruh chat ID kerak.'); await updateBotSettings(config.key, { vip_chat: v, vip_chat_title: parsed?.title || v }); ctx.session.mode = null; return ctx.reply('✅ Maxfiy kanal/guruh saqlandi. Bot o‘sha kanal/guruhda invite link yaratish huquqi bilan admin bo‘lsin.', adminKeyboard()); }
       if (ctx.session.mode === 'vip_set_pay') { await updateBotSettings(config.key, { price_text: text }); ctx.session.mode = null; return ctx.reply('✅ To‘lov/narx matni saqlandi.', adminKeyboard()); }
       if (ctx.session.mode === 'vip_set_days') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Kun noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { access_days: n }); ctx.session.mode = null; return ctx.reply('✅ Dostup muddati saqlandi.', adminKeyboard()); }
       if (ctx.session.mode === 'vip_set_link') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Daqiqa noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { link_minutes: n }); ctx.session.mode = null; return ctx.reply('✅ Link muddati saqlandi.', adminKeyboard()); }
@@ -2158,7 +2377,7 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
   const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
   const bot = createBaseBot(token, config, adminIds);
   const utils = createSharedUtils(bot, config, adminIds);
-  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['🎁 Konkurs yaratish', '🎲 Gʻolib tanlash'], ['📋 Aktiv konkurs', '👥 Qatnashchilar']])).resize().oneTime(false); }
+  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['🎁 Konkurs yaratish', '🎲 Gʻolib tanlash'], ['📋 Aktiv konkurs', '👥 Qatnashchilar'], ['➕ Konkurs kanali', '➕ Konkurs guruhi'], ['📋 Konkurs obunalari']])).resize().oneTime(false); }
   async function activeGiveaway() { return Giveaway.findOne({ bot_key: config.key, status: 'active' }).sort({ createdAt: -1 }); }
   async function showActive(ctx) {
     const g = await activeGiveaway();
@@ -2171,7 +2390,10 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
   bot.hears('📋 Aktiv konkurs', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; return showActive(ctx); });
   bot.hears('👥 Qatnashchilar', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const list = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }).sort({ createdAt: -1 }).limit(50); return ctx.reply(`👥 So‘nggi qatnashchilar (${list.length}):\n\n${list.map((p,i)=>`${i+1}. ${p.first_name || ''} ${p.username ? '@'+p.username : ''} — ${p.user_id}`).join('\n') || '—'}`); });
   bot.hears('🎲 Gʻolib tanlash', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const participants = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }); if (participants.length < 1) return ctx.reply('Qatnashchi yo‘q.'); const shuffled = participants.sort(() => Math.random() - 0.5); const winners = shuffled.slice(0, Math.min(g.winners_count, participants.length)); g.status = 'closed'; g.drawn_by = ctx.from.id; g.drawn_at = new Date(); g.winner_user_ids = winners.map(w=>w.user_id); await g.save(); const lines = winners.map((w,i)=>`${i+1}. ${w.first_name || ''} ${w.username ? '@'+w.username : ''} — ${w.user_id}`).join('\n'); return ctx.reply(`🏆 GʻOLIBLAR\n\n🎁 ${g.title}\n\n${lines}`); });
-  bot.hears('📊 Statistika', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const [users, active, blocked, giveaways, participants, subs] = await Promise.all([User.countDocuments({bot_key:config.key}), User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}), User.countDocuments({bot_key:config.key,is_blocked:true}), Giveaway.countDocuments({bot_key:config.key}), GiveawayParticipant.countDocuments({bot_key:config.key}), Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 KONKURS BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🎁 Konkurslar: ${giveaways}\n👥 Qatnashuvlar: ${participants}\n🔒 Majburiy obuna: ${subs}`); });
+  bot.hears('📊 Statistika', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const [users, active, blocked, giveaways, participants, subs] = await Promise.all([User.countDocuments({bot_key:config.key}), User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}), User.countDocuments({bot_key:config.key,is_blocked:true}), Giveaway.countDocuments({bot_key:config.key}), GiveawayParticipant.countDocuments({bot_key:config.key}), Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 KONKURS BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🎁 Konkurslar: ${giveaways}\n👥 Qatnashuvlar: ${participants}\n🔒 Konkurs majburiy obunalari: ${subs}`); });
+  bot.hears('➕ Konkurs kanali', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'add_channel'; return ctx.reply('➕ Konkurs uchun majburiy kanal qo‘shing.\n\n@kanal yoki Kanal nomi | https://t.me/+privateInvite | zayavka'); });
+  bot.hears('➕ Konkurs guruhi', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'add_group'; return ctx.reply('➕ Konkurs uchun majburiy guruh qo‘shing.\n\n@guruh yoki Guruh nomi | https://t.me/+privateInvite | zayavka'); });
+  bot.hears('📋 Konkurs obunalari', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 }); if (!subs.length) return ctx.reply('📭 Konkurs uchun obuna yo‘q.'); return ctx.reply(`📋 Konkurs obunalari:\n\n${subs.map((s,i)=>`${i+1}. ${subLabel(s)}${s.join_url ? `\n   🔗 ${s.join_url}` : ''}${s.chat_ref ? `\n   🆔 ${s.chat_ref}` : ''}`).join('\n')}`); });
   registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
   bot.action(/^gw:join:([a-f0-9]{24})$/, async (ctx) => { await ctx.answerCbQuery(); await utils.saveUser(ctx); const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok) return utils.sendSubscriptionWarning(ctx); const g = await Giveaway.findOne({_id:ctx.match[1],bot_key:config.key,status:'active'}); if (!g) return ctx.reply('❌ Konkurs tugagan yoki topilmadi.'); try { await GiveawayParticipant.create({bot_key:config.key,giveaway_id:g._id,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null}); return ctx.reply('✅ Siz konkursda qatnashyapsiz! Omad 🍀'); } catch(e) { if (e.code===11000) return ctx.reply('ℹ️ Siz allaqachon qatnashyapsiz.'); throw e; } });
   bot.command('cancel', async (ctx)=>{ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
@@ -2347,7 +2569,7 @@ async function syncActiveBotWebhook(active, source = 'manual') {
     await active.bot.telegram.setWebhook(fullUrl, {
       secret_token: WEBHOOK_SECRET,
       drop_pending_updates: false,
-      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member']
+      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
     });
     console.log(`🌐 ${active.title} webhook o'rnatildi (${source}): ${fullUrl}`);
   } else {
@@ -2461,15 +2683,44 @@ function shouldWatermarkRecord(recordOrConfig) {
   return normalizeTariffKey(recordOrConfig.tariff_key || recordOrConfig.tariffKey || 'standard') === 'standard';
 }
 
-function appendWatermarkText(text, maxLen = 4096) {
-  const base = String(text || '').trim();
-  const footer = `
+function footerLineUrlFromSub(sub) {
+  const url = subJoinUrl(sub);
+  const label = (sub?.title || sub?.chat_username || '').trim();
+  if (url && label) return `${label}: ${url}`;
+  if (url) return url;
+  return label || '';
+}
 
-${STANDARD_WATERMARK_TEXT}`;
-  if (!STANDARD_WATERMARK_TEXT || base.includes(STANDARD_WATERMARK_TEXT)) return text;
-  const allowedBase = Math.max(0, maxLen - footer.length);
+async function buildManagedBotFooter(config) {
+  const lines = [];
+  const username = String(config.telegramUsername || config.telegram_username || '').replace(/^@/, '').trim();
+  if (username) lines.push(`🤖 Bot: @${username} — https://t.me/${username}`);
+
+  try {
+    if (mongoReady && mongoose.connection.readyState === 1 && config.key) {
+      const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 }).limit(6);
+      const publicLines = subs.map(footerLineUrlFromSub).filter(Boolean);
+      if (publicLines.length) lines.push(`📌 Kanal/guruhlar:\n${publicLines.map((x) => `• ${x}`).join('\n')}`);
+    }
+  } catch (_) {}
+
+  const tariff = await getManagedTariffKey(config.key, config.tariffKey || 'standard');
+  if (tariff === 'standard' && STANDARD_WATERMARK_TEXT) lines.push(STANDARD_WATERMARK_TEXT);
+  return lines.join('\n\n').trim();
+}
+
+function appendFooterText(text, footer, maxLen = 4096) {
+  const base = String(text || '').trim();
+  const f = String(footer || '').trim();
+  if (!f || base.includes(f)) return text;
+  const sep = base ? '\n\n' : '';
+  const allowedBase = Math.max(0, maxLen - sep.length - f.length);
   const safeBase = base.length > allowedBase ? `${base.slice(0, Math.max(0, allowedBase - 1))}…` : base;
-  return `${safeBase}${footer}`.trim();
+  return `${safeBase}${sep}${f}`.trim();
+}
+
+function appendWatermarkText(text, maxLen = 4096) {
+  return appendFooterText(text, STANDARD_WATERMARK_TEXT, maxLen);
 }
 
 async function getManagedTariffKey(botKey, fallback = 'standard') {
@@ -2499,22 +2750,22 @@ function applyManagedPlanFeatures(bot, config, adminIds = []) {
   };
   const excluded = new Set([...(GLOBAL_ADMIN_IDS || []), ...(adminIds || [])].map(Number).filter(Boolean));
   const isPrivateUserChat = (chatId) => /^\d+$/.test(String(chatId || ''));
-  const shouldMark = async (chatId) => {
+  const shouldAddFooter = (chatId) => {
     if (!isPrivateUserChat(chatId)) return false;
     if (excluded.has(Number(chatId))) return false;
-    const tariff = await getManagedTariffKey(config.key, config.tariffKey || 'standard');
-    return tariff === 'standard';
+    return true;
   };
+  const footerFor = async (chatId) => shouldAddFooter(chatId) ? await buildManagedBotFooter(config) : '';
   const withCaption = async (chatId, extra = {}) => {
     const nextExtra = { ...(extra || {}) };
-    if (await shouldMark(chatId)) {
-      nextExtra.caption = appendWatermarkText(nextExtra.caption || '', 1024);
-    }
+    const footer = await footerFor(chatId);
+    if (footer) nextExtra.caption = appendFooterText(nextExtra.caption || '', footer, 1024);
     return nextExtra;
   };
 
   bot.telegram.sendMessage = async (chatId, text, extra = {}) => {
-    const finalText = (await shouldMark(chatId)) ? appendWatermarkText(text, 4096) : text;
+    const footer = await footerFor(chatId);
+    const finalText = footer ? appendFooterText(text, footer, 4096) : text;
     return original.sendMessage(chatId, finalText, extra);
   };
   bot.telegram.sendPhoto = async (chatId, photo, extra = {}) => original.sendPhoto(chatId, photo, await withCaption(chatId, extra));
@@ -2525,8 +2776,9 @@ function applyManagedPlanFeatures(bot, config, adminIds = []) {
   bot.telegram.sendVoice = async (chatId, voice, extra = {}) => original.sendVoice(chatId, voice, await withCaption(chatId, extra));
   bot.telegram.copyMessage = async (chatId, fromChatId, messageId, extra = {}) => {
     const sent = await original.copyMessage(chatId, fromChatId, messageId, extra);
-    if (await shouldMark(chatId)) {
-      try { await original.sendMessage(chatId, STANDARD_WATERMARK_TEXT); } catch (_) {}
+    const footer = await footerFor(chatId);
+    if (footer) {
+      try { await original.sendMessage(chatId, footer); } catch (_) {}
     }
     return sent;
   };
@@ -3045,23 +3297,27 @@ function createFactoryBot() {
 
   async function addGlobalSubscription(ctx, text, type) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
-    const username = normalizeUsername(text);
-    if (!username) {
+    const parsed = parseSubscriptionInput(text, type);
+    if (!parsed) {
       return ctx.reply(
-        '❌ Kanal/guruh noto‘g‘ri. Public kanal/guruh uchun @username yoki https://t.me/username yuboring.\n\n' +
-          'Private guruh/kanal uchun -100... chat ID yuboring. Invite link (+...) bilan Telegram obunani tekshirishga ruxsat bermaydi.'
+        '❌ Kanal/guruh noto‘g‘ri. Qayta yuboring:\n\n' +
+          'Public: @kanal yoki https://t.me/kanal\n' +
+          'Private/zayavka: Kanal nomi | https://t.me/+invite | zayavka\n' +
+          'Aniq tekshiruv: Kanal nomi | -1001234567890 | zayavka'
       );
     }
 
     try {
       await Subscription.updateOne(
-        { bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY, chat_username: username },
-        { $set: { type, added_by: ctx.from.id } },
+        { bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY, chat_username: parsed.chat_username },
+        { $set: { ...parsed, added_by: ctx.from.id } },
         { upsert: true }
       );
       reset(ctx);
-      const testHint = username.startsWith('@') ? `\n\n⚠️ FactoryBot o‘sha kanal/guruhda admin bo‘lishi kerak: ${username}` : '\n\n⚠️ Private chat ID bo‘lsa ham FactoryBot o‘sha chatda admin bo‘lishi kerak.';
-      return ctx.reply(`✅ Global majburiy obuna qo‘shildi: ${subLabel({ chat_username: username, type })}\n\nEndi bu obuna barcha yaratilgan botlarda tekshiriladi. Mijoz botlarni kanal/guruhga qo‘shish shart emas.${testHint}`, userKeyboard(ctx));
+      const testHint = parsed.requires_request
+        ? '\n\n⚠️ Zayavka/private link ishlashi uchun FactoryBot shu kanal/guruhda admin bo‘lsin. User zayavka yuborsa, FactoryBot buni DB’da yozadi va tekshiruvda ruxsat beradi.'
+        : '\n\n⚠️ Tekshiruv uchun FactoryBot o‘sha kanal/guruhda admin bo‘lishi kerak.';
+      return ctx.reply(`✅ Global majburiy obuna qo‘shildi: ${subLabel(parsed)}\n\nEndi bu obuna BotFactory va barcha yaratilgan botlarda tekshiriladi.${testHint}`, userKeyboard(ctx));
     } catch (error) {
       console.error('Global obuna saqlash xatosi:', error);
       reset(ctx);
@@ -3073,7 +3329,7 @@ function createFactoryBot() {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     if (!subs.length) return ctx.reply('📭 Global majburiy obunalar yo‘q.', userKeyboard(ctx));
-    const list = subs.map((sub, i) => `${i + 1}. ${subLabel(sub)} — ${sub.createdAt ? formatDate(sub.createdAt) : '—'}`).join('\n');
+    const list = subs.map((sub, i) => `${i + 1}. ${subLabel(sub)} — ${sub.createdAt ? formatDate(sub.createdAt) : '—'}${sub.join_url ? `\n   🔗 ${sub.join_url}` : ''}${sub.chat_ref ? `\n   🆔 ${sub.chat_ref}` : ''}`).join('\n');
     return ctx.reply(
       `🌐 GLOBAL MAJBURIY OBUNALAR\n\n${list}\n\n` +
         `Bu ro‘yxat barcha yaratilgan botlarda ishlaydi. Tekshiruv FactoryBot tokeni orqali bajariladi.`,
@@ -3083,11 +3339,19 @@ function createFactoryBot() {
 
   async function removeGlobalSubscription(ctx, text) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
-    const username = normalizeUsername(text);
-    if (!username) return ctx.reply('❌ O‘chirish uchun @username yoki -100... chat ID yuboring.');
-    const result = await Subscription.deleteOne({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY, chat_username: username });
+    const q = String(text || '').trim();
+    const parsed = parseSubscriptionInput(q, 'channel');
+    const ors = [];
+    if (parsed?.chat_username) ors.push({ chat_username: parsed.chat_username });
+    if (parsed?.chat_ref) ors.push({ chat_ref: parsed.chat_ref });
+    if (parsed?.join_url) ors.push({ join_url: parsed.join_url }, { invite_link: parsed.join_url });
+    const norm = normalizeUsername(q);
+    if (norm) ors.push({ chat_username: norm }, { chat_ref: norm }, { chat_id: norm });
+    if (q) ors.push({ chat_username: q }, { title: new RegExp(escapeRegex(q), 'i') });
+    if (!ors.length) return ctx.reply('❌ O‘chirish uchun nom, @username, -100... yoki invite link yuboring.');
+    const result = await Subscription.deleteOne({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY, $or: ors });
     reset(ctx);
-    if (result.deletedCount) return ctx.reply(`✅ Global obuna o‘chirildi: ${username}`, userKeyboard(ctx));
+    if (result.deletedCount) return ctx.reply('✅ Global obuna o‘chirildi.', userKeyboard(ctx));
     return ctx.reply('❌ Bunday global obuna topilmadi.', userKeyboard(ctx));
   }
 
@@ -3097,13 +3361,8 @@ function createFactoryBot() {
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     if (!subs.length) return true;
     for (const sub of subs) {
-      try {
-        const member = await bot.telegram.getChatMember(sub.chat_username, userId);
-        if (['left', 'kicked'].includes(member.status)) return false;
-      } catch (error) {
-        console.error(`❌ FactoryBot global obuna tekshirish xatosi ${sub.chat_username}:`, error.message);
-        return false;
-      }
+      const checked = await checkOneSubscription(sub, bot.telegram, userId);
+      if (!checked.ok) return false;
     }
     return true;
   }
@@ -3113,7 +3372,7 @@ function createFactoryBot() {
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     const rows = [];
     for (const sub of subs) {
-      const url = subJoinUrl(sub.chat_username);
+      const url = subJoinUrl(sub);
       if (url) rows.push([Markup.button.url(`🌐 ${subLabel(sub)}`, url)]);
       else rows.push([Markup.button.callback(`🌐 ${subLabel(sub)}`, 'noop')]);
     }
@@ -3124,7 +3383,7 @@ function createFactoryBot() {
   async function sendFactoryGlobalSubscriptionWarning(ctx) {
     const keyboard = await factoryGlobalSubscriptionKeyboard();
     return ctx.reply(
-      '🔒 BotFactory’dan foydalanish uchun avval majburiy kanal/guruhlarga obuna bo‘ling.\n\nObuna bo‘lgach, “✅ Obunani tekshirish” tugmasini bosing.',
+      '🔒 BotFactory’dan foydalanish uchun avval majburiy kanal/guruhlarga obuna bo‘ling yoki zayavka yuboring.\n\nObuna/zayavkadan keyin “✅ Obunani tekshirish” tugmasini bosing.',
       keyboard
     );
   }
@@ -3454,14 +3713,14 @@ ${lines.join('\n\n')}\n\nObunani tiklash/uzaytirish uchun ${OWNER_USERNAME} ga y
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
     ctx.session.mode = 'global_add_channel';
     ctx.session.draft = {};
-    return ctx.reply('🌐 Global kanal qo‘shish.\n\nKanal username/linkini yuboring: @kanal yoki https://t.me/kanal\n\nPrivate kanal bo‘lsa -100... chat ID yuboring. FactoryBot kanalga admin qilingan bo‘lishi kerak.\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('🌐 Global majburiy kanal yuboring.\n\nFormatlar:\n@kanal\nhttps://t.me/kanal\nKanal nomi | https://t.me/+privateInvite | zayavka\nKanal nomi | -1001234567890 | zayavka\n\n❌ Bekor qilish: /cancel');
   });
 
   bot.hears('🌐 Global guruh qoʻshish', async (ctx) => {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
     ctx.session.mode = 'global_add_group';
     ctx.session.draft = {};
-    return ctx.reply('🌐 Global guruh qo‘shish.\n\nGuruh username/linkini yuboring: @guruh yoki https://t.me/guruh\n\nPrivate guruh bo‘lsa -100... chat ID yuboring. FactoryBot guruhda admin qilingan bo‘lishi kerak.\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('🌐 Global majburiy guruh yuboring.\n\nFormatlar:\n@guruh\nhttps://t.me/guruh\nGuruh nomi | https://t.me/+privateInvite | zayavka\nGuruh nomi | -1001234567890 | zayavka\n\n❌ Bekor qilish: /cancel');
   });
 
   bot.hears('🌐 Global obunalar', showGlobalSubscriptions);
@@ -3470,7 +3729,7 @@ ${lines.join('\n\n')}\n\nObunani tiklash/uzaytirish uchun ${OWNER_USERNAME} ga y
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
     ctx.session.mode = 'global_remove_subscription';
     ctx.session.draft = {};
-    return ctx.reply('🌐 O‘chiriladigan global obuna username yoki chat ID yuboring.\n\nMasalan: @kanal yoki -1001234567890\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('🌐 O‘chiriladigan global obuna nomi, @username, -100... yoki invite link yuboring.\n\n❌ Bekor qilish: /cancel');
   });
 
   bot.hears('✏️ Narx oʻzgartirish', async (ctx) => {
@@ -3812,6 +4071,18 @@ ${preset.title}
 
   bot.on('message', async (ctx) => {
     if (ctx.session.mode === 'global_broadcast') return sendGlobalBroadcast(ctx);
+  });
+
+  bot.on('chat_join_request', async (ctx) => {
+    try {
+      const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
+      const doc = await recordJoinRequestForBot(GLOBAL_SUBSCRIPTION_BOT_KEY, req);
+      if (doc?.user_id) {
+        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'global kanal/guruh'} uchun zayavkangiz yozib olindi. Endi BotFactoryga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+      }
+    } catch (error) {
+      console.error('FactoryBot chat_join_request saqlash xatosi:', error.message);
+    }
   });
 
   bot.catch((err, ctx) => {
