@@ -3,6 +3,7 @@
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const BOT_CONFIGS_RAW = require('./bots.config');
@@ -508,16 +509,35 @@ const giveawaySchema = new mongoose.Schema(
   {
     bot_key: { type: String, required: true, index: true },
     title: { type: String, required: true },
+    prize_name: String,
     description: String,
+    rules: String,
+    prize_photo_file_id: String,
     winners_count: { type: Number, default: 1 },
-    status: { type: String, enum: ['active', 'closed'], default: 'active', index: true },
+    winner_mode: {
+      type: String,
+      enum: ['top_referrals', 'random', 'admin'],
+      default: 'top_referrals',
+      index: true
+    },
+    referral_points: { type: Number, default: 5 },
+    starts_at: { type: Date, default: Date.now, index: true },
+    ends_at: { type: Date, required: true, index: true },
+    duration_seconds: { type: Number, required: true },
+    status: { type: String, enum: ['active', 'frozen', 'closed'], default: 'active', index: true },
     created_by: Number,
+    frozen_at: Date,
+    closed_at: Date,
+    result_sent_at: Date,
+    result_snapshot: { type: Array, default: [] },
     drawn_by: Number,
     drawn_at: Date,
-    winner_user_ids: { type: [Number], default: [] }
+    winner_user_ids: { type: [Number], default: [] },
+    admin_selection_completed_at: Date
   },
   { timestamps: true, collection: 'multibot_giveaways' }
 );
+giveawaySchema.index({ bot_key: 1, status: 1, ends_at: 1 });
 const Giveaway = mongoose.model('Giveaway', giveawaySchema);
 
 const giveawayParticipantSchema = new mongoose.Schema(
@@ -526,12 +546,61 @@ const giveawayParticipantSchema = new mongoose.Schema(
     giveaway_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     user_id: { type: Number, required: true, index: true },
     username: String,
-    first_name: String
+    telegram_first_name: String,
+    telegram_last_name: String,
+    first_name: String, // eski konkurs yozuvlari bilan moslik
+    full_name: String,
+    onboarding_status: {
+      type: String,
+      enum: ['pending_name', 'pending_captcha', 'active'],
+      default: 'pending_name',
+      index: true
+    },
+    captcha_answer: String,
+    captcha_options: { type: [String], default: [] },
+    captcha_attempts: { type: Number, default: 0 },
+    captcha_passed_at: Date,
+    score: { type: Number, default: 0, index: true },
+    referrer_user_id: { type: Number, default: null, index: true },
+    referrer_awarded: { type: Boolean, default: false },
+    referrals_confirmed: { type: Number, default: 0 },
+    referral_visits: { type: Number, default: 0 },
+    share_actions: { type: Number, default: 0 },
+    source_code: { type: String, default: null, index: true },
+    source_chat_id: String,
+    source_chat_title: String,
+    source_chat_username: String,
+    source_chat_type: String,
+    source_first_seen_at: Date,
+    source_join_counted: { type: Boolean, default: false },
+    joined_at: Date,
+    last_seen_at: { type: Date, default: Date.now }
   },
   { timestamps: true, collection: 'multibot_giveaway_participants' }
 );
 giveawayParticipantSchema.index({ bot_key: 1, giveaway_id: 1, user_id: 1 }, { unique: true });
+giveawayParticipantSchema.index({ bot_key: 1, giveaway_id: 1, score: -1, joined_at: 1 });
 const GiveawayParticipant = mongoose.model('GiveawayParticipant', giveawayParticipantSchema);
+
+const giveawaySourceSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    giveaway_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    source_code: { type: String, required: true, unique: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    chat_title: String,
+    chat_username: String,
+    chat_type: String,
+    created_by: Number,
+    posts_count: { type: Number, default: 0 },
+    clicks_count: { type: Number, default: 0 },
+    joins_count: { type: Number, default: 0 },
+    last_posted_at: Date
+  },
+  { timestamps: true, collection: 'multibot_giveaway_sources' }
+);
+giveawaySourceSchema.index({ bot_key: 1, giveaway_id: 1, chat_id: 1 }, { unique: true });
+const GiveawaySource = mongoose.model('GiveawaySource', giveawaySourceSchema);
 
 const faqSchema = new mongoose.Schema(
   {
@@ -1575,6 +1644,30 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply(`${config.listEmoji} Soʻnggi 20 ta ${config.item}:\n\n${lines.join('\n\n')}`);
   });
 
+  bot.hears('📍 Manba statistikasi', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs yo‘q.');
+    const sources = await GiveawaySource.find({ bot_key: config.key, giveaway_id: g._id }).sort({ joins_count: -1, clicks_count: -1, createdAt: 1 }).limit(50);
+    const direct = await GiveawayParticipant.countDocuments({
+      bot_key: config.key,
+      giveaway_id: g._id,
+      onboarding_status: 'active',
+      $or: [{ source_code: null }, { source_code: { $exists: false } }]
+    });
+    if (!sources.length) return ctx.reply(`📍 MANBA STATISTIKASI\n\nHali kanal/guruhga maxsus konkurs posti yuborilmagan.\nTo‘g‘ridan-to‘g‘ri kirganlar: ${direct}`);
+    return ctx.reply(
+      `📍 MANBA STATISTIKASI\n\n` +
+      sources.map((src, i) =>
+        `${i + 1}. ${src.chat_title || src.chat_username || src.chat_id}\n` +
+        `   👀 Bosilgan: ${src.clicks_count || 0} | ✅ Qo‘shilgan: ${src.joins_count || 0} | 📣 Post: ${src.posts_count || 0}\n` +
+        `   🆔 ${src.chat_id}${src.chat_username ? ` | ${src.chat_username}` : ''}`
+      ).join('\n\n') +
+      `\n\n➡️ To‘g‘ridan-to‘g‘ri kirganlar: ${direct}`,
+      adminKeyboard()
+    );
+  });
+
   bot.hears('📊 Statistika', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -2007,9 +2100,14 @@ function isSubscriptionCheckUpdate(ctx) {
 }
 
 function attachGlobalSubscriptionGate(bot, config, adminIds = []) {
-  if (!config.managed) return;
+  // Konkurs botida referral /start payload obunadan oldin DBga yozilishi kerak.
+  // Shuning uchun global+lokal obuna tekshiruvi createGiveawayBot ichida boshqariladi.
+  if (!config.managed || config.engine === 'giveaway') return;
   bot.use(async (ctx, next) => {
     if (!ctx.from) return next();
+    // Global obuna faqat botning private chatida tekshiriladi.
+    // Kanal/guruhga odam qo‘shilganda yoki guruhdagi oddiy xabarlarda ogohlantirish yuborilmaydi.
+    if (ctx.chat && ctx.chat.type !== 'private') return next();
     if (isSubscriptionCheckUpdate(ctx)) return next();
 
     const userId = Number(ctx.from.id);
@@ -2141,7 +2239,7 @@ async function deleteSubscriptionForBot(ctx, botKey, text, adminKeyboard) {
   return ctx.reply('❌ Bunday obuna topilmadi.', adminKeyboard());
 }
 
-function registerCommonAdminHandlers(bot, config, utils, adminKeyboard) {
+function registerCommonAdminHandlers(bot, config, utils, adminKeyboard, options = {}) {
   bot.hears('🏠 Bosh menyu', async (ctx) => ctx.reply('🏠 Admin menyu:', adminKeyboard()));
   bot.hears('📢 Broadcast', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
@@ -2173,7 +2271,25 @@ function registerCommonAdminHandlers(bot, config, utils, adminKeyboard) {
     ctx.session.draft = {};
     return ctx.reply('➖ O‘chiriladigan obuna nomi, @username, -100... yoki invite link yuboring.\n\n❌ Bekor qilish: /cancel');
   });
-  bot.action('check_subscription', async (ctx) => utils.handleSubscriptionCallback(ctx, adminKeyboard, '✅ Obuna tasdiqlandi!'));
+  bot.action('check_subscription', async (ctx) => {
+    if (typeof options.onSubscriptionSuccess === 'function') {
+      await ctx.answerCbQuery().catch(() => null);
+      await utils.saveUser(ctx);
+      const ok = await utils.checkAllSubscriptions(ctx.from.id);
+      if (!ok && !utils.isAdmin(ctx.from.id)) {
+        const keyboard = await utils.getSubscriptionKeyboard();
+        try {
+          return await ctx.editMessageText('❌ Hali barcha kanal/guruhlarga obuna bo‘lmagansiz.', keyboard);
+        } catch (_) {
+          return ctx.reply('❌ Hali barcha kanal/guruhlarga obuna bo‘lmagansiz.', keyboard);
+        }
+      }
+      try { await ctx.deleteMessage(); } catch (_) {}
+      if (utils.isAdmin(ctx.from.id)) return ctx.reply('✅ Tasdiqlandi! Admin panel:', adminKeyboard());
+      return options.onSubscriptionSuccess(ctx);
+    }
+    return utils.handleSubscriptionCallback(ctx, adminKeyboard, '✅ Obuna tasdiqlandi!');
+  });
   bot.action('noop', async (ctx) => ctx.answerCbQuery('Private chat uchun admin bergan ko‘rsatma bo‘yicha obuna bo‘ling.'));
 }
 
@@ -2374,34 +2490,1200 @@ function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
 function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null) {
   const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
   if (!hasUsableToken(token)) return null;
+
   const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
-  const bot = createBaseBot(token, config, adminIds);
+  const bot = createBaseBot(token, config, adminIds, {
+    mode: null,
+    draft: {},
+    giveawayId: null
+  });
   const utils = createSharedUtils(bot, config, adminIds);
-  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['🎁 Konkurs yaratish', '🎲 Gʻolib tanlash'], ['📋 Aktiv konkurs', '👥 Qatnashchilar'], ['➕ Konkurs kanali', '➕ Konkurs guruhi'], ['📋 Konkurs obunalari']])).resize().oneTime(false); }
-  async function activeGiveaway() { return Giveaway.findOne({ bot_key: config.key, status: 'active' }).sort({ createdAt: -1 }); }
-  async function showActive(ctx) {
-    const g = await activeGiveaway();
-    if (!g) return ctx.reply('📭 Hozir aktiv konkurs yo‘q.');
-    const count = await GiveawayParticipant.countDocuments({ bot_key: config.key, giveaway_id: g._id });
-    return ctx.reply(`🎁 ${g.title}\n\n${g.description || ''}\n\n👥 Qatnashchilar: ${count}\n🏆 G‘oliblar soni: ${g.winners_count}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Qatnashish', `gw:join:${String(g._id)}`)]]));
+
+  const CAPTCHA_ITEMS = {
+    laptop: { emoji: '💻', label: 'Noutbuk', file: 'laptop.png' },
+    fridge: { emoji: '🧊', label: 'Muzlatgich', file: 'fridge.png' },
+    tv: { emoji: '📺', label: 'Televizor', file: 'tv.png' },
+    washer: { emoji: '🧺', label: 'Kir yuvish mashinasi', file: 'washer.png' },
+    phone: { emoji: '📱', label: 'Telefon', file: 'phone.png' },
+    headphones: { emoji: '🎧', label: 'Quloqchin', file: 'headphones.png' },
+    vacuum: { emoji: '🧹', label: 'Changyutgich', file: 'vacuum.png' },
+    microwave: { emoji: '🍽', label: 'Mikroto‘lqinli pech', file: 'microwave.png' }
+  };
+
+  const USER_BUTTONS = {
+    rating: '🏆 Reyting',
+    invite: '👥 Do‘stlarni taklif qilish',
+    profile: '👤 Profil',
+    rules: '📜 Qoida'
+  };
+
+  function adminKeyboard() {
+    return Markup.keyboard([
+      ['🎮 Yangi konkurs', '⏱ Aktiv konkurs'],
+      ['🏁 Natijalar', '👥 Qatnashchilar'],
+      ['📣 Konkursni tarqatish', '🧑‍⚖️ G‘olib tanlash'],
+      ['➕ Konkurs kanali', '➕ Konkurs guruhi'],
+      ['📋 Konkurs obunalari', '🧊 Hozir yakunlash'],
+      ['📍 Manba statistikasi', '📊 Statistika'],
+      ['📢 Broadcast'],
+      ['🏠 Bosh menyu']
+    ]).resize().oneTime(false);
   }
-  bot.start(async (ctx) => { await utils.saveUser(ctx, true); if (utils.isAdmin(ctx.from.id)) return ctx.reply('🎁 Konkurs bot admin paneli', adminKeyboard()); const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok) return utils.sendSubscriptionWarning(ctx); return showActive(ctx); });
-  bot.hears('🎁 Konkurs yaratish', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'gw_create'; return ctx.reply('🎁 Konkurs yaratish.\n\nFormat:\nNomi | g‘oliblar soni | tavsif\n\nMisol:\niPhone konkursi | 3 | Kanalga obuna bo‘lib qatnashing\n\n❌ Bekor qilish: /cancel'); });
-  bot.hears('📋 Aktiv konkurs', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; return showActive(ctx); });
-  bot.hears('👥 Qatnashchilar', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const list = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }).sort({ createdAt: -1 }).limit(50); return ctx.reply(`👥 So‘nggi qatnashchilar (${list.length}):\n\n${list.map((p,i)=>`${i+1}. ${p.first_name || ''} ${p.username ? '@'+p.username : ''} — ${p.user_id}`).join('\n') || '—'}`); });
-  bot.hears('🎲 Gʻolib tanlash', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const g = await activeGiveaway(); if (!g) return ctx.reply('Aktiv konkurs yo‘q.'); const participants = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }); if (participants.length < 1) return ctx.reply('Qatnashchi yo‘q.'); const shuffled = participants.sort(() => Math.random() - 0.5); const winners = shuffled.slice(0, Math.min(g.winners_count, participants.length)); g.status = 'closed'; g.drawn_by = ctx.from.id; g.drawn_at = new Date(); g.winner_user_ids = winners.map(w=>w.user_id); await g.save(); const lines = winners.map((w,i)=>`${i+1}. ${w.first_name || ''} ${w.username ? '@'+w.username : ''} — ${w.user_id}`).join('\n'); return ctx.reply(`🏆 GʻOLIBLAR\n\n🎁 ${g.title}\n\n${lines}`); });
-  bot.hears('📊 Statistika', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const [users, active, blocked, giveaways, participants, subs] = await Promise.all([User.countDocuments({bot_key:config.key}), User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}), User.countDocuments({bot_key:config.key,is_blocked:true}), Giveaway.countDocuments({bot_key:config.key}), GiveawayParticipant.countDocuments({bot_key:config.key}), Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 KONKURS BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🎁 Konkurslar: ${giveaways}\n👥 Qatnashuvlar: ${participants}\n🔒 Konkurs majburiy obunalari: ${subs}`); });
-  bot.hears('➕ Konkurs kanali', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'add_channel'; return ctx.reply('➕ Konkurs uchun majburiy kanal qo‘shing.\n\n@kanal yoki Kanal nomi | https://t.me/+privateInvite | zayavka'); });
-  bot.hears('➕ Konkurs guruhi', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; ctx.session.mode = 'add_group'; return ctx.reply('➕ Konkurs uchun majburiy guruh qo‘shing.\n\n@guruh yoki Guruh nomi | https://t.me/+privateInvite | zayavka'); });
-  bot.hears('📋 Konkurs obunalari', async (ctx) => { if (!utils.isAdmin(ctx.from.id)) return; const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 }); if (!subs.length) return ctx.reply('📭 Konkurs uchun obuna yo‘q.'); return ctx.reply(`📋 Konkurs obunalari:\n\n${subs.map((s,i)=>`${i+1}. ${subLabel(s)}${s.join_url ? `\n   🔗 ${s.join_url}` : ''}${s.chat_ref ? `\n   🆔 ${s.chat_ref}` : ''}`).join('\n')}`); });
-  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
-  bot.action(/^gw:join:([a-f0-9]{24})$/, async (ctx) => { await ctx.answerCbQuery(); await utils.saveUser(ctx); const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok) return utils.sendSubscriptionWarning(ctx); const g = await Giveaway.findOne({_id:ctx.match[1],bot_key:config.key,status:'active'}); if (!g) return ctx.reply('❌ Konkurs tugagan yoki topilmadi.'); try { await GiveawayParticipant.create({bot_key:config.key,giveaway_id:g._id,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null}); return ctx.reply('✅ Siz konkursda qatnashyapsiz! Omad 🍀'); } catch(e) { if (e.code===11000) return ctx.reply('ℹ️ Siz allaqachon qatnashyapsiz.'); throw e; } });
-  bot.command('cancel', async (ctx)=>{ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
-  bot.on('text', async (ctx) => { await utils.saveUser(ctx); const text = ctx.message.text.trim(); if (text === '/cancel') {ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if (utils.isAdmin(ctx.from.id)) { const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common) return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='gw_create'){ const [titleRaw,wRaw,...descParts]=text.split('|').map(x=>x.trim()); const winners=Number(wRaw||1); if(!titleRaw||!Number.isFinite(winners)||winners<1) return ctx.reply('❌ Format noto‘g‘ri. Misol: iPhone konkursi | 3 | tavsif'); await Giveaway.updateMany({bot_key:config.key,status:'active'},{$set:{status:'closed'}}); await Giveaway.create({bot_key:config.key,title:titleRaw,winners_count:winners,description:descParts.join(' | '),created_by:ctx.from.id}); ctx.session.mode=null; return ctx.reply('✅ Konkurs yaratildi va aktiv qilindi.', adminKeyboard()); } } const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok&&!utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx); return showActive(ctx); });
-  bot.on('message', async (ctx)=>{await utils.saveUser(ctx); if(utils.isAdmin(ctx.from.id)&&ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;}});
+
+  function userKeyboard() {
+    return Markup.keyboard([
+      [USER_BUTTONS.rating, USER_BUTTONS.invite],
+      [USER_BUTTONS.profile, USER_BUTTONS.rules]
+    ]).resize().oneTime(false);
+  }
+
+  function resetAdminFlow(ctx) {
+    ctx.session.mode = null;
+    ctx.session.draft = {};
+    ctx.session.giveawayId = null;
+  }
+
+  function parseDurationInput(raw) {
+    const value = String(raw || '').trim().toLowerCase().replace(/\s+/g, '');
+    const match = value.match(/^(\d+(?:\.\d+)?)(m|min|daq|h|soat|d|kun|w|hafta)$/i);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const unit = match[2].toLowerCase();
+    let seconds = 0;
+    if (['m', 'min', 'daq'].includes(unit)) seconds = amount * 60;
+    else if (['h', 'soat'].includes(unit)) seconds = amount * 60 * 60;
+    else if (['d', 'kun'].includes(unit)) seconds = amount * 24 * 60 * 60;
+    else if (['w', 'hafta'].includes(unit)) seconds = amount * 7 * 24 * 60 * 60;
+    seconds = Math.round(seconds);
+    if (seconds < 60 || seconds > 365 * 24 * 60 * 60) return null;
+    return seconds;
+  }
+
+  function formatRemaining(endDate) {
+    const diff = Math.max(0, new Date(endDate).getTime() - Date.now());
+    if (diff <= 0) return '00:00:00';
+    let sec = Math.floor(diff / 1000);
+    const days = Math.floor(sec / 86400); sec %= 86400;
+    const hours = Math.floor(sec / 3600); sec %= 3600;
+    const mins = Math.floor(sec / 60); sec %= 60;
+    const parts = [];
+    if (days) parts.push(`${days} kun`);
+    parts.push(`${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(sec).padStart(2, '0')}`);
+    return parts.join(' ');
+  }
+
+  function shuffled(items) {
+    const arr = [...items];
+    for (let i = arr.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  function extractStartContext(ctx) {
+    const payload = String(ctx.startPayload || ctx.message?.text?.split(/\s+/)[1] || '').trim();
+    const out = { payload, referralId: null, sourceCode: null, action: 'join' };
+    let match = payload.match(/^ref_(\d+)$/i);
+    if (match) {
+      const id = Number(match[1]);
+      if (Number.isFinite(id) && id > 0) out.referralId = id;
+      return out;
+    }
+    match = payload.match(/^(src|rating|rules)_([A-Za-z0-9_-]{4,24})$/i);
+    if (match) {
+      out.action = match[1].toLowerCase() === 'src' ? 'join' : match[1].toLowerCase();
+      out.sourceCode = match[2];
+    }
+    return out;
+  }
+
+  function makeSourceCode() {
+    return crypto.randomBytes(6).toString('base64url');
+  }
+
+  function winnerModeLabel(mode) {
+    if (mode === 'random') return '🎲 Tasodifiy';
+    if (mode === 'admin') return '🧑‍⚖️ Admin tanlovi';
+    return '👥 Eng ko‘p do‘st taklif qilgan';
+  }
+
+  async function activeGiveaway() {
+    return Giveaway.findOne({ bot_key: config.key, status: 'active' }).sort({ createdAt: -1 });
+  }
+
+  async function latestGiveaway() {
+    return Giveaway.findOne({ bot_key: config.key }).sort({ createdAt: -1 });
+  }
+
+  async function configuredSubscriptionCount() {
+    return Subscription.countDocuments({ bot_key: { $in: [GLOBAL_SUBSCRIPTION_BOT_KEY, config.key] } });
+  }
+
+  async function participantFor(giveawayId, userId) {
+    return GiveawayParticipant.findOne({ bot_key: config.key, giveaway_id: giveawayId, user_id: Number(userId) });
+  }
+
+  async function rankingRows(giveawayId, limit = 10) {
+    return GiveawayParticipant.find({
+      bot_key: config.key,
+      giveaway_id: giveawayId,
+      onboarding_status: 'active'
+    }).sort({ referrals_confirmed: -1, score: -1, joined_at: 1, createdAt: 1 }).limit(limit);
+  }
+
+  async function userRank(giveawayId, participant) {
+    if (!participant || participant.onboarding_status !== 'active') return null;
+    const better = await GiveawayParticipant.countDocuments({
+      bot_key: config.key,
+      giveaway_id: giveawayId,
+      onboarding_status: 'active',
+      $or: [
+        { score: { $gt: participant.score } },
+        {
+          score: participant.score,
+          joined_at: { $lt: participant.joined_at || participant.createdAt }
+        }
+      ]
+    });
+    return better + 1;
+  }
+
+  function rankingText(g, list) {
+    if (!list.length) return 'Hali reytingda ishtirokchi yo‘q.';
+    return list.map((p, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+      const name = p.full_name || p.telegram_first_name || `User ${p.user_id}`;
+      return `${medal} ${name}${p.username ? ` (@${p.username})` : ''} — 👥 ${p.referrals_confirmed || 0} do‘st · ⭐ ${p.score} ball`;
+    }).join('\n');
+  }
+
+
+  let cachedBotUsername = String(config.telegramUsername || config.telegram_username || '').replace(/^@/, '');
+
+  async function getBotUsername() {
+    if (cachedBotUsername) return cachedBotUsername;
+    const me = await bot.telegram.getMe();
+    cachedBotUsername = String(me.username || '').replace(/^@/, '');
+    return cachedBotUsername;
+  }
+
+  async function ensureGiveawaySource(g, chat, createdBy = null) {
+    const chatId = String(chat?.id || chat || '').trim();
+    if (!chatId) throw new Error('Kanal/guruh chat ID topilmadi');
+    const title = chat?.title || chat?.first_name || chat?.username || chatId;
+    const username = chat?.username ? `@${chat.username}` : null;
+    let source = await GiveawaySource.findOne({ bot_key: config.key, giveaway_id: g._id, chat_id: chatId });
+    if (!source) {
+      for (let i = 0; i < 5 && !source; i += 1) {
+        try {
+          source = await GiveawaySource.create({
+            bot_key: config.key,
+            giveaway_id: g._id,
+            source_code: makeSourceCode(),
+            chat_id: chatId,
+            chat_title: title,
+            chat_username: username,
+            chat_type: chat?.type || null,
+            created_by: createdBy || null
+          });
+        } catch (error) {
+          if (error.code !== 11000) throw error;
+          source = await GiveawaySource.findOne({ bot_key: config.key, giveaway_id: g._id, chat_id: chatId });
+        }
+      }
+    } else {
+      source.chat_title = title;
+      source.chat_username = username;
+      source.chat_type = chat?.type || source.chat_type;
+      if (createdBy) source.created_by = createdBy;
+      await source.save();
+    }
+    if (!source) throw new Error('Konkurs manbasi yaratilmadi');
+    return source;
+  }
+
+  async function sourceStartLink(source, action = 'src') {
+    const username = await getBotUsername();
+    return `https://t.me/${username}?start=${action}_${source.source_code}`;
+  }
+
+  function contestPublicText(g, source = null) {
+    return (
+      `🎮 ${g.title}\n\n` +
+      `🎁 Sovrin: ${g.prize_name || 'Maxsus sovrin'}\n` +
+      `${g.description ? `✨ ${g.description}\n` : ''}` +
+      `🏆 G‘oliblar: ${g.winners_count} ta\n` +
+      `🎯 G‘olib aniqlash: ${winnerModeLabel(g.winner_mode)}\n` +
+      `⭐ Har bir haqiqiy do‘st: +${g.referral_points || 5} ball\n` +
+      `⏳ Tugashiga: ${formatRemaining(g.ends_at)}\n\n` +
+      `👇 Konkursga qo‘shilish uchun tugmani bosing.` +
+      (source?.chat_title ? `\n\n📍 Manba: ${source.chat_title}` : '')
+    );
+  }
+
+  async function contestPublicKeyboard(source) {
+    return Markup.inlineKeyboard([
+      [Markup.button.url('🎉 Konkursga qo‘shilish', await sourceStartLink(source, 'src'))],
+      [
+        Markup.button.url('🏆 Reyting', await sourceStartLink(source, 'rating')),
+        Markup.button.url('📜 Qoidalar', await sourceStartLink(source, 'rules'))
+      ]
+    ]);
+  }
+
+  async function postContestToChat(targetChat, g, createdBy = null) {
+    const chat = await bot.telegram.getChat(targetChat);
+    const source = await ensureGiveawaySource(g, chat, createdBy);
+    const keyboard = await contestPublicKeyboard(source);
+    const text = contestPublicText(g, source);
+    let sent;
+    if (g.prize_photo_file_id) {
+      sent = await bot.telegram.sendPhoto(chat.id, g.prize_photo_file_id, { caption: text, ...keyboard });
+    } else {
+      sent = await bot.telegram.sendMessage(chat.id, text, keyboard);
+    }
+    await GiveawaySource.updateOne(
+      { _id: source._id },
+      { $inc: { posts_count: 1 }, $set: { last_posted_at: new Date() } }
+    );
+    return { chat, source, sent };
+  }
+
+  async function isChatAdmin(ctx) {
+    if (ctx.from && utils.isAdmin(ctx.from.id)) return true;
+    if (!ctx.from || !ctx.chat || ctx.chat.type === 'private') return false;
+    try {
+      const member = await bot.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+      return ['administrator', 'creator'].includes(member.status);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function snapshotWinnerRows(g, snapshot) {
+    const ids = new Set((g.winner_user_ids || []).map(Number));
+    return snapshot.filter((p) => ids.has(Number(p.user_id)));
+  }
+
+  async function adminSelectionKeyboard(g, page = 0) {
+    const pageSize = 8;
+    const selected = new Set((g.winner_user_ids || []).map(Number));
+    const total = await GiveawayParticipant.countDocuments({ bot_key: config.key, giveaway_id: g._id, onboarding_status: 'active' });
+    const participants = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id, onboarding_status: 'active' })
+      .sort({ referrals_confirmed: -1, score: -1, joined_at: 1 })
+      .skip(page * pageSize)
+      .limit(pageSize);
+    const rows = participants.map((p) => [
+      Markup.button.callback(
+        `${selected.has(Number(p.user_id)) ? '✅' : '👤'} ${(p.full_name || p.telegram_first_name || p.user_id).slice(0, 28)} · ${p.referrals_confirmed || 0} do‘st`,
+        `gw:pick:${String(g._id)}:${p.user_id}:${page}`
+      )
+    ]);
+    const nav = [];
+    if (page > 0) nav.push(Markup.button.callback('⬅️ Oldingi', `gw:pickpage:${String(g._id)}:${page - 1}`));
+    if ((page + 1) * pageSize < total) nav.push(Markup.button.callback('Keyingi ➡️', `gw:pickpage:${String(g._id)}:${page + 1}`));
+    if (nav.length) rows.push(nav);
+    rows.push([Markup.button.callback(`🏁 Tanlovni yakunlash (${selected.size}/${g.winners_count})`, `gw:pickdone:${String(g._id)}`)]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  async function notifyAdminsResult(g, snapshot, finalAdminSelection = false) {
+    const winners = snapshotWinnerRows(g, snapshot);
+    const winnerText = winners.length
+      ? winners.map((p, i) => `${i + 1}. ${p.full_name || p.telegram_first_name || p.user_id}${p.username ? ` (@${p.username})` : ''} — ${p.referrals_confirmed || 0} do‘st / ${p.score || 0} ball`).join('\n')
+      : (g.winner_mode === 'admin' ? '🧑‍⚖️ Admin tanlovi kutilmoqda.' : 'Qatnashchi yo‘q.');
+    const topText = rankingText(g, snapshot.slice(0, 10));
+    const total = await GiveawayParticipant.countDocuments({ bot_key: config.key, giveaway_id: g._id, onboarding_status: 'active' });
+    const text =
+      `⏰ KONKURS VAQTI TUGADI\n\n` +
+      `🎁 ${g.title}\n` +
+      `🏆 Sovrin: ${g.prize_name || '—'}\n` +
+      `🎯 Usul: ${winnerModeLabel(g.winner_mode)}\n` +
+      `👥 Jami qatnashchi: ${total}\n` +
+      `🧊 Natija muzlatildi: ${formatDate(g.frozen_at || new Date())}\n\n` +
+      `🏅 G‘OLIBLAR:\n${winnerText}\n\n` +
+      `📊 TOP 10:\n${topText}`;
+    for (const id of adminIds) {
+      try {
+        if (g.winner_mode === 'admin' && !finalAdminSelection && winners.length < Number(g.winners_count || 1)) {
+          await bot.telegram.sendMessage(id, text, await adminSelectionKeyboard(g, 0));
+        } else {
+          await bot.telegram.sendMessage(id, text);
+        }
+      } catch (error) {
+        console.error(`${config.title} natija yuborish xatosi:`, error.message);
+      }
+    }
+  }
+
+  async function freezeGiveaway(g, force = false) {
+    if (!g) return null;
+    if (g.status !== 'active') return g;
+    if (!force && new Date(g.ends_at).getTime() > Date.now()) return g;
+
+    const participants = await GiveawayParticipant.find({
+      bot_key: config.key,
+      giveaway_id: g._id,
+      onboarding_status: 'active'
+    }).sort({ referrals_confirmed: -1, score: -1, joined_at: 1, createdAt: 1 }).limit(5000);
+
+    const snapshot = participants.map((p, index) => ({
+      rank: index + 1,
+      user_id: p.user_id,
+      username: p.username || null,
+      full_name: p.full_name || p.telegram_first_name || '',
+      score: p.score || 0,
+      referrals_confirmed: p.referrals_confirmed || 0,
+      source_chat_title: p.source_chat_title || null,
+      source_chat_id: p.source_chat_id || null
+    }));
+
+    const winnerCount = Math.max(1, Number(g.winners_count || 1));
+    let winnerIds = [];
+    if (g.winner_mode === 'random') {
+      winnerIds = shuffled(snapshot).slice(0, winnerCount).map((p) => p.user_id);
+    } else if (g.winner_mode === 'admin') {
+      winnerIds = [];
+    } else {
+      winnerIds = snapshot.slice(0, winnerCount).map((p) => p.user_id);
+    }
+
+    const now = new Date();
+    const updated = await Giveaway.findOneAndUpdate(
+      { _id: g._id, bot_key: config.key, status: 'active' },
+      {
+        $set: {
+          status: 'frozen',
+          frozen_at: now,
+          drawn_at: g.winner_mode === 'admin' ? null : now,
+          result_snapshot: snapshot,
+          winner_user_ids: winnerIds
+        }
+      },
+      { new: true }
+    );
+    const frozen = updated || await Giveaway.findById(g._id);
+    if (frozen) {
+      const claimed = await Giveaway.findOneAndUpdate(
+        { _id: frozen._id, $or: [{ result_sent_at: null }, { result_sent_at: { $exists: false } }] },
+        { $set: { result_sent_at: new Date() } },
+        { new: true }
+      );
+      if (claimed) await notifyAdminsResult(claimed, snapshot);
+    }
+    return frozen;
+  }
+
+  async function ensureGiveawayState(g = null) {
+    const current = g || await activeGiveaway();
+    if (!current) return null;
+    // Eski versiyada yaratilgan konkurslarda muddat maydonlari bo‘lmasligi mumkin.
+    if (!current.ends_at || !Number.isFinite(new Date(current.ends_at).getTime())) {
+      const start = current.starts_at || current.createdAt || new Date();
+      current.starts_at = start;
+      current.duration_seconds = Number(current.duration_seconds || 7 * 24 * 60 * 60);
+      current.ends_at = new Date(new Date(start).getTime() + current.duration_seconds * 1000);
+      current.referral_points = Math.max(1, Number(current.referral_points || 5));
+      await current.save();
+    }
+    if (current.status === 'active' && new Date(current.ends_at).getTime() <= Date.now()) return freezeGiveaway(current);
+    return current;
+  }
+
+  async function showActive(ctx, options = {}) {
+    let g = await activeGiveaway();
+    if (!g) {
+      g = await latestGiveaway();
+      if (g?.status === 'frozen') return showResults(ctx, g);
+      return ctx.reply('📭 Hozir aktiv konkurs yo‘q. Yangi konkurs e’lon qilinishini kuting.');
+    }
+    g = await ensureGiveawayState(g);
+    if (!g || g.status !== 'active') return showResults(ctx, g);
+
+    const count = await GiveawayParticipant.countDocuments({ bot_key: config.key, giveaway_id: g._id, onboarding_status: 'active' });
+    const text =
+      `🎮 ${g.title}\n\n` +
+      `🎁 Sovrin: ${g.prize_name || 'Maxsus sovrin'}\n` +
+      `${g.description ? `✨ ${g.description}\n` : ''}` +
+      `👥 Qatnashchilar: ${count}\n` +
+      `🏆 G‘oliblar soni: ${g.winners_count}\n` +
+      `⭐ Har bir tasdiqlangan do‘st: +${g.referral_points || 5} ball\n` +
+      `⏳ Tugashiga: ${formatRemaining(g.ends_at)}\n` +
+      `📅 Yakun: ${formatDate(g.ends_at)}`;
+
+    const keyboard = options.admin ? adminKeyboard() : userKeyboard();
+    if (g.prize_photo_file_id) {
+      try { return await ctx.replyWithPhoto(g.prize_photo_file_id, { caption: text, ...keyboard }); } catch (_) {}
+    }
+    return ctx.reply(text, keyboard);
+  }
+
+  async function showResults(ctx, giveaway = null) {
+    const g = giveaway || await latestGiveaway();
+    if (!g) return ctx.reply('📭 Hali konkurs natijasi yo‘q.');
+    const ready = g.status === 'active' ? await freezeGiveaway(g, true) : g;
+    const list = Array.isArray(ready.result_snapshot) && ready.result_snapshot.length
+      ? ready.result_snapshot.slice(0, 10)
+      : (await rankingRows(ready._id, 10)).map((p, i) => ({ ...p.toObject(), rank: i + 1 }));
+    const winnerRows = snapshotWinnerRows(ready, Array.isArray(ready.result_snapshot) ? ready.result_snapshot : list);
+    const winners = winnerRows.length
+      ? winnerRows.map((p, i) => `${i + 1}. ${p.full_name || p.telegram_first_name || p.user_id}${p.username ? ` (@${p.username})` : ''} — 👥 ${p.referrals_confirmed || 0} / ⭐ ${p.score || 0}`).join('\n')
+      : (ready.winner_mode === 'admin' ? '🧑‍⚖️ Admin hali g‘oliblarni tanlamagan.' : 'Qatnashchi yo‘q.');
+    const lines = list.length
+      ? list.map((p, i) => {
+          const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+          return `${medal} ${p.full_name || p.telegram_first_name || p.user_id}${p.username ? ` (@${p.username})` : ''} — 👥 ${p.referrals_confirmed || 0} / ⭐ ${p.score || 0}`;
+        }).join('\n')
+      : 'Qatnashchi yo‘q.';
+    return ctx.reply(
+      `🏁 KONKURS NATIJASI\n\n🎁 ${ready.title}\n🎯 ${winnerModeLabel(ready.winner_mode)}\n🧊 Holat: ${ready.status === 'frozen' ? 'natija muzlatilgan' : ready.status}\n\n` +
+      `🏅 G‘OLIBLAR:\n${winners}\n\n📊 REYTING:\n${lines}`,
+      utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()
+    );
+  }
+
+  async function ensureParticipant(ctx, g, referralId = null, sourceCode = null) {
+    let participant = await participantFor(g._id, ctx.from.id);
+    if (participant) {
+      participant.username = ctx.from.username || null;
+      participant.telegram_first_name = ctx.from.first_name || participant.first_name || null;
+      participant.telegram_last_name = ctx.from.last_name || null;
+      participant.last_seen_at = new Date();
+      // Eski oddiy konkurs qatnashchilarini yangi reyting tizimiga xavfsiz ko‘chirish.
+      if (!participant.onboarding_status) participant.onboarding_status = 'active';
+      if (!participant.full_name) participant.full_name = participant.first_name || ctx.from.first_name || `User ${ctx.from.id}`;
+      if (participant.onboarding_status === 'active' && !participant.joined_at) participant.joined_at = participant.createdAt || new Date();
+      if (sourceCode && !participant.source_code) {
+        const source = await GiveawaySource.findOne({ bot_key: config.key, giveaway_id: g._id, source_code: sourceCode });
+        if (source) {
+          participant.source_code = source.source_code;
+          participant.source_chat_id = source.chat_id;
+          participant.source_chat_title = source.chat_title;
+          participant.source_chat_username = source.chat_username;
+          participant.source_chat_type = source.chat_type;
+          participant.source_first_seen_at = new Date();
+          await GiveawaySource.updateOne({ _id: source._id }, { $inc: { clicks_count: 1 } });
+        }
+      }
+      await participant.save();
+      return participant;
+    }
+
+    let validReferrer = null;
+    if (referralId && Number(referralId) !== Number(ctx.from.id)) {
+      validReferrer = await GiveawayParticipant.findOne({
+        bot_key: config.key,
+        giveaway_id: g._id,
+        user_id: Number(referralId),
+        onboarding_status: 'active'
+      });
+    }
+
+    let source = null;
+    if (sourceCode) {
+      source = await GiveawaySource.findOne({ bot_key: config.key, giveaway_id: g._id, source_code: sourceCode });
+      if (source) await GiveawaySource.updateOne({ _id: source._id }, { $inc: { clicks_count: 1 } });
+    }
+
+    try {
+      participant = await GiveawayParticipant.create({
+        bot_key: config.key,
+        giveaway_id: g._id,
+        user_id: ctx.from.id,
+        username: ctx.from.username || null,
+        telegram_first_name: ctx.from.first_name || null,
+        telegram_last_name: ctx.from.last_name || null,
+        referrer_user_id: validReferrer ? validReferrer.user_id : null,
+        source_code: source?.source_code || null,
+        source_chat_id: source?.chat_id || null,
+        source_chat_title: source?.chat_title || null,
+        source_chat_username: source?.chat_username || null,
+        source_chat_type: source?.chat_type || null,
+        source_first_seen_at: source ? new Date() : null,
+        onboarding_status: 'pending_name',
+        last_seen_at: new Date()
+      });
+      if (validReferrer) {
+        await GiveawayParticipant.updateOne({ _id: validReferrer._id }, { $inc: { referral_visits: 1 } });
+      }
+      return participant;
+    } catch (error) {
+      if (error.code === 11000) return participantFor(g._id, ctx.from.id);
+      throw error;
+    }
+  }
+
+  async function askName(ctx, participant) {
+    ctx.session.mode = 'gw_wait_name';
+    ctx.session.giveawayId = String(participant.giveaway_id);
+    return ctx.reply(
+      `👋 Konkursga kirishning 1-bosqichi\n\n` +
+      `Ism va familiyangizni yozib yuboring.\n` +
+      `Masalan: Abdurahmon Qoryog‘diyev\n\n` +
+      `🔐 Bu ma’lumot reyting va g‘oliblar ro‘yxati uchun ishlatiladi.`
+    );
+  }
+
+  async function sendCaptcha(ctx, participant) {
+    const keys = Object.keys(CAPTCHA_ITEMS);
+    const answer = keys[Math.floor(Math.random() * keys.length)];
+    const distractors = shuffled(keys.filter((key) => key !== answer)).slice(0, 2);
+    const options = shuffled([answer, ...distractors]);
+    participant.onboarding_status = 'pending_captcha';
+    participant.captcha_answer = answer;
+    participant.captcha_options = options;
+    participant.last_seen_at = new Date();
+    await participant.save();
+    ctx.session.mode = 'gw_wait_captcha';
+    ctx.session.giveawayId = String(participant.giveaway_id);
+
+    const rows = options.map((key) => [Markup.button.callback(`${CAPTCHA_ITEMS[key].emoji} ${CAPTCHA_ITEMS[key].label}`, `gw:cap:${String(participant.giveaway_id)}:${key}`)]);
+    const assetPath = path.join(__dirname, 'assets', 'contest', CAPTCHA_ITEMS[answer].file);
+    const caption =
+      `🤖 BOT TEKSHIRUVI — 2-BOSQICH\n\n` +
+      `Bot emasligingizni isbotlash uchun rasmda nima berilganini ko‘rsating 👇\n\n` +
+      `⚠️ Xato tanlasangiz, yangi rasm bilan qayta tekshirilasiz.`;
+    try {
+      return await ctx.replyWithPhoto({ source: assetPath }, { caption, ...Markup.inlineKeyboard(rows) });
+    } catch (error) {
+      console.error(`${config.title} captcha rasm xatosi:`, error.message);
+      return ctx.reply(caption, Markup.inlineKeyboard(rows));
+    }
+  }
+
+  async function rewardReferrer(g, participant) {
+    if (!participant.referrer_user_id || participant.referrer_awarded) return;
+    const referrer = await GiveawayParticipant.findOne({
+      bot_key: config.key,
+      giveaway_id: g._id,
+      user_id: participant.referrer_user_id,
+      onboarding_status: 'active'
+    });
+    if (!referrer || Number(referrer.user_id) === Number(participant.user_id)) return;
+    const points = Math.max(1, Number(g.referral_points || 5));
+    await GiveawayParticipant.updateOne(
+      { _id: referrer._id },
+      { $inc: { score: points, referrals_confirmed: 1 } }
+    );
+    participant.referrer_awarded = true;
+    await participant.save();
+    try {
+      await bot.telegram.sendMessage(
+        referrer.user_id,
+        `🎉 Siz taklif qilgan ${participant.full_name || 'do‘stingiz'} konkursga muvaffaqiyatli qo‘shildi!\n\n⭐ +${points} ball berildi.`,
+        userKeyboard()
+      );
+    } catch (_) {}
+  }
+
+  async function activateParticipant(ctx, g, participant) {
+    participant.onboarding_status = 'active';
+    participant.captcha_passed_at = new Date();
+    participant.joined_at = participant.joined_at || new Date();
+    participant.captcha_answer = null;
+    participant.captcha_options = [];
+    if (participant.source_code && !participant.source_join_counted) {
+      participant.source_join_counted = true;
+      await GiveawaySource.updateOne(
+        { bot_key: config.key, giveaway_id: g._id, source_code: participant.source_code },
+        { $inc: { joins_count: 1 } }
+      ).catch(() => null);
+    }
+    await participant.save();
+    await rewardReferrer(g, participant);
+    ctx.session.mode = null;
+    ctx.session.giveawayId = null;
+
+    const rules = g.rules ||
+      `1. Majburiy kanallarga konkurs yakunigacha obuna bo‘ling.\n` +
+      `2. Har bir haqiqiy va tekshiruvdan o‘tgan do‘st uchun +${g.referral_points || 5} ball beriladi.\n` +
+      `3. Soxta akkaunt, obunadan chiqish yoki aldov aniqlansa natija bekor qilinadi.\n` +
+      `4. Vaqt tugashi bilan reyting avtomatik muzlatiladi.`;
+
+    return ctx.reply(
+      `🎊 TABRIKLAYMIZ, ${participant.full_name}!\n\n` +
+      `✅ Siz konkursimizda muvaffaqiyatli ishtirok etmoqdasiz.\n` +
+      `🎁 ${g.title}\n` +
+      `⭐ Hozirgi ball: ${participant.score || 0}\n` +
+      `⏳ Tugashiga: ${formatRemaining(g.ends_at)}\n\n` +
+      `📜 QISQA QOIDALAR:\n${rules}`,
+      userKeyboard()
+    );
+  }
+
+  async function continueOnboarding(ctx, g = null, startContext = null) {
+    const contest = await ensureGiveawayState(g || await activeGiveaway());
+    if (!contest) return ctx.reply('📭 Hozir aktiv konkurs yo‘q. Yangi konkursni kuting.');
+    if (contest.status !== 'active') return showResults(ctx, contest);
+
+    // Referral parametrini obunadan oldin DBga yozamiz. Aks holda user kanalga obuna
+    // bo‘lib qaytganda callback ichida /start payload yo‘qolib, ball hisoblanmay qoladi.
+    const meta = startContext || extractStartContext(ctx);
+    const participant = await ensureParticipant(ctx, contest, meta.referralId, meta.sourceCode);
+
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
+
+    if (participant.onboarding_status === 'active') {
+      if (meta.action === 'rating') return showRating(ctx);
+      if (meta.action === 'rules') return showRules(ctx);
+      return showActive(ctx);
+    }
+    if (participant.onboarding_status === 'pending_captcha' && participant.full_name) return sendCaptcha(ctx, participant);
+    return askName(ctx, participant);
+  }
+
+  async function showRating(ctx) {
+    const g = await ensureGiveawayState(await activeGiveaway()) || await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs topilmadi.');
+    const participant = await participantFor(g._id, ctx.from.id);
+    if (!participant || participant.onboarding_status !== 'active') return continueOnboarding(ctx, g);
+    const top = await rankingRows(g._id, 10);
+    const rank = await userRank(g._id, participant);
+    return ctx.reply(
+      `🏆 TOP 10 REYTING\n\n${rankingText(g, top)}\n\n` +
+      `━━━━━━━━━━━━\n` +
+      `👤 Sizning o‘rningiz: ${rank ? `${rank}-o‘rin` : '—'}\n` +
+      `⭐ Sizning ballingiz: ${participant.score || 0}\n` +
+      `⏳ Qolgan vaqt: ${g.status === 'active' ? formatRemaining(g.ends_at) : 'yakunlangan'}`,
+      userKeyboard()
+    );
+  }
+
+  async function showInvite(ctx) {
+    const g = await ensureGiveawayState(await activeGiveaway());
+    if (!g || g.status !== 'active') return ctx.reply('⏰ Konkurs yakunlangan. Yangi konkursni kuting.', userKeyboard());
+    const participant = await participantFor(g._id, ctx.from.id);
+    if (!participant || participant.onboarding_status !== 'active') return continueOnboarding(ctx, g);
+    await GiveawayParticipant.updateOne({ _id: participant._id }, { $inc: { share_actions: 1 } });
+    const me = ctx.botInfo?.username || config.telegramUsername || config.telegram_username || '';
+    const link = `https://t.me/${String(me).replace(/^@/, '')}?start=ref_${ctx.from.id}`;
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(`🎁 ${g.title}\nKonkursda qatnashing va sovrin yutib oling!`)}`;
+    return ctx.reply(
+      `👥 DO‘STLARNI TAKLIF QILING\n\n` +
+      `Har bir havolangiz orqali kirib, obuna va bot tekshiruvidan muvaffaqiyatli o‘tgan do‘st uchun ⭐ +${g.referral_points || 5} ball olasiz.\n\n` +
+      `🔗 Shaxsiy havolangiz:\n${link}\n\n` +
+      `✅ Hisoblangan do‘stlar: ${participant.referrals_confirmed || 0}\n` +
+      `⭐ Ball: ${participant.score || 0}`,
+      Markup.inlineKeyboard([
+        [Markup.button.url('📤 Telegramda ulashish', shareUrl)],
+        [Markup.button.callback('🏆 Reytingni ko‘rish', 'gw:rating')]
+      ])
+    );
+  }
+
+  async function showProfile(ctx) {
+    const g = await ensureGiveawayState(await activeGiveaway()) || await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs topilmadi.');
+    const participant = await participantFor(g._id, ctx.from.id);
+    if (!participant || participant.onboarding_status !== 'active') return continueOnboarding(ctx, g);
+    const rank = await userRank(g._id, participant);
+    return ctx.reply(
+      `👤 PROFIL\n\n` +
+      `🪪 Ism: ${participant.full_name || '—'}\n` +
+      `🆔 Telegram ID: ${participant.user_id}\n` +
+      `🏆 Reyting: ${rank ? `${rank}-o‘rin` : '—'}\n` +
+      `⭐ Ball: ${participant.score || 0}\n` +
+      `👀 Taklif havolasi orqali kirganlar: ${participant.referral_visits || 0}\n` +
+      `✅ Hisoblangan do‘stlar: ${participant.referrals_confirmed || 0}\n` +
+      `📤 Ulashish tugmasi bosilgan: ${participant.share_actions || 0}\n` +
+      `📍 Kirgan manba: ${participant.source_chat_title || 'to‘g‘ridan-to‘g‘ri'}\n` +
+      `⏳ Konkurs: ${g.status === 'active' ? formatRemaining(g.ends_at) : 'yakunlangan'}`,
+      userKeyboard()
+    );
+  }
+
+  async function showRules(ctx) {
+    const g = await ensureGiveawayState(await activeGiveaway()) || await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs topilmadi.');
+    const rules = g.rules ||
+      `1. Majburiy kanal/guruhlarga obuna bo‘ling.\n` +
+      `2. Ismni to‘g‘ri kiriting va bot tekshiruvidan o‘ting.\n` +
+      `3. Har bir haqiqiy do‘st uchun +${g.referral_points || 5} ball.\n` +
+      `4. Soxta akkauntlar hisoblanmaydi.\n` +
+      `5. Vaqt tugashi bilan reyting avtomatik muzlatiladi.`;
+    return ctx.reply(
+      `📜 KONKURS QOIDALARI\n\n${rules}\n\n` +
+      `🎁 Sovrin: ${g.prize_name || '—'}\n` +
+      `🏆 G‘oliblar: ${g.winners_count}\n` +
+      `⏳ ${g.status === 'active' ? `Qolgan vaqt: ${formatRemaining(g.ends_at)}` : 'Konkurs yakunlangan'}`,
+      userKeyboard()
+    );
+  }
+
+  async function finalizeGiveaway(ctx, photoFileId = null) {
+    const d = ctx.session.draft || {};
+    if (!d.title || !d.prize_name || !d.winners_count || !d.duration_seconds || !d.rules) {
+      resetAdminFlow(ctx);
+      return ctx.reply('❌ Konkurs ma’lumotlari to‘liq emas. Qaytadan yarating.', adminKeyboard());
+    }
+    const now = new Date();
+    const endsAt = new Date(now.getTime() + Number(d.duration_seconds) * 1000);
+    await Giveaway.updateMany({ bot_key: config.key, status: 'active' }, { $set: { status: 'closed', closed_at: now } });
+    const g = await Giveaway.create({
+      bot_key: config.key,
+      title: d.title,
+      prize_name: d.prize_name,
+      description: d.description || '',
+      rules: d.rules,
+      prize_photo_file_id: photoFileId || null,
+      winners_count: Number(d.winners_count),
+      winner_mode: d.winner_mode || 'top_referrals',
+      referral_points: Math.max(1, Number(d.referral_points || 5)),
+      starts_at: now,
+      ends_at: endsAt,
+      duration_seconds: Number(d.duration_seconds),
+      status: 'active',
+      created_by: ctx.from.id
+    });
+    resetAdminFlow(ctx);
+    await ctx.reply(
+      `✅ KONKURS ISHGA TUSHDI!\n\n🎮 ${g.title}\n🎁 ${g.prize_name}\n🏆 ${g.winners_count} ta g‘olib\n⭐ Referral: +${g.referral_points} ball\n⏳ Tugash: ${formatDate(g.ends_at)}`,
+      adminKeyboard()
+    );
+    return showActive(ctx, { admin: true });
+  }
+
+  bot.start(async (ctx) => {
+    // /start onboarding faqat private chatda ishlaydi. Guruh/kanalda warning yuborilmaydi.
+    if (ctx.chat?.type !== 'private') return;
+    await utils.saveUser(ctx, true);
+    if (utils.isAdmin(ctx.from.id)) {
+      const subCount = await configuredSubscriptionCount();
+      return ctx.reply(
+        `🎮 ${config.title} admin paneli\n\n` +
+        `🔒 Sozlangan majburiy obunalar: ${subCount} ta\n` +
+        `${subCount < 2 ? '⚠️ Konkurs boshlashdan oldin kamida 2 ta kanal/guruh qo‘shing.\n' : '✅ Obuna bosqichi tayyor.\n'}` +
+        `🏁 Muddat tugaganda natija avtomatik muzlatilib sizga yuboriladi.`,
+        adminKeyboard()
+      );
+    }
+    return continueOnboarding(ctx, null, extractStartContext(ctx));
+  });
+
+  bot.hears(['🎮 Yangi konkurs', '🎁 Konkurs yaratish'], async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const subCount = await configuredSubscriptionCount();
+    if (subCount < 2) {
+      return ctx.reply(
+        `❌ Konkursni boshlash uchun kamida 2 ta majburiy kanal/guruh kerak.\n\n` +
+        `Hozir: ${subCount} ta.\n“➕ Konkurs kanali” orqali 2 ta kanal qo‘shing.`
+      );
+    }
+    resetAdminFlow(ctx);
+    ctx.session.mode = 'gw_create_title';
+    return ctx.reply('🎮 1/8 — Konkurs nomini yuboring.\n\nMisol: SUPER TEXNO KONKURS\n\n❌ Bekor qilish: /cancel');
+  });
+
+  bot.hears(['⏱ Aktiv konkurs', '📋 Aktiv konkurs'], async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    return showActive(ctx, { admin: true });
+  });
+
+  bot.hears(['🏁 Natijalar', '🎲 Gʻolib tanlash'], async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs yo‘q.');
+    if (g.status === 'active' && new Date(g.ends_at).getTime() > Date.now()) {
+      const top = await rankingRows(g._id, 10);
+      return ctx.reply(`📊 HOZIRGI NATIJA (hali muzlatilmagan)\n\n${rankingText(g, top)}\n\n⏳ Qolgan vaqt: ${formatRemaining(g.ends_at)}`, adminKeyboard());
+    }
+    return showResults(ctx, g);
+  });
+
+  bot.hears('🧊 Hozir yakunlash', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await activeGiveaway();
+    if (!g) return ctx.reply('📭 Aktiv konkurs yo‘q.');
+    const frozen = await freezeGiveaway(g, true);
+    return ctx.reply(`✅ “${frozen.title}” natijasi muzlatildi va adminlarga yuborildi.`, adminKeyboard());
+  });
+
+  bot.hears('👥 Qatnashchilar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await latestGiveaway();
+    if (!g) return ctx.reply('📭 Konkurs yo‘q.');
+    const list = await GiveawayParticipant.find({ bot_key: config.key, giveaway_id: g._id }).sort({ score: -1, joined_at: 1, createdAt: 1 }).limit(50);
+    if (!list.length) return ctx.reply('📭 Qatnashchilar yo‘q.');
+    return ctx.reply(
+      `👥 QATNASHCHILAR (${list.length})\n\n` +
+      list.map((p, i) => `${i + 1}. ${p.full_name || p.telegram_first_name || 'Noma’lum'}${p.username ? ` @${p.username}` : ''}\n   ⭐ ${p.score || 0} | 👤 ${p.referrals_confirmed || 0} referral | 📌 ${p.onboarding_status}`).join('\n\n'),
+      adminKeyboard()
+    );
+  });
+
+  bot.hears('📣 Konkursni tarqatish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await ensureGiveawayState(await activeGiveaway());
+    if (!g || g.status !== 'active') return ctx.reply('📭 Tarqatish uchun aktiv konkurs yo‘q.');
+    ctx.session.mode = 'gw_post_target';
+    ctx.session.giveawayId = String(g._id);
+    return ctx.reply(
+      '📣 Konkurs posti yuboriladigan kanal/guruhni yuboring.\n\n' +
+      'Misollar:\n@kanal_username\n@guruh_username\n-1001234567890\n\n' +
+      'Bot o‘sha kanal/guruhda xabar yuborish huquqiga ega bo‘lishi kerak.\n\n' +
+      'Guruh admini guruhning o‘zida /konkurs buyrug‘ini ham ishlatishi mumkin.'
+    );
+  });
+
+  bot.hears('🧑‍⚖️ G‘olib tanlash', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await Giveaway.findOne({ bot_key: config.key, winner_mode: 'admin', status: 'frozen' }).sort({ createdAt: -1 });
+    if (!g) return ctx.reply('📭 Admin tanlovi kutilayotgan muzlatilgan konkurs yo‘q.');
+    return ctx.reply(
+      `🧑‍⚖️ G‘OLIB TANLASH\n\n🎁 ${g.title}\nKerak: ${g.winners_count} ta\nTanlangan: ${(g.winner_user_ids || []).length} ta`,
+      await adminSelectionKeyboard(g, 0)
+    );
+  });
+
+  bot.command('konkurs', async (ctx) => {
+    if (ctx.chat?.type === 'private') {
+      if (!utils.isAdmin(ctx.from.id)) return showActive(ctx);
+      const g = await ensureGiveawayState(await activeGiveaway());
+      if (!g || g.status !== 'active') return ctx.reply('📭 Aktiv konkurs yo‘q.');
+      ctx.session.mode = 'gw_post_target';
+      ctx.session.giveawayId = String(g._id);
+      return ctx.reply('📣 Kanal/guruh @username yoki chat ID yuboring.');
+    }
+    if (!(await isChatAdmin(ctx))) return;
+    const g = await ensureGiveawayState(await activeGiveaway());
+    if (!g || g.status !== 'active') return ctx.reply('📭 Aktiv konkurs yo‘q.');
+    try {
+      await postContestToChat(ctx.chat.id, g, ctx.from?.id || null);
+      try { await ctx.deleteMessage(); } catch (_) {}
+    } catch (error) {
+      return ctx.reply(`❌ Konkurs postini yuborib bo‘lmadi: ${error.message}`);
+    }
+  });
+
+  bot.command('contest', async (ctx) => {
+    if (ctx.chat?.type === 'private') return;
+    if (!(await isChatAdmin(ctx))) return;
+    const g = await ensureGiveawayState(await activeGiveaway());
+    if (!g || g.status !== 'active') return ctx.reply('📭 Aktiv konkurs yo‘q.');
+    try {
+      await postContestToChat(ctx.chat.id, g, ctx.from?.id || null);
+      try { await ctx.deleteMessage(); } catch (_) {}
+    } catch (error) {
+      return ctx.reply(`❌ Konkurs postini yuborib bo‘lmadi: ${error.message}`);
+    }
+  });
+
+  bot.hears('➕ Konkurs kanali', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'add_channel';
+    ctx.session.draft = {};
+    return ctx.reply('📢 Majburiy konkurs kanalini qo‘shing.\n\nPublic: @kanal\nPrivate: Kanal nomi | -1001234567890 | zayavka\n\nKamida 2 ta kanal/guruh qo‘shing.');
+  });
+
+  bot.hears('➕ Konkurs guruhi', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'add_group';
+    ctx.session.draft = {};
+    return ctx.reply('👥 Majburiy konkurs guruhini qo‘shing.\n\nPublic: @guruh\nPrivate: Guruh nomi | -1001234567890 | zayavka');
+  });
+
+  bot.hears('📋 Konkurs obunalari', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const subs = await Subscription.find({ bot_key: { $in: [GLOBAL_SUBSCRIPTION_BOT_KEY, config.key] } }).sort({ bot_key: 1, createdAt: 1 });
+    if (!subs.length) return ctx.reply('📭 Majburiy obunalar yo‘q.');
+    return ctx.reply(
+      `🔒 KONKURS OBUNALARI (${subs.length})\n\n` +
+      subs.map((sub, i) => `${i + 1}. ${sub.bot_key === GLOBAL_SUBSCRIPTION_BOT_KEY ? '🌐' : '🎮'} ${subLabel(sub)}${sub.join_url ? `\n   ${sub.join_url}` : ''}`).join('\n\n'),
+      adminKeyboard()
+    );
+  });
+
+  bot.hears('📊 Statistika', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await latestGiveaway();
+    const [users, activeUsers, blocked, contests, totalParticipants, verifiedParticipants, subs, sources] = await Promise.all([
+      User.countDocuments({ bot_key: config.key }),
+      User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }),
+      User.countDocuments({ bot_key: config.key, is_blocked: true }),
+      Giveaway.countDocuments({ bot_key: config.key }),
+      GiveawayParticipant.countDocuments({ bot_key: config.key }),
+      GiveawayParticipant.countDocuments({ bot_key: config.key, onboarding_status: 'active' }),
+      configuredSubscriptionCount(),
+      GiveawaySource.countDocuments({ bot_key: config.key })
+    ]);
+    const referrals = await GiveawayParticipant.aggregate([
+      { $match: { bot_key: config.key } },
+      { $group: { _id: null, total: { $sum: '$referrals_confirmed' }, points: { $sum: '$score' } } }
+    ]);
+    return ctx.reply(
+      `📊 KONKURS BOT STATISTIKASI\n\n` +
+      `👥 Userlar: ${users}\n✅ Aktiv: ${activeUsers}\n🚫 Blok: ${blocked}\n` +
+      `🎮 Konkurslar: ${contests}\n🧩 Jami onboarding: ${totalParticipants}\n✅ Tasdiqlangan qatnashchi: ${verifiedParticipants}\n` +
+      `👤 Referral hisoblangan: ${referrals[0]?.total || 0}\n⭐ Umumiy ball: ${referrals[0]?.points || 0}\n` +
+      `🔒 Majburiy obunalar: ${subs}\n` +
+      `${g ? `⏳ Oxirgi konkurs: ${g.status} | ${formatDate(g.ends_at)}` : ''}`,
+      adminKeyboard()
+    );
+  });
+
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard, {
+    onSubscriptionSuccess: async (ctx) => continueOnboarding(ctx)
+  });
+
+  bot.action(/^gw:pickpage:([a-f0-9]{24}):(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await Giveaway.findOne({ _id: ctx.match[1], bot_key: config.key, winner_mode: 'admin', status: 'frozen' });
+    if (!g) return ctx.reply('❌ Konkurs topilmadi.');
+    const page = Math.max(0, Number(ctx.match[2] || 0));
+    return ctx.editMessageReplyMarkup((await adminSelectionKeyboard(g, page)).reply_markup);
+  });
+
+  bot.action(/^gw:pick:([a-f0-9]{24}):(\d+):(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await Giveaway.findOne({ _id: ctx.match[1], bot_key: config.key, winner_mode: 'admin', status: 'frozen' });
+    if (!g) return ctx.reply('❌ Konkurs topilmadi.');
+    const userId = Number(ctx.match[2]);
+    const page = Math.max(0, Number(ctx.match[3] || 0));
+    const selected = new Set((g.winner_user_ids || []).map(Number));
+    if (selected.has(userId)) selected.delete(userId);
+    else {
+      if (selected.size >= Number(g.winners_count || 1)) {
+        await ctx.answerCbQuery(`Avval tanlanganlardan birini olib tashlang. Limit: ${g.winners_count}`, { show_alert: true }).catch(() => null);
+        return;
+      }
+      selected.add(userId);
+    }
+    g.winner_user_ids = Array.from(selected);
+    await g.save();
+    return ctx.editMessageReplyMarkup((await adminSelectionKeyboard(g, page)).reply_markup);
+  });
+
+  bot.action(/^gw:pickdone:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const g = await Giveaway.findOne({ _id: ctx.match[1], bot_key: config.key, winner_mode: 'admin', status: 'frozen' });
+    if (!g) return ctx.reply('❌ Konkurs topilmadi.');
+    const selected = (g.winner_user_ids || []).map(Number);
+    if (selected.length !== Number(g.winners_count || 1)) {
+      return ctx.answerCbQuery(`Aniq ${g.winners_count} ta g‘olib tanlang. Hozir: ${selected.length}`, { show_alert: true }).catch(() => null);
+    }
+    g.drawn_by = ctx.from.id;
+    g.drawn_at = new Date();
+    g.admin_selection_completed_at = new Date();
+    await g.save();
+    const snapshot = Array.isArray(g.result_snapshot) ? g.result_snapshot : [];
+    await notifyAdminsResult(g, snapshot, true);
+    return ctx.editMessageText(`✅ “${g.title}” konkursida ${selected.length} ta g‘olib admin tomonidan tasdiqlandi.`);
+  });
+
+  bot.action(/^gw:mode:(top_referrals|random|admin)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    if (!utils.isAdmin(ctx.from.id) || ctx.session.mode !== 'gw_create_mode') return;
+    ctx.session.draft.winner_mode = ctx.match[1];
+    ctx.session.mode = 'gw_create_duration';
+    return ctx.editMessageText(
+      `✅ G‘olib aniqlash: ${winnerModeLabel(ctx.match[1])}
+
+⏳ 5/8 — Konkurs muddatini yuboring.
+
+Misollar:
+12h — 12 soat
+3d — 3 kun
+2w — 2 hafta`
+    );
+  });
+
+  bot.action(/^gw:cap:([a-f0-9]{24}):([a-z_]+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    await utils.saveUser(ctx);
+    let g = await Giveaway.findOne({ _id: ctx.match[1], bot_key: config.key });
+    g = await ensureGiveawayState(g);
+    if (!g || g.status !== 'active') return showResults(ctx, g);
+    const participant = await participantFor(g._id, ctx.from.id);
+    if (!participant) return continueOnboarding(ctx, g);
+    if (participant.onboarding_status === 'active') return showActive(ctx);
+
+    const selected = ctx.match[2];
+    if (selected !== participant.captcha_answer) {
+      participant.captcha_attempts = Number(participant.captcha_attempts || 0) + 1;
+      await participant.save();
+      await ctx.reply('❌ Noto‘g‘ri tanlov. Xavfsizlik uchun yangi rasm bilan qayta tekshiramiz.');
+      return sendCaptcha(ctx, participant);
+    }
+    return activateParticipant(ctx, g, participant);
+  });
+
+  bot.action('gw:rating', async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    return showRating(ctx);
+  });
+
+  bot.hears(USER_BUTTONS.rating, showRating);
+  bot.hears(USER_BUTTONS.invite, showInvite);
+  bot.hears(USER_BUTTONS.profile, showProfile);
+  bot.hears(USER_BUTTONS.rules, showRules);
+
+  bot.command('cancel', async (ctx) => {
+    resetAdminFlow(ctx);
+    return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard());
+  });
+
+  bot.on('photo', async (ctx) => {
+    await utils.saveUser(ctx);
+    if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'broadcasting') {
+      const result = await utils.broadcastMessage(ctx, adminKeyboard);
+      resetAdminFlow(ctx);
+      return result;
+    }
+    if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'gw_create_photo') {
+      const photo = getLargestPhoto(ctx.message);
+      if (!photo?.file_id) return ctx.reply('❌ Rasmni qabul qilib bo‘lmadi. Qayta yuboring yoki /skip yozing.');
+      return finalizeGiveaway(ctx, photo.file_id);
+    }
+  });
+
+  bot.on('text', async (ctx) => {
+    await utils.saveUser(ctx);
+    const text = String(ctx.message.text || '').trim();
+    if (!text) return;
+    if (text === '/cancel') {
+      resetAdminFlow(ctx);
+      return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard());
+    }
+
+    if (utils.isAdmin(ctx.from.id)) {
+      const common = await handleCommonAdminText(ctx, config, utils, adminKeyboard);
+      if (common) return common;
+      if (ctx.session.mode === 'broadcasting') {
+        const result = await utils.broadcastMessage(ctx, adminKeyboard);
+        resetAdminFlow(ctx);
+        return result;
+      }
+      if (ctx.session.mode === 'gw_post_target') {
+        const g = await Giveaway.findOne({ _id: ctx.session.giveawayId, bot_key: config.key, status: 'active' });
+        if (!g) {
+          resetAdminFlow(ctx);
+          return ctx.reply('❌ Aktiv konkurs topilmadi.', adminKeyboard());
+        }
+        const target = /^-?\d{6,}$/.test(text) ? text : (text.startsWith('@') ? text : `@${text.replace(/^@/, '')}`);
+        try {
+          const result = await postContestToChat(target, g, ctx.from.id);
+          resetAdminFlow(ctx);
+          return ctx.reply(`✅ Konkurs posti yuborildi: ${result.chat.title || result.chat.username || result.chat.id}\n\n📍 Manba kodi: ${result.source.source_code}`, adminKeyboard());
+        } catch (error) {
+          return ctx.reply(`❌ Yuborilmadi: ${error.message}\n\nBot kanal/guruhda admin yoki xabar yuborish huquqiga ega ekanini tekshiring.`);
+        }
+      }
+      if (ctx.session.mode === 'gw_create_title') {
+        if (text.length < 3) return ctx.reply('❌ Nom juda qisqa. Qayta yuboring.');
+        ctx.session.draft.title = text.slice(0, 120);
+        ctx.session.mode = 'gw_create_prize';
+        return ctx.reply('🎁 2/8 — Asosiy sovrin nomini yuboring.\n\nMisol: Yangi noutbuk + quloqchin');
+      }
+      if (ctx.session.mode === 'gw_create_prize') {
+        if (text.length < 2) return ctx.reply('❌ Sovrin nomini kiriting.');
+        ctx.session.draft.prize_name = text.slice(0, 160);
+        ctx.session.mode = 'gw_create_winners';
+        return ctx.reply('🏆 3/8 — Nechta g‘olib bo‘ladi?\n\nMasalan: 3');
+      }
+      if (ctx.session.mode === 'gw_create_winners') {
+        const count = Number(text);
+        if (!Number.isInteger(count) || count < 1 || count > 100) return ctx.reply('❌ 1 dan 100 gacha butun son kiriting.');
+        ctx.session.draft.winners_count = count;
+        ctx.session.mode = 'gw_create_mode';
+        return ctx.reply(
+          '🎯 4/8 — G‘olib qanday aniqlansin?',
+          Markup.inlineKeyboard([
+            [Markup.button.callback('👥 Eng ko‘p do‘st taklif qilgan', 'gw:mode:top_referrals')],
+            [Markup.button.callback('🎲 Tasodifiy', 'gw:mode:random')],
+            [Markup.button.callback('🧑‍⚖️ Admin tanlaydi', 'gw:mode:admin')]
+          ])
+        );
+      }
+      if (ctx.session.mode === 'gw_create_duration') {
+        const seconds = parseDurationInput(text);
+        if (!seconds) return ctx.reply('❌ Muddat noto‘g‘ri. Masalan: 12h, 3d yoki 2w');
+        ctx.session.draft.duration_seconds = seconds;
+        ctx.session.mode = 'gw_create_points';
+        return ctx.reply('⭐ 6/8 — Har bir tasdiqlangan do‘st uchun necha ball berilsin?\n\nTavsiya: 5');
+      }
+      if (ctx.session.mode === 'gw_create_points') {
+        const points = Number(text);
+        if (!Number.isInteger(points) || points < 1 || points > 1000) return ctx.reply('❌ 1 dan 1000 gacha butun son kiriting.');
+        ctx.session.draft.referral_points = points;
+        ctx.session.mode = 'gw_create_description';
+        return ctx.reply('✨ 7/8 — Konkurs uchun qisqa kreativ tavsif yuboring.\n\nMasalan: Eng faol ishtirokchilar zamonaviy texnika yutadi!');
+      }
+      if (ctx.session.mode === 'gw_create_description') {
+        ctx.session.draft.description = text.slice(0, 900);
+        ctx.session.mode = 'gw_create_rules';
+        return ctx.reply('📜 8/8 — Qoidalarni yuboring. Har bir qoida yangi qatorda bo‘lishi mumkin.');
+      }
+      if (ctx.session.mode === 'gw_create_rules') {
+        ctx.session.draft.rules = text.slice(0, 3000);
+        ctx.session.mode = 'gw_create_photo';
+        return ctx.reply('🖼 Ixtiyoriy — sovrin rasmini yuboring.\n\nRasm kerak bo‘lmasa /skip yozing.');
+      }
+      if (ctx.session.mode === 'gw_create_photo' && text.toLowerCase() === '/skip') {
+        return finalizeGiveaway(ctx, null);
+      }
+    }
+
+    if (ctx.chat?.type !== 'private') return;
+
+    const g = await ensureGiveawayState(await activeGiveaway()) || await latestGiveaway();
+    if (!g) return ctx.reply('📭 Hozir aktiv konkurs yo‘q.');
+    if (g.status !== 'active') return showResults(ctx, g);
+
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok && !utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx);
+
+    const participant = await participantFor(g._id, ctx.from.id);
+    if (!participant) return continueOnboarding(ctx, g);
+    if (participant.onboarding_status === 'pending_name') {
+      if (text.startsWith('/')) return askName(ctx, participant);
+      const cleanName = text.replace(/\s+/g, ' ').trim();
+      if (cleanName.length < 3 || cleanName.length > 80 || !/[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ‘’]/.test(cleanName)) {
+        return ctx.reply('❌ Ism noto‘g‘ri. Ism va familiyangizni matn ko‘rinishida yuboring.');
+      }
+      participant.full_name = cleanName;
+      participant.onboarding_status = 'pending_captcha';
+      await participant.save();
+      return sendCaptcha(ctx, participant);
+    }
+    if (participant.onboarding_status === 'pending_captcha') {
+      return ctx.reply('🤖 Rasm ostidagi texnika tugmalaridan birini tanlang.');
+    }
+    return showActive(ctx);
+  });
+
+  bot.on('message', async (ctx) => {
+    await utils.saveUser(ctx);
+    if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'broadcasting') {
+      const result = await utils.broadcastMessage(ctx, adminKeyboard);
+      resetAdminFlow(ctx);
+      return result;
+    }
+  });
+
+  const freezeTimer = setInterval(async () => {
+    try {
+      const due = await Giveaway.find({ bot_key: config.key, status: 'active', ends_at: { $lte: new Date() } }).limit(5);
+      for (const g of due) await freezeGiveaway(g);
+    } catch (error) {
+      console.error(`${config.title} auto-freeze xatosi:`, error.message);
+    }
+  }, 30 * 1000);
+  freezeTimer.unref?.();
+
+  setTimeout(() => {
+    activeGiveaway().then((g) => ensureGiveawayState(g)).catch((error) => console.error(`${config.title} startup freeze xatosi:`, error.message));
+  }, 5000).unref?.();
+
   bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
   return { key: config.key, title: config.title, bot, config };
 }
+
 
 // =========================
 // KANAL EGALARI UCHUN CUSTOM INPUT + AUTPOST BOT
@@ -2569,7 +3851,7 @@ async function syncActiveBotWebhook(active, source = 'manual') {
     await active.bot.telegram.setWebhook(fullUrl, {
       secret_token: WEBHOOK_SECRET,
       drop_pending_updates: false,
-      allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
+      allowed_updates: ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
     });
     console.log(`🌐 ${active.title} webhook o'rnatildi (${source}): ${fullUrl}`);
   } else {
@@ -3357,7 +4639,8 @@ function createFactoryBot() {
 
   async function checkFactoryGlobalSubscriptions(userId) {
     if (isOwner(userId)) return true;
-    if (!(mongoReady && mongoose.connection.readyState === 1)) return true;
+    const ready = await waitForMongoConnection(3500);
+    if (!ready) return false;
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
     if (!subs.length) return true;
     for (const sub of subs) {
@@ -3392,6 +4675,9 @@ function createFactoryBot() {
   // Adminlar cheklanmaydi, obunani tekshirish callbacklariga esa ruxsat beriladi.
   bot.use(async (ctx, next) => {
     if (!ctx.from || isOwner(ctx.from.id)) return next();
+    // Factory global obunasi faqat FactoryBot private chatida ishlaydi.
+    // Kanal/guruh update'lariga javob yozilmaydi.
+    if (ctx.chat && ctx.chat.type !== 'private') return next();
     const action = ctx.callbackQuery?.data || '';
     if (action === 'factory_check_global_subscription' || action === 'noop') return next();
     const ok = await checkFactoryGlobalSubscriptions(ctx.from.id);

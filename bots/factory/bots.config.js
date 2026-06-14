@@ -23,7 +23,7 @@ const typePresets = {
   music: { engine: 'content', key: 'music', title: 'MusicBot', item: 'musiqa', itemTitle: 'Musiqa', itemPlural: 'musiqalar', itemPluralTitle: 'Musiqalar', mainEmoji: '🎵', addEmoji: '➕', listEmoji: '🎧', codeExamples: 'hit2026, remix, music7', welcomeLine: 'Musiqa nomi yoki kodini yuboring.' },
 
   vip_obuna: { engine: 'vip', key: 'vip_obuna', title: 'VIP Obuna Bot', itemTitle: 'VIP obuna', mainEmoji: '💎', description: 'Maxfiy kanal/guruhga vaqtlik invite link, admin tasdiqlash, oylik dostup.' },
-  konkurs: { engine: 'giveaway', key: 'konkurs', title: 'Konkurs / Giveaway Bot', itemTitle: 'Konkurs', mainEmoji: '🎁', description: 'Majburiy obuna, qatnashuvchilar, random g‘olib tanlash.' },
+  konkurs: { engine: 'giveaway', key: 'konkurs', title: 'Tech Konkurs Game Bot', itemTitle: 'Konkurs', mainEmoji: '🎮', description: '2 bosqichli obuna va anti-bot tekshiruv, referral ball, TOP-10 reyting, countdown va avtomatik muzlatiladigan natija.' },
   kanal_ariza: { engine: 'channel_form', key: 'kanal_ariza', title: 'Kanal Ariza + Autopost Bot', itemTitle: 'Ariza bot', mainEmoji: '📢', description: 'Kanal egasi uchun custom inputlar, reklama/akkount savdo arizasi, shifrli kalit, autopost.' },
   reklama_buyurtma: { engine: 'channel_form', key: 'reklama_buyurtma', title: 'Reklama Buyurtma Bot', itemTitle: 'Reklama bot', mainEmoji: '📣', description: 'Reklama buyurtmasi, custom maydonlar, admin tasdiqlash va to‘lovga yo‘naltirish.' },
   group_cleaner: { engine: 'group_tools', key: 'group_cleaner', title: 'Guruh Tozalovchi + AntiSpam Bot', itemTitle: 'Guruh bot', mainEmoji: '🛡', description: 'Kirdi/chiqdi tozalash, anti-link, badword, FAQ, salomlashuv.' },
