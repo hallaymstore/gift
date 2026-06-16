@@ -737,6 +737,12 @@ const groupMemberSchema = new mongoose.Schema(
     muted_until: Date,
     status: { type: String, enum: ['active', 'muted', 'banned', 'left'], default: 'active', index: true },
     is_whitelisted: { type: Boolean, default: false },
+    force_exempt: { type: Boolean, default: false, index: true },
+    invited_count: { type: Number, default: 0, index: true },
+    invited_valid_count: { type: Number, default: 0, index: true },
+    invited_by: Number,
+    invited_by_username: String,
+    joined_via_invite_link: String,
     joined_at: Date,
     left_at: Date
   },
@@ -4751,6 +4757,13 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
     rules_text: '📜 Guruh qoidalari hali yozilmagan.',
     badwords: [],
     allow_domains: [],
+    required_channels: [],
+    force_add_required: 0,
+    force_text: '',
+    force_text_delete_seconds: 12,
+    force_delete_blocked_messages: true,
+    dirty_mute_enabled: false,
+    dirty_mute_minutes: 30,
     delete_commands: false,
     admin_log: true
   });
@@ -4777,7 +4790,8 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       ...DEFAULT_GROUP_SETTINGS,
       ...(custom || {}),
       badwords: Array.isArray(custom?.badwords) ? custom.badwords : [],
-      allow_domains: Array.isArray(custom?.allow_domains) ? custom.allow_domains : []
+      allow_domains: Array.isArray(custom?.allow_domains) ? custom.allow_domains : [],
+      required_channels: Array.isArray(custom?.required_channels) ? custom.required_channels : []
     };
   }
 
@@ -5082,6 +5096,67 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
     return true;
   }
 
+  async function checkRequiredChannels(userId, settings) {
+    const channels = Array.isArray(settings.required_channels) ? settings.required_channels.filter(Boolean) : [];
+    if (!channels.length) return { ok: true, missing: [] };
+    const checks = await Promise.all(channels.map(async (ch) => {
+      const ref = String(ch.chat_ref || ch.username || ch).trim();
+      try {
+        const member = await bot.telegram.getChatMember(ref, Number(userId));
+        const ok = ['creator', 'administrator', 'member'].includes(member.status);
+        return { ok, ch };
+      } catch (_) {
+        return { ok: false, ch };
+      }
+    }));
+    return { ok: checks.every((x) => x.ok), missing: checks.filter((x) => !x.ok).map((x) => x.ch) };
+  }
+
+  function channelButtonRows(channels) {
+    const rows = (channels || []).slice(0, 8).map((ch, i) => {
+      const title = ch.title || ch.username || ch.chat_ref || `Kanal ${i + 1}`;
+      const url = ch.join_url || (String(ch.username || ch.chat_ref || '').startsWith('@') ? `https://t.me/${String(ch.username || ch.chat_ref).replace('@', '')}` : null);
+      return url ? [Markup.button.url(`➕ ${title}`, url)] : [Markup.button.callback(`➕ ${title}`, 'noop')];
+    });
+    rows.push([Markup.button.callback('✅ Tekshirish', 'gm:checksub')]);
+    return rows;
+  }
+
+  async function sendRequiredChannelWarning(ctx, settings, missing) {
+    const channels = missing && missing.length ? missing : (settings.required_channels || []);
+    const text = '📢 Guruhda yozish uchun quyidagi kanal/guruhlarga aʼzo bo‘ling va “✅ Tekshirish” tugmasini bosing.';
+    const sent = await ctx.reply(text, Markup.inlineKeyboard(channelButtonRows(channels))).catch(() => null);
+    if (sent) deleteMessageLater(ctx.chat.id, sent.message_id, Math.max(10, Number(settings.warning_delete_seconds || 12)));
+  }
+
+  async function getMemberRecord(ctx, userId) {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return null;
+    return GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(userId) }).lean().catch(() => null);
+  }
+
+  async function enforceForceAdd(ctx, settings) {
+    const required = Number(settings.force_add_required || 0);
+    if (!required || required <= 0) return true;
+    const rec = await getMemberRecord(ctx, ctx.from.id);
+    if (rec?.force_exempt || rec?.is_whitelisted) return true;
+    const count = Number(rec?.invited_count || 0);
+    if (count >= required) return true;
+    if (settings.force_delete_blocked_messages !== false) await safeDelete(ctx);
+    const extra = settings.force_text ? `
+
+${settings.force_text}` : '';
+    const text = `👥 ${ctx.from.first_name || 'Foydalanuvchi'}, guruhda yozish uchun kamida ${required} ta odam qo‘shishingiz kerak.
+
+Siz qo‘shganlar: ${count}/${required}.${extra}`;
+    const sent = await ctx.reply(text).catch(() => null);
+    if (sent) deleteMessageLater(ctx.chat.id, sent.message_id, Number(settings.force_text_delete_seconds || settings.warning_delete_seconds || 12));
+    return false;
+  }
+
+  function memberDisplay(rec) {
+    return rec?.first_name || (rec?.username ? '@' + rec.username : rec?.user_id || 'Nomaʼlum');
+  }
+
   function isForwarded(message) {
     return Boolean(message?.forward_origin || message?.forward_from || message?.forward_from_chat || message?.forward_sender_name || message?.is_automatic_forward);
   }
@@ -5112,7 +5187,10 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       `🚫 Warn limiti: <b>${settings.warn_limit}</b>`,
       `🔇 Standart mute: <b>${settings.mute_minutes} daqiqa</b>`,
       `🧾 Taqiqlangan so‘zlar: <b>${(settings.badwords || []).length}</b>`,
-      `✅ Ruxsatli domenlar: <b>${(settings.allow_domains || []).length}</b>`
+      `✅ Ruxsatli domenlar: <b>${(settings.allow_domains || []).length}</b>`,
+      `📢 Majburiy kanal: <b>${(settings.required_channels || []).length}</b>`,
+      `👥 Majburiy odam qo‘shish: <b>${Number(settings.force_add_required || 0) > 0 ? Number(settings.force_add_required) + ' ta' : 'OFF'}</b>`,
+      `🤬 Haqorat cheklovi: <b>${settings.dirty_mute_enabled ? 'ON' : 'OFF'}</b>`
     ].join('\n');
   }
 
@@ -5121,7 +5199,8 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       [Markup.button.callback('🔗 Anti-link', 'gm:t:anti_link'), Markup.button.callback('⚠️ Link warn', 'gm:t:warn_on_link')],
       [Markup.button.callback('🧹 Kirdi', 'gm:t:clean_join'), Markup.button.callback('🚪 Chiqdi', 'gm:t:clean_leave')],
       [Markup.button.callback('📨 Forward', 'gm:t:anti_forward'), Markup.button.callback('⚡ Flood', 'gm:t:anti_flood')],
-      [Markup.button.callback('👋 Salomlashuv', 'gm:t:welcome_enabled'), Markup.button.callback('🔄 Yangilash', 'gm:settings')]
+      [Markup.button.callback('👋 Salomlashuv', 'gm:t:welcome_enabled'), Markup.button.callback('👥 Majburiy odam', 'gm:t:force_add_toggle')],
+      [Markup.button.callback('🤬 Dirty', 'gm:t:dirty_mute_enabled'), Markup.button.callback('🔄 Yangilash', 'gm:settings')]
     ]);
   }
 
@@ -5154,8 +5233,23 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       '• /filter kalit | avtomatik javob',
       '• /stopfilter kalit | /filters',
       '',
+      '<b>Majburiy kanal va aʼzo yig‘ish:</b>',
+      '• /set @kanal — guruhda yozish uchun kanalga aʼzo qildirish',
+      '• /unlink — majburiy kanallarni tozalash',
+      '• /add 10 — yozish uchun 10 ta odam qo‘shishni majburiy qilish',
+      '• /add off — majburiy odam qo‘shishni o‘chirish',
+      '• /textforce matn — majburiy odam qo‘shish xabari tagiga matn',
+      '• /textforce 0 — qo‘shimcha matnni o‘chirish',
+      '• /text_time 15 — ogohlantirish o‘chish vaqti',
+      '• /mymembers — o‘zingiz qo‘shgan odamlar soni',
+      '• /yourmembers — reply qilingan user qo‘shgan odamlar soni',
+      '• /top — eng ko‘p odam qo‘shgan TOP-10',
+      '• /clean — reply qilingan user hisobini 0 qilish',
+      '• /delson — guruhdagi hamma aʼzo qo‘shish hisobini tozalash',
+      '• /deforce, /priv, /plus — imtiyoz va balans boshqaruvi',
+      '',
       '<b>Foydali:</b>',
-      '• /rules, /admins, /id, /groupstats, /report (reply)',
+      '• /rules, /admins, /id, /groupstats, /report (reply), /commands',
       '',
       'ℹ️ Buyruqlar reply orqali ishlatilsa eng ishonchli. Botga xabar o‘chirish, ban/restrict va pin huquqlarini bering.'
     ].join('\n');
@@ -5191,16 +5285,148 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
   bot.command('commands', async (ctx) => ctx.reply(helpText(), { parse_mode: 'HTML' }));
   bot.command('settings', async (ctx) => showSettings(ctx));
 
+  bot.action('noop', async (ctx) => ctx.answerCbQuery('Kanal/guruh havolasi mavjud emas. Admin /set orqali username yoki join link kiritsin.'));
+  bot.action('gm:checksub', async (ctx) => {
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const res = await checkRequiredChannels(ctx.from.id, settings);
+    return ctx.answerCbQuery(res.ok ? '✅ Obuna tasdiqlandi. Endi yozishingiz mumkin.' : '❌ Hali hammasiga aʼzo emassiz.', { show_alert: !res.ok });
+  });
+
+  bot.command('mymembers', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const rec = await getMemberRecord(ctx, ctx.from.id);
+    return ctx.reply(`📊 Siz qo‘shgan odamlar: ${Number(rec?.invited_count || 0)} ta`);
+  });
+
+  bot.command('yourmembers', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const target = await resolveTarget(ctx);
+    if (!target) return ctx.reply('❌ Reply qiling yoki /yourmembers ID/@username yozing.');
+    const rec = await getMemberRecord(ctx, target.user.id);
+    return ctx.reply(`📈 ${target.user.first_name || target.user.username || target.user.id} qo‘shgan odamlar: ${Number(rec?.invited_count || 0)} ta`);
+  });
+
+  bot.command('top', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const rows = await GroupMember.find({ bot_key: config.key, chat_id: String(ctx.chat.id), invited_count: { $gt: 0 } }).sort({ invited_count: -1 }).limit(10).lean().catch(() => []);
+    if (!rows.length) return ctx.reply('🏆 Hozircha odam qo‘shganlar yo‘q.');
+    return ctx.reply(`🏆 Eng ko‘p odam qo‘shgan TOP-10\n\n${rows.map((m,i)=>`${i+1}. ${memberDisplay(m)} — ${m.invited_count || 0} ta`).join('\n')}`);
+  });
+
+  bot.command('delson', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await GroupMember.updateMany({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $set: { invited_count: 0, invited_valid_count: 0 } }).catch(() => null);
+    await logAction(ctx, 'reset_all_invite_counts');
+    return ctx.reply('🗑 Guruhdagi odam qo‘shish hisoblari tozalandi.');
+  });
+
+  bot.command('clean', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const target = await resolveTarget(ctx);
+    if (!target) return ctx.reply('❌ Reply qiling yoki /clean ID/@username yozing.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.user.id) }, { $set: { invited_count: 0, invited_valid_count: 0 } }, { upsert: true }).catch(() => null);
+    return ctx.reply('✅ Userning odam qo‘shish hisobi 0 qilindi.');
+  });
+
+  bot.command('add', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const raw = commandPayload(ctx).toLowerCase();
+    if (raw === 'off' || raw === '0') { await patchGroupSettings(ctx.chat.id, { force_add_required: 0 }); return ctx.reply('✅ Majburiy odam qo‘shish o‘chirildi.'); }
+    const n = Math.max(1, Math.min(500, Number(raw || 3)));
+    if (!Number.isFinite(n)) return ctx.reply('❌ Misol: /add 10 yoki /add off');
+    await patchGroupSettings(ctx.chat.id, { force_add_required: n });
+    return ctx.reply(`✅ Endi guruhda yozish uchun ${n} ta odam qo‘shish talab qilinadi.`);
+  });
+
+  bot.command('textforce', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const raw = commandPayload(ctx);
+    await patchGroupSettings(ctx.chat.id, { force_text: raw === '0' ? '' : raw.slice(0, 500) });
+    return ctx.reply(raw === '0' ? '✅ Majburiy qo‘shish qo‘shimcha matni o‘chirildi.' : '✅ Majburiy qo‘shish matni saqlandi.');
+  });
+
+  bot.command('text_time', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const n = Math.max(3, Math.min(120, Number(commandPayload(ctx) || 12)));
+    if (!Number.isFinite(n)) return ctx.reply('❌ Misol: /text_time 15');
+    await patchGroupSettings(ctx.chat.id, { force_text_delete_seconds: n });
+    return ctx.reply(`✅ Majburiy qo‘shish ogohlantirishlari ${n} soniyada o‘chadi.`);
+  });
+
+  bot.command('deforce', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const target = await resolveTarget(ctx);
+    if (!target) return ctx.reply('❌ Reply qiling yoki /deforce ID/@username yozing.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.user.id) }, { $set: { invited_count: 0, invited_valid_count: 0, force_exempt: false } }, { upsert: true }).catch(() => null);
+    return ctx.reply('✅ User majburiy odam qo‘shish maʼlumotlari tozalandi.');
+  });
+
+  bot.command('plus', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const target = await resolveTarget(ctx);
+    if (!target) return ctx.reply('❌ Reply qiling yoki /plus ID/@username yozing.');
+    if (Number(target.user.id) === Number(ctx.from.id)) return ctx.reply('❌ O‘zingizga o‘tkazib bo‘lmaydi.');
+    const mine = await getMemberRecord(ctx, ctx.from.id);
+    const amount = Number(mine?.invited_count || 0);
+    if (amount <= 0) return ctx.reply('❌ Sizda o‘tkazish uchun ball yo‘q.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(ctx.from.id) }, { $set: { invited_count: 0 } }, { upsert: true });
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.user.id) }, { $inc: { invited_count: amount }, $setOnInsert: { first_name: target.user.first_name || null, username: target.user.username || null, status: 'active' } }, { upsert: true });
+    return ctx.reply(`✅ ${amount} ta qo‘shgan odam hisobingiz ${target.user.first_name || target.user.username || target.user.id} ga o‘tkazildi.`);
+  });
+
+  bot.command('priv', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const target = await resolveTarget(ctx);
+    if (!target) return ctx.reply('❌ Reply qiling yoki /priv ID/@username yozing.');
+    const rec = await GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.user.id) }).lean().catch(() => null);
+    const next = !Boolean(rec?.force_exempt);
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.user.id) }, { $set: { force_exempt: next, first_name: target.user.first_name || null, username: target.user.username || null } }, { upsert: true });
+    return ctx.reply(next ? '✅ Userga majburiy odam qo‘shishdan imtiyoz berildi.' : '✅ User imtiyozi olib tashlandi.');
+  });
+
+  bot.command('dirty', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    await patchGroupSettings(ctx.chat.id, { dirty_mute_enabled: !Boolean(settings.dirty_mute_enabled) });
+    return ctx.reply(`🤬 Haqorat cheklovi: ${!settings.dirty_mute_enabled ? 'ON' : 'OFF'}`);
+  });
+
+  bot.command('set', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const raw = commandPayload(ctx);
+    if (!raw) return ctx.reply('❌ Misol: /set @kanal_username yoki /set @kanal | Kanal nomi | https://t.me/kanal');
+    const parts = raw.split('|').map((x) => x.trim()).filter(Boolean);
+    const ref = normalizeUsername(parts[0]) || parts[0];
+    let title = parts[1] || ref;
+    let joinUrl = parts[2] || (String(ref).startsWith('@') ? `https://t.me/${String(ref).replace('@','')}` : '');
+    try { const chat = await bot.telegram.getChat(ref); title = chat.title || title; if (chat.username) joinUrl = `https://t.me/${chat.username}`; } catch (_) {}
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const arr = (settings.required_channels || []).filter((c) => String(c.chat_ref || c.username || c) !== String(ref));
+    arr.push({ chat_ref: ref, username: String(ref).startsWith('@') ? ref : '', title, join_url: joinUrl });
+    await patchGroupSettings(ctx.chat.id, { required_channels: arr });
+    return ctx.reply(`✅ Majburiy kanal/guruh qo‘shildi: ${title}`);
+  });
+
+  bot.command('unlink', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    await patchGroupSettings(ctx.chat.id, { required_channels: [] });
+    return ctx.reply('🗑 Majburiy kanal/guruhlar tozalandi.');
+  });
+
   bot.action('gm:settings', async (ctx) => {
     await ctx.answerCbQuery();
     return showSettings(ctx, true);
   });
-  bot.action(/^gm:t:(anti_link|warn_on_link|clean_join|clean_leave|anti_forward|anti_flood|welcome_enabled)$/, async (ctx) => {
+  bot.action(/^gm:t:(anti_link|warn_on_link|clean_join|clean_leave|anti_forward|anti_flood|welcome_enabled|dirty_mute_enabled|force_add_toggle)$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!(await requireGroupAdmin(ctx))) return;
     const key = ctx.match[1];
     const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
-    await patchGroupSettings(ctx.chat.id, { [key]: !Boolean(settings[key]) });
+    if (key === 'force_add_toggle') {
+      await patchGroupSettings(ctx.chat.id, { force_add_required: Number(settings.force_add_required || 0) > 0 ? 0 : 3 });
+    } else {
+      await patchGroupSettings(ctx.chat.id, { [key]: !Boolean(settings[key]) });
+    }
     return showSettings(ctx, true);
   });
 
@@ -5540,8 +5766,20 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       { bot_key: config.key, chat_id: String(ctx.chat.id) },
       { $inc: { members_seen: (ctx.message.new_chat_members || []).filter((u) => !u.is_bot).length } }
     ).catch(() => null);
-    for (const member of ctx.message.new_chat_members || []) {
-      if (!member.is_bot) saveGroupMember(ctx, member, { status: 'active', joined_at: new Date(), left_at: null }).catch(() => null);
+    const inviter = ctx.message.from && !ctx.message.from.is_bot ? ctx.message.from : null;
+    const inviteLink = ctx.message.invite_link?.invite_link || null;
+    const joinedUsers = (ctx.message.new_chat_members || []).filter((u) => !u.is_bot);
+    for (const member of joinedUsers) {
+      const patch = { status: 'active', joined_at: new Date(), left_at: null };
+      if (inviter && Number(inviter.id) !== Number(member.id)) {
+        patch.invited_by = Number(inviter.id);
+        patch.invited_by_username = inviter.username || null;
+      }
+      if (inviteLink) patch.joined_via_invite_link = inviteLink;
+      saveGroupMember(ctx, member, patch).catch(() => null);
+    }
+    if (inviter && joinedUsers.length) {
+      saveGroupMember(ctx, inviter, { status: 'active' }, { invited_count: joinedUsers.length, invited_valid_count: joinedUsers.length }).catch(() => null);
     }
     if (settings.clean_join !== false) await safeDelete(ctx);
     if (settings.welcome_enabled) {
@@ -5576,6 +5814,15 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
     const isAdmin = await isChatAdmin(ctx.chat.id, ctx.from.id);
     if (isAdmin) return;
 
+    const channelCheck = await checkRequiredChannels(ctx.from.id, settings);
+    if (!channelCheck.ok) {
+      await safeDelete(ctx);
+      await sendRequiredChannelWarning(ctx, settings, channelCheck.missing);
+      return;
+    }
+
+    if (!(await enforceForceAdd(ctx, settings))) return;
+
     const whitelistKey = `${ctx.chat.id}:${ctx.from.id}`;
     let whitelistState = whitelistCache.get(whitelistKey);
     if (!whitelistState || Date.now() - whitelistState.at > 30_000) {
@@ -5599,6 +5846,9 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
       if (badword) {
         violation = `Taqiqlangan so‘z ishlatildi: ${badword}`;
         statField = 'badwords_deleted';
+        if (settings.dirty_mute_enabled) {
+          try { await bot.telegram.restrictChatMember(ctx.chat.id, ctx.from.id, { until_date: Math.floor(Date.now()/1000) + Math.max(60, Number(settings.dirty_mute_minutes || 30) * 60), permissions: mutePermissions(false) }); } catch (_) {}
+        }
       } else if (isFlood(ctx.chat.id, ctx.from.id, settings)) {
         violation = 'Juda tez ko‘p xabar yuborildi (flood)';
         statField = 'flood_deleted';
@@ -5699,6 +5949,56 @@ function buildManagedConfig(record) {
   };
 }
 
+
+function commandListForConfig(config = {}) {
+  const preset = getPreset(config.type_key || config.key || 'kino');
+  const engine = config.engine || preset?.engine || '';
+  const key = config.key || '';
+  const base = [
+    { command: 'start', description: 'Botni ishga tushirish' },
+    { command: 'help', description: 'Yordam va buyruqlar' },
+    { command: 'commands', description: 'Barcha buyruqlar ro‘yxati' }
+  ];
+  if (engine === 'group_tools' || ['group_manager', 'group_cleaner', 'faq_support', 'qoriqchi'].includes(key)) {
+    return [
+      ...base,
+      { command: 'settings', description: 'Guruh sozlamalari' },
+      { command: 'warn', description: 'Userga ogohlantirish berish' },
+      { command: 'ban', description: 'Userni ban qilish' },
+      { command: 'kick', description: 'Userni chiqarish' },
+      { command: 'mute', description: 'Userni vaqtincha cheklash' },
+      { command: 'unmute', description: 'Cheklovni olib tashlash' },
+      { command: 'del', description: 'Reply xabarni o‘chirish' },
+      { command: 'pin', description: 'Reply xabarni pin qilish' },
+      { command: 'rules', description: 'Guruh qoidalari' },
+      { command: 'admins', description: 'Adminlar ro‘yxati' },
+      { command: 'id', description: 'Guruh/user ID olish' },
+      { command: 'groupstats', description: 'Guruh statistikasi' },
+      { command: 'mymembers', description: 'Siz qo‘shgan odamlar soni' },
+      { command: 'yourmembers', description: 'Reply user qo‘shgan odamlar soni' },
+      { command: 'top', description: 'Eng ko‘p odam qo‘shganlar' },
+      { command: 'add', description: 'Majburiy odam qo‘shishni sozlash' },
+      { command: 'set', description: 'Majburiy kanal/guruh qo‘shish' },
+      { command: 'unlink', description: 'Majburiy kanallarni tozalash' },
+      { command: 'filter', description: 'Avtojavob qo‘shish' },
+      { command: 'report', description: 'Adminlarga shikoyat' }
+    ];
+  }
+  if (engine === 'chat_learning') {
+    return [...base, { command: 'learn_on', description: 'O‘rganishni yoqish' }, { command: 'learn_off', description: 'O‘rganishni o‘chirish' }, { command: 'reply_on', description: 'Avto-javobni yoqish' }, { command: 'reply_off', description: 'Avto-javobni o‘chirish' }, { command: 'learnstats', description: 'O‘rganish statistikasi' }];
+  }
+  if (engine === 'giveaway') return [...base, { command: 'konkurs', description: 'Konkurs e’loni' }, { command: 'contest', description: 'Konkurs e’loni' }, { command: 'reyting', description: 'Konkurs reytingi' }, { command: 'top', description: 'TOP qatnashchilar' }, { command: 'statistika', description: 'Konkurs statistikasi' }];
+  return base;
+}
+
+async function syncBotCommands(active) {
+  if (!active?.bot) return;
+  const commands = commandListForConfig(active.config || {});
+  try { await active.bot.telegram.setMyCommands(commands); } catch (e) { console.warn(`⚠️ ${active.title} commands sync xato: ${e.message}`); }
+  try { await active.bot.telegram.setMyCommands(commands, { scope: { type: 'all_group_chats' } }); } catch (_) {}
+  try { await active.bot.telegram.setMyCommands(commands, { scope: { type: 'all_private_chats' } }); } catch (_) {}
+}
+
 function managedWebhookPath(botKey) {
   return `/webhook/${encodeURIComponent(String(botKey || ''))}`;
 }
@@ -5737,6 +6037,7 @@ async function syncActiveBotWebhook(active, source = 'manual') {
     console.log(`🤖 ${active.title} polling rejimida ishga tushdi (${source})`);
   }
 
+  await syncBotCommands(active);
   return true;
 }
 
