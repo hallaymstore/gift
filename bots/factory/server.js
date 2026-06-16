@@ -643,6 +643,140 @@ const faqSchema = new mongoose.Schema(
 faqSchema.index({ bot_key: 1, keyword_norm: 1 }, { unique: true, partialFilterExpression: { is_active: true } });
 const GroupFaq = mongoose.model('GroupFaq', faqSchema);
 
+// =========================
+// SUHBATCHI / GAP O‘RGANUVCHI BOT MODELLARI
+// =========================
+const chatLearningSettingsSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    title: String,
+    username: String,
+    is_enabled: { type: Boolean, default: true, index: true },
+    auto_learn: { type: Boolean, default: true },
+    auto_reply: { type: Boolean, default: true },
+    min_score: { type: Number, default: 0.38 },
+    reply_chance: { type: Number, default: 1 },
+    delete_service_messages: { type: Boolean, default: true },
+    only_when_mentioned: { type: Boolean, default: false },
+    learned_count: { type: Number, default: 0 },
+    replies_sent: { type: Number, default: 0 },
+    learned_by: Number
+  },
+  { timestamps: true, collection: 'multibot_chat_learning_settings' }
+);
+chatLearningSettingsSchema.index({ bot_key: 1, chat_id: 1 }, { unique: true });
+const ChatLearningSetting = mongoose.model('ChatLearningSetting', chatLearningSettingsSchema);
+
+const learnedReplySchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    chat_title: String,
+    question_text: { type: String, required: true },
+    question_norm: { type: String, required: true, index: true },
+    keywords: { type: [String], default: [], index: true },
+    answer_text: String,
+    answer_chat_id: Number,
+    answer_message_id: Number,
+    answer_type: { type: String, default: 'text' },
+    learned_from_user_id: Number,
+    learned_from_username: String,
+    uses: { type: Number, default: 0 },
+    last_used_at: Date,
+    is_active: { type: Boolean, default: true, index: true }
+  },
+  { timestamps: true, collection: 'multibot_learned_replies' }
+);
+learnedReplySchema.index({ bot_key: 1, chat_id: 1, is_active: 1, updatedAt: -1 });
+learnedReplySchema.index({ bot_key: 1, chat_id: 1, question_norm: 1 });
+const LearnedReply = mongoose.model('LearnedReply', learnedReplySchema);
+
+
+const groupChatSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    title: String,
+    username: String,
+    chat_type: String,
+    added_by: Number,
+    added_by_username: String,
+    bot_is_admin: { type: Boolean, default: false },
+    settings: { type: mongoose.Schema.Types.Mixed, default: {} },
+    members_seen: { type: Number, default: 0 },
+    messages_seen: { type: Number, default: 0 },
+    deleted_messages: { type: Number, default: 0 },
+    warnings_issued: { type: Number, default: 0 },
+    bans_issued: { type: Number, default: 0 },
+    last_active_at: { type: Date, default: Date.now },
+    is_active: { type: Boolean, default: true, index: true }
+  },
+  { timestamps: true, collection: 'multibot_group_chats' }
+);
+groupChatSchema.index({ bot_key: 1, chat_id: 1 }, { unique: true });
+const GroupChat = mongoose.model('GroupChat', groupChatSchema);
+
+const groupMemberSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    last_name: String,
+    warns: { type: Number, default: 0, index: true },
+    messages_count: { type: Number, default: 0 },
+    deleted_count: { type: Number, default: 0 },
+    links_deleted: { type: Number, default: 0 },
+    badwords_deleted: { type: Number, default: 0 },
+    flood_deleted: { type: Number, default: 0 },
+    reports_received: { type: Number, default: 0 },
+    last_warn_reason: String,
+    last_message_at: Date,
+    muted_until: Date,
+    status: { type: String, enum: ['active', 'muted', 'banned', 'left'], default: 'active', index: true },
+    is_whitelisted: { type: Boolean, default: false },
+    joined_at: Date,
+    left_at: Date
+  },
+  { timestamps: true, collection: 'multibot_group_members' }
+);
+groupMemberSchema.index({ bot_key: 1, chat_id: 1, user_id: 1 }, { unique: true });
+groupMemberSchema.index({ bot_key: 1, chat_id: 1, username: 1 });
+const GroupMember = mongoose.model('GroupMember', groupMemberSchema);
+
+const groupActionSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    actor_id: Number,
+    target_id: Number,
+    action: { type: String, required: true, index: true },
+    reason: String,
+    meta: { type: mongoose.Schema.Types.Mixed, default: {} }
+  },
+  { timestamps: true, collection: 'multibot_group_actions' }
+);
+groupActionSchema.index({ bot_key: 1, chat_id: 1, createdAt: -1 });
+const GroupAction = mongoose.model('GroupAction', groupActionSchema);
+
+const groupAutoReplySchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    chat_id: { type: String, required: true, index: true },
+    keyword: { type: String, required: true },
+    keyword_norm: { type: String, required: true, index: true },
+    answer: { type: String, required: true },
+    match_mode: { type: String, enum: ['exact', 'contains'], default: 'exact' },
+    added_by: Number,
+    is_active: { type: Boolean, default: true, index: true }
+  },
+  { timestamps: true, collection: 'multibot_group_auto_replies' }
+);
+groupAutoReplySchema.index({ bot_key: 1, chat_id: 1, keyword_norm: 1 }, { unique: true, partialFilterExpression: { is_active: true } });
+const GroupAutoReply = mongoose.model('GroupAutoReply', groupAutoReplySchema);
+
 
 // =========================
 // HELPERLAR
@@ -2949,7 +3083,7 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
       is_active: true,
       source_role: normalizedRole,
       is_required: normalizedRole === 'sponsor' || normalizedRole === 'both',
-      publish_enabled: true,
+      publish_enabled: normalizedRole === 'host' || normalizedRole === 'both',
       bot_can_post: permissions.canPost,
       bot_is_admin: permissions.botIsAdmin,
       linked_by_is_admin: permissions.actorIsAdmin,
@@ -3086,7 +3220,8 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
       bot_key: config.key,
       giveaway_id: g._id,
       is_active: { $ne: false },
-      publish_enabled: { $ne: false }
+      publish_enabled: { $ne: false },
+      source_role: { $in: ['host', 'both'] }
     }).sort({ createdAt: 1 });
     if (!sources.length) return { total: 0, success: 0, failed: 0, errors: [] };
     const settled = await Promise.allSettled(sources.map((source) => postContestToSource(source, g)));
@@ -3107,7 +3242,8 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
         bot_key: config.key,
         giveaway_id: g._id,
         is_active: { $ne: false },
-        announcement_message_id: { $exists: true, $ne: null }
+        announcement_message_id: { $exists: true, $ne: null },
+        source_role: { $in: ['host', 'both'] }
       }).lean();
       await Promise.allSettled(sources.map(async (source) => {
         const keyboard = await contestPublicKeyboard(source, g, count);
@@ -3241,7 +3377,7 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
     const text =
       `🎁 QO‘SHIMCHA G‘OLIB!\n\n🎮 ${g.title}\n🏅 ${participant.full_name || participant.telegram_first_name || participant.user_id}` +
       `${participant.username ? ` (@${participant.username})` : ''}\n👥 Taklif qilganlar: ${participant.referrals_confirmed || 0}\n⭐ Ball: ${participant.score || 0}\n\n🎉 Tabriklaymiz!`;
-    const sources = await GiveawaySource.find({ bot_key: config.key, giveaway_id: g._id, is_active: { $ne: false }, publish_enabled: { $ne: false } }).lean();
+    const sources = await GiveawaySource.find({ bot_key: config.key, giveaway_id: g._id, is_active: { $ne: false }, publish_enabled: { $ne: false }, source_role: { $in: ['host', 'both'] } }).lean();
     await Promise.allSettled(sources.map((source) => bot.telegram.sendMessage(source.chat_id, text)));
     await bot.telegram.sendMessage(participant.user_id, `🎉 Tabriklaymiz! Siz “${g.title}” konkursida qo‘shimcha g‘olib sifatida tanlandingiz.`).catch(() => null);
   }
@@ -3258,7 +3394,8 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
       bot_key: config.key,
       giveaway_id: g._id,
       is_active: { $ne: false },
-      publish_enabled: { $ne: false }
+      publish_enabled: { $ne: false },
+      source_role: { $in: ['host', 'both'] }
     }).lean();
     const settled = await Promise.allSettled(sources.map((source) => bot.telegram.sendMessage(source.chat_id, text)));
     if (settled.some((r) => r.status === 'fulfilled')) {
@@ -3573,8 +3710,10 @@ function createGiveawayBot(config, tokenOverride = null, adminIdsOverride = null
     GiveawayParticipant.updateOne({ _id: participant._id }, { $inc: { share_actions: 1 } }).catch(() => null);
     const username = await getBotUsername();
     const botLink = `https://t.me/${username}?start=r_${String(contest._id)}_${ctx.from.id}`;
-    const groupInvite = await ensureGroupInviteLink(contest, participant);
-    const preferred = groupInvite?.url || botLink;
+    // Xavfsizlik uchun maxfiy host guruhga avtomatik invite link tarqatilmaydi.
+    // Referral faqat bot start-link orqali hisoblanadi, homiy kanal/guruhlar esa faqat obuna tekshiruv uchun ishlaydi.
+    const groupInvite = null;
+    const preferred = botLink;
     const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(preferred)}&text=${encodeURIComponent(`🎁 ${contest.title}
 Konkursda qatnashing!`)}`;
     return ctx.reply(
@@ -3790,7 +3929,7 @@ ${botLink}
     ctx.session.mode = 'gw_connect_chat';
     ctx.session.connectRole = role;
     ctx.session.giveawayId = String(g._id);
-    const roleText = role === 'sponsor' ? 'majburiy homiy kanal/guruh' : 'konkurs e’loni chiqadigan asosiy guruh/kanal';
+    const roleText = role === 'sponsor' ? 'faqat obuna tekshiriladigan HAMKOR/HOMIY kanal-guruh' : 'eʼlon chiqadigan TARG‘IBOT joyi yoki asosiy konkurs guruhi';
     return ctx.reply(
       `➕ “${g.title}” uchun ${roleText} ulang.
 
@@ -3801,6 +3940,11 @@ ${botLink}
 
 ` +
       `Private joy uchun: -1001234567890 | https://t.me/+invite
+
+MUHIM:
+• 🏠 Konkurs joyi — eʼlon yuboriladi.
+• 🤝 Homiy — eʼlon yuborilmaydi, faqat obuna tekshiriladi.
+• Maxfiy guruh invite-linklari foydalanuvchilarga tarqatilmaydi.
 
 Bot haqiqiy nomni Telegram’dan o‘zi oladi.`
     );
@@ -3825,7 +3969,7 @@ Bot haqiqiy nomni Telegram’dan o‘zi oladi.`
     const g = await managerGiveaway(ctx, ['active']);
     if (!g) return ctx.reply('📭 Aktiv konkurs yo‘q.');
     const result = await publishContestEverywhere(g);
-    if (!result.total) return ctx.reply('📭 Kanal/guruh ulanmagan. Avval “➕ Kanal/guruh ulash”ni bosing.');
+    if (!result.total) return ctx.reply('📭 Eʼlon yuboriladigan targ‘ibot joyi ulanmagan. “🏠 Konkurs joyini ulash” orqali eʼlon chiqadigan guruh/kanalni ulang. “🤝 Homiy kanal/guruh” esa faqat obuna tekshiruv uchun ishlaydi.');
     return ctx.reply(
       `📣 E’LON YUBORISH YAKUNLANDI\n\n✅ ${result.success} ta\n❌ ${result.failed} ta\n` +
       `${result.errors.length ? `\nXatolar:\n${result.errors.slice(0, 10).join('\n')}` : ''}`,
@@ -4306,6 +4450,242 @@ Bot haqiqiy nomni Telegram’dan o‘zi oladi.`
 // =========================
 // KANAL EGALARI UCHUN CUSTOM INPUT + AUTPOST BOT
 // =========================
+
+function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds, { mode: null });
+  const utils = createSharedUtils(bot, config, adminIds);
+
+  const STOP_WORDS = new Set('va yoki bilan uchun ham hali juda agar chunki nima kim qachon qayer qanaqa qaysi shu bunaqa mana ekan emas yoq bor bir ikki men sen u biz siz ular the a an is are be to of in on at from'.split(/\s+/));
+  const settingsCache = new Map();
+  const repliesCache = new Map();
+  const adminCache = new Map();
+  const lastReplyAt = new Map();
+  const SETTINGS_TTL = 15000;
+  const REPLIES_TTL = 12000;
+  const ADMIN_TTL = 60000;
+  const GROUP_TYPES = new Set(['group', 'supergroup']);
+
+  function adminKeyboard() {
+    return Markup.keyboard([
+      ['/learn_on', '/learn_off'],
+      ['/reply_on', '/reply_off'],
+      ['/learnstats', '/forgetall'],
+      ['/settings', '/help']
+    ]).resize();
+  }
+
+  function normText(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, ' ')
+      .replace(/[@#][\w_]+/g, ' ')
+      .replace(/[“”"'`´’‘]/g, '')
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function tokensOf(text) {
+    return normText(text).split(/\s+/).filter((w) => w.length >= 2 && !STOP_WORDS.has(w)).slice(0, 24);
+  }
+
+  function messageText(msg) {
+    return String(msg?.text || msg?.caption || '').trim();
+  }
+
+  function isCommandText(text) {
+    return /^\/[a-z0-9_]+(@[A-Za-z0-9_]+)?/i.test(String(text || '').trim());
+  }
+
+  async function isChatAdmin(ctx, userId = ctx.from?.id) {
+    const chatId = String(ctx.chat?.id || '');
+    if (!chatId || !userId) return false;
+    if (utils.isAdmin(userId)) return true;
+    const key = `${chatId}:${userId}`;
+    const cached = adminCache.get(key);
+    if (cached && Date.now() - cached.at < ADMIN_TTL) return cached.value;
+    try {
+      const member = await ctx.telegram.getChatMember(ctx.chat.id, userId);
+      const value = ['creator', 'administrator'].includes(member.status);
+      adminCache.set(key, { at: Date.now(), value });
+      return value;
+    } catch (_) {
+      adminCache.set(key, { at: Date.now(), value: false });
+      return false;
+    }
+  }
+
+  async function getGroupSettings(ctx) {
+    const chatId = String(ctx.chat.id);
+    const cached = settingsCache.get(chatId);
+    if (cached && Date.now() - cached.at < SETTINGS_TTL) return cached.doc;
+    let doc = await ChatLearningSetting.findOne({ bot_key: config.key, chat_id: chatId });
+    if (!doc) {
+      doc = await ChatLearningSetting.create({
+        bot_key: config.key,
+        chat_id: chatId,
+        title: ctx.chat.title || '',
+        username: ctx.chat.username || '',
+        learned_by: ctx.from?.id || null
+      });
+    }
+    settingsCache.set(chatId, { at: Date.now(), doc });
+    return doc;
+  }
+
+  function invalidateGroup(chatId) {
+    settingsCache.delete(String(chatId));
+    repliesCache.delete(String(chatId));
+  }
+
+  async function getRecentReplies(ctx, force = false) {
+    const chatId = String(ctx.chat.id);
+    const cached = repliesCache.get(chatId);
+    if (!force && cached && Date.now() - cached.at < REPLIES_TTL) return cached.items;
+    const items = await LearnedReply.find({ bot_key: config.key, chat_id: chatId, is_active: { $ne: false } })
+      .sort({ updatedAt: -1 })
+      .limit(250)
+      .lean();
+    repliesCache.set(chatId, { at: Date.now(), items });
+    return items;
+  }
+
+  function similarity(queryTokens, queryNorm, item) {
+    if (!queryTokens.length) return 0;
+    const itemTokens = Array.isArray(item.keywords) && item.keywords.length ? item.keywords : tokensOf(item.question_norm || item.question_text);
+    if (!itemTokens.length) return 0;
+    let hit = 0;
+    const set = new Set(itemTokens);
+    for (const t of queryTokens) if (set.has(t)) hit += 1;
+    let score = hit / Math.max(queryTokens.length, itemTokens.length);
+    const q = String(item.question_norm || '').trim();
+    if (q && queryNorm.includes(q)) score += 0.28;
+    if (q && q.includes(queryNorm) && queryNorm.length >= 4) score += 0.22;
+    return Math.min(1, score);
+  }
+
+  async function learnFromReply(ctx, settings) {
+    const msg = ctx.message;
+    const question = messageText(msg.reply_to_message);
+    const answer = messageText(msg);
+    if (!settings.auto_learn || !question || !answer) return false;
+    if (isCommandText(answer) || answer.length < 2 || question.length < 2) return false;
+    if (answer.length > 1200 || question.length > 500) return false;
+
+    const questionNorm = normText(question);
+    const keywords = tokensOf(question);
+    if (!questionNorm || keywords.length < 1) return false;
+
+    await LearnedReply.findOneAndUpdate(
+      { bot_key: config.key, chat_id: String(ctx.chat.id), question_norm: questionNorm, is_active: { $ne: false } },
+      {
+        $set: {
+          chat_title: ctx.chat.title || '',
+          question_text: question,
+          question_norm: questionNorm,
+          keywords,
+          answer_text: answer,
+          answer_chat_id: ctx.chat.id,
+          answer_message_id: msg.message_id,
+          answer_type: msg.text ? 'text' : 'caption',
+          learned_from_user_id: ctx.from.id,
+          learned_from_username: ctx.from.username || null
+        },
+        $setOnInsert: { bot_key: config.key, chat_id: String(ctx.chat.id), is_active: true }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    await ChatLearningSetting.updateOne({ _id: settings._id }, { $inc: { learned_count: 1 }, $set: { title: ctx.chat.title || settings.title } }).catch(() => null);
+    invalidateGroup(ctx.chat.id);
+    return true;
+  }
+
+  async function autoAnswer(ctx, settings) {
+    if (!settings.auto_reply || !settings.is_enabled) return false;
+    const text = messageText(ctx.message);
+    if (!text || isCommandText(text) || text.length < 2 || text.length > 400) return false;
+    if (settings.only_when_mentioned) {
+      const me = await bot.telegram.getMe().catch(() => null);
+      const username = me?.username ? `@${me.username}`.toLowerCase() : '';
+      if (username && !text.toLowerCase().includes(username)) return false;
+    }
+    const cooldownKey = String(ctx.chat.id);
+    const last = lastReplyAt.get(cooldownKey) || 0;
+    if (Date.now() - last < 2500) return false;
+    if (Number(settings.reply_chance || 1) < 1 && Math.random() > Number(settings.reply_chance)) return false;
+
+    const queryNorm = normText(text);
+    const queryTokens = tokensOf(text);
+    if (!queryTokens.length) return false;
+    const replies = await getRecentReplies(ctx);
+    let best = null;
+    let bestScore = 0;
+    for (const item of replies) {
+      const score = similarity(queryTokens, queryNorm, item);
+      if (score > bestScore) { bestScore = score; best = item; }
+    }
+    const minScore = Math.max(0.15, Math.min(0.9, Number(settings.min_score || 0.38)));
+    if (!best || bestScore < minScore) return false;
+    lastReplyAt.set(cooldownKey, Date.now());
+    try {
+      await ctx.reply(best.answer_text, { reply_to_message_id: ctx.message.message_id, allow_sending_without_reply: true });
+      LearnedReply.updateOne({ _id: best._id }, { $inc: { uses: 1 }, $set: { last_used_at: new Date() } }).catch(() => null);
+      ChatLearningSetting.updateOne({ _id: settings._id }, { $inc: { replies_sent: 1 } }).catch(() => null);
+      return true;
+    } catch (_) { return false; }
+  }
+
+  bot.start(async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+    return ctx.reply(
+      `🧠 ${config.title}\n\nMen guruhda reply qilingan savol-javoblarni o‘rganaman va keyingi o‘xshash gaplarga avtomatik javob beraman.\n\nIshlatish:\n1) Botni guruhga qo‘shing.\n2) Guruhda kimdir savolga reply qilib javob yozsa, men uni o‘rganaman.\n3) Keyingi o‘xshash savolga tez javob qaytaraman.`,
+      adminKeyboard()
+    );
+  });
+
+  bot.command(['learn_on', 'learn_off', 'reply_on', 'reply_off', 'forgetall', 'learnstats', 'settings', 'help'], async (ctx) => {
+    if (!GROUP_TYPES.has(ctx.chat?.type)) return ctx.reply('Bu bot asosan guruhlarda ishlaydi. Botni guruhga admin qilib qo‘shing.');
+    const admin = await isChatAdmin(ctx);
+    if (!admin && !['learnstats', 'help'].includes(ctx.command)) return ctx.reply('❌ Bu buyruq faqat guruh adminlari uchun.');
+    const settings = await getGroupSettings(ctx);
+    if (ctx.command === 'learn_on') { settings.auto_learn = true; await settings.save(); invalidateGroup(ctx.chat.id); return ctx.reply('✅ O‘rganish yoqildi. Reply qilingan savol-javoblar bazaga saqlanadi.'); }
+    if (ctx.command === 'learn_off') { settings.auto_learn = false; await settings.save(); invalidateGroup(ctx.chat.id); return ctx.reply('⏸ O‘rganish o‘chirildi.'); }
+    if (ctx.command === 'reply_on') { settings.auto_reply = true; await settings.save(); invalidateGroup(ctx.chat.id); return ctx.reply('✅ Avto-javob yoqildi.'); }
+    if (ctx.command === 'reply_off') { settings.auto_reply = false; await settings.save(); invalidateGroup(ctx.chat.id); return ctx.reply('⏸ Avto-javob o‘chirildi.'); }
+    if (ctx.command === 'forgetall') {
+      await LearnedReply.updateMany({ bot_key: config.key, chat_id: String(ctx.chat.id), is_active: { $ne: false } }, { $set: { is_active: false } });
+      invalidateGroup(ctx.chat.id);
+      return ctx.reply('🗑 Bu guruhdagi o‘rganilgan javoblar tozalandi.');
+    }
+    const total = await LearnedReply.countDocuments({ bot_key: config.key, chat_id: String(ctx.chat.id), is_active: { $ne: false } });
+    return ctx.reply(
+      `🧠 Suhbatchi holati\n\nGuruh: ${ctx.chat.title || ctx.chat.id}\n📚 O‘rganilgan: ${total}\n✍️ O‘rganish: ${settings.auto_learn ? 'yoqilgan' : 'o‘chiq'}\n💬 Avto-javob: ${settings.auto_reply ? 'yoqilgan' : 'o‘chiq'}\n🎯 Moslik chegarasi: ${settings.min_score || 0.38}\n\nBuyruqlar:\n/learn_on /learn_off\n/reply_on /reply_off\n/forgetall /learnstats`,
+      adminKeyboard()
+    );
+  });
+
+  bot.on('message', async (ctx, next) => {
+    if (!GROUP_TYPES.has(ctx.chat?.type) || !ctx.from || ctx.from.is_bot) return next?.();
+    const msg = ctx.message;
+    if (msg.new_chat_members || msg.left_chat_member) return next?.();
+    if (msg.reply_to_message) {
+      const settings = await getGroupSettings(ctx);
+      const learned = await learnFromReply(ctx, settings);
+      if (learned) return next?.();
+    }
+    const settings = await getGroupSettings(ctx);
+    await autoAnswer(ctx, settings);
+    return next?.();
+  });
+
+  return { key: config.key, title: config.title, bot, config };
+}
+
+
 function createChannelFormBot(config, tokenOverride = null, adminIdsOverride = null) {
   const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
   if (!hasUsableToken(token)) return null;
@@ -4343,36 +4723,915 @@ function createChannelFormBot(config, tokenOverride = null, adminIdsOverride = n
 }
 
 // =========================
-// GURUH TOZALOVCHI / ANTISPAM / FAQ BOT
+// ULTIMATE GURUH MANAGER / ANTISPAM / MODERATSIYA BOT
 // =========================
 function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = null) {
   const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
   if (!hasUsableToken(token)) return null;
-  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
-  const bot = createBaseBot(token, config, adminIds);
+
+  const adminIds = (adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS)).map(Number);
+  const bot = createBaseBot(token, config, adminIds, { mode: null, draft: {} });
   const utils = createSharedUtils(bot, config, adminIds);
-  function adminKeyboard(){return Markup.keyboard(commonAdminRows([['⚙️ Guruh sozlamalar','📜 Qoidalar'],['➕ FAQ qoʻshish','📋 FAQlar'],['🗑 FAQ oʻchirish','👋 Salomlashuv'],['🚫 Taqiqlangan soʻzlar','🛡 Anti-link']])).resize().oneTime(false);}
-  bot.start(async(ctx)=>{await utils.saveUser(ctx,true); if(utils.isAdmin(ctx.from.id)) return ctx.reply('🛡 Guruh bot admin paneli',adminKeyboard()); return ctx.reply('🛡 Bu bot guruhni tozalash, anti-spam, FAQ va salomlashuv uchun. Botni guruhga admin qilib qo‘shing.');});
-  async function settingsLine(){const st=await getBotSettings(config.key); return `⚙️ GURUH SOZLAMALAR\n\n🧹 Kirdi/chiqdi tozalash: ${st.clean_join!==false?'yoqilgan':'o‘chirilgan'}\n🛡 Anti-link: ${st.anti_link!==false?'yoqilgan':'o‘chirilgan'}\n👋 Salomlashuv: ${st.welcome_text?'bor':'yo‘q'}\n📜 Qoidalar: ${st.rules_text?'bor':'yo‘q'}\n🚫 Taqiqlangan so‘zlar: ${(st.badwords||[]).length} ta`;}
-  bot.hears('⚙️ Guruh sozlamalar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; return ctx.reply(await settingsLine(),Markup.inlineKeyboard([[Markup.button.callback('🧹 Kirdi/chiqdi ON/OFF','grp:toggle:clean_join'),Markup.button.callback('🛡 Anti-link ON/OFF','grp:toggle:anti_link')]]));});
-  bot.hears('👋 Salomlashuv',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_welcome'; return ctx.reply('👋 Yangi a’zoga salomlashuv matnini yuboring. {name} ishlatishingiz mumkin.');});
-  bot.hears('📜 Qoidalar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_rules'; return ctx.reply('📜 Guruh qoidalari matnini yuboring. Foydalanuvchi /rules yozsa chiqadi.');});
-  bot.hears('🛡 Anti-link',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const st=await getBotSettings(config.key); await updateBotSettings(config.key,{anti_link:st.anti_link===false}); return ctx.reply('✅ Anti-link holati o‘zgartirildi.',adminKeyboard());});
-  bot.hears('🚫 Taqiqlangan soʻzlar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='grp_badwords'; return ctx.reply('🚫 Taqiqlangan so‘zlarni vergul bilan yuboring.\nMisol: spam, reklama, haqorat');});
-  bot.hears('➕ FAQ qoʻshish',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='faq_add'; return ctx.reply('➕ FAQ qo‘shish.\n\nFormat:\nkalit so‘z | javob\n\nMisol:\nnarx | Narxlar admin bilan kelishiladi.');});
-  bot.hears('📋 FAQlar',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const list=await GroupFaq.find({bot_key:config.key,is_active:true}).sort({createdAt:-1}).limit(50); if(!list.length)return ctx.reply('📭 FAQ yo‘q.'); return ctx.reply(`📋 FAQlar\n\n${list.map((f,i)=>`${i+1}. ${f.keyword}\n${f.answer}`).join('\n\n')}`);});
-  bot.hears('🗑 FAQ oʻchirish',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; ctx.session.mode='faq_delete'; return ctx.reply('🗑 O‘chiriladigan FAQ kalit so‘zini yuboring.');});
-  bot.hears('📊 Statistika',async(ctx)=>{if(!utils.isAdmin(ctx.from.id))return; const [users,active,blocked,faqs,subs]=await Promise.all([User.countDocuments({bot_key:config.key}),User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}),User.countDocuments({bot_key:config.key,is_blocked:true}),GroupFaq.countDocuments({bot_key:config.key,is_active:true}),Subscription.countDocuments({bot_key:config.key})]); return ctx.reply(`📊 GURUH BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n❓ FAQ: ${faqs}\n🔒 Majburiy obuna: ${subs}`);});
-  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
-  bot.action(/^grp:toggle:(clean_join|anti_link)$/,async(ctx)=>{await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id))return; const st=await getBotSettings(config.key); const k=ctx.match[1]; await updateBotSettings(config.key,{[k]:st[k]===false}); return ctx.editMessageText(await settingsLine());});
-  bot.command('rules',async(ctx)=>{const st=await getBotSettings(config.key); return ctx.reply(st.rules_text||'📜 Qoidalar hali kiritilmagan.');});
-  bot.command('cancel',async(ctx)=>{ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
-  bot.on('new_chat_members',async(ctx)=>{await utils.saveUser(ctx); const st=await getBotSettings(config.key); if(st.clean_join!==false) await safeDelete(ctx); if(st.welcome_text){ for(const u of ctx.message.new_chat_members||[]){ try{ await ctx.reply(st.welcome_text.replace(/\{name\}/g,u.first_name||'do‘st')); }catch(_){} } }});
-  bot.on('left_chat_member',async(ctx)=>{const st=await getBotSettings(config.key); if(st.clean_join!==false) await safeDelete(ctx);});
-  bot.on('text',async(ctx)=>{await utils.saveUser(ctx); const text=ctx.message.text.trim(); if(text==='/cancel'){ctx.session.mode=null;ctx.session.draft={};return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if(ctx.chat.type==='private' && utils.isAdmin(ctx.from.id)){ const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common)return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='grp_welcome'){await updateBotSettings(config.key,{welcome_text:text});ctx.session.mode=null;return ctx.reply('✅ Salomlashuv saqlandi.',adminKeyboard());} if(ctx.session.mode==='grp_rules'){await updateBotSettings(config.key,{rules_text:text});ctx.session.mode=null;return ctx.reply('✅ Qoidalar saqlandi.',adminKeyboard());} if(ctx.session.mode==='grp_badwords'){const words=text.split(',').map(x=>normalizeTitle(x)).filter(Boolean); await updateBotSettings(config.key,{badwords:words});ctx.session.mode=null;return ctx.reply('✅ Taqiqlangan so‘zlar saqlandi.',adminKeyboard());} if(ctx.session.mode==='faq_add'){const [kw,...ans]=text.split('|').map(x=>x.trim()); if(!kw||!ans.join('|'))return ctx.reply('❌ Format: kalit | javob'); await GroupFaq.updateOne({bot_key:config.key,keyword_norm:normalizeTitle(kw)},{$set:{keyword:kw,answer:ans.join(' | '),is_active:true,added_by:ctx.from.id}},{upsert:true});ctx.session.mode=null;return ctx.reply('✅ FAQ saqlandi.',adminKeyboard());} if(ctx.session.mode==='faq_delete'){const res=await GroupFaq.updateOne({bot_key:config.key,keyword_norm:normalizeTitle(text),is_active:true},{$set:{is_active:false}});ctx.session.mode=null;return ctx.reply(res.modifiedCount?'✅ FAQ o‘chirildi.':'❌ Topilmadi.',adminKeyboard());} }
-    if(ctx.chat.type!=='private'){ const st=await getBotSettings(config.key); const norm=normalizeTitle(text); if(st.anti_link!==false && isLinkText(text)){ await safeDelete(ctx); try{await ctx.reply('🛡 Link/reklama yuborish mumkin emas.');}catch(_){} return; } const bad=(st.badwords||[]).some(w=>w&&norm.includes(w)); if(bad){ await safeDelete(ctx); try{await ctx.reply('🚫 Guruh qoidalariga zid so‘z o‘chirildi.');}catch(_){} return; } const faq=await GroupFaq.findOne({bot_key:config.key,is_active:true,keyword_norm:norm}); if(faq) return ctx.reply(faq.answer); }
+
+  const DEFAULT_GROUP_SETTINGS = Object.freeze({
+    clean_join: true,
+    clean_leave: true,
+    clean_service: true,
+    anti_link: true,
+    warn_on_link: true,
+    anti_forward: false,
+    anti_flood: true,
+    flood_limit: 6,
+    flood_window_sec: 8,
+    warn_limit: 3,
+    mute_minutes: 60,
+    warning_delete_seconds: 12,
+    welcome_enabled: false,
+    welcome_text: '👋 Xush kelibsiz, {name}!',
+    rules_text: '📜 Guruh qoidalari hali yozilmagan.',
+    badwords: [],
+    allow_domains: [],
+    delete_commands: false,
+    admin_log: true
   });
-  bot.on('message',async(ctx)=>{await utils.saveUser(ctx); if(ctx.chat.type==='private'&&utils.isAdmin(ctx.from.id)&&ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;}});
+
+  const settingsCache = new Map();
+  const adminCache = new Map();
+  const floodCache = new Map();
+  const whitelistCache = new Map();
+  const autoReplyCache = new Map();
+  const botMeCache = { value: null, id: 0, at: 0 };
+  const SETTINGS_TTL = 30_000;
+  const ADMIN_TTL = 30_000;
+
+  const isGroupChat = (ctx) => ['group', 'supergroup'].includes(ctx.chat?.type);
+  const htmlEscape = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const mentionHtml = (userId, name) => `<a href="tg://user?id=${Number(userId)}">${htmlEscape(name || 'Foydalanuvchi')}</a>`;
+  const commandPayload = (ctx) => String(ctx.message?.text || '').replace(/^\/\w+(?:@\w+)?\s*/u, '').trim();
+
+  function defaultSettings(custom = {}) {
+    return {
+      ...DEFAULT_GROUP_SETTINGS,
+      ...(custom || {}),
+      badwords: Array.isArray(custom?.badwords) ? custom.badwords : [],
+      allow_domains: Array.isArray(custom?.allow_domains) ? custom.allow_domains : []
+    };
+  }
+
+  async function getBotUsername() {
+    if (config.telegramUsername && botMeCache.value) return botMeCache.value;
+    if (botMeCache.value && Date.now() - botMeCache.at < 10 * 60_000) return botMeCache.value;
+    try {
+      const me = await bot.telegram.getMe();
+      botMeCache.value = me.username || String(config.telegramUsername || '').replace(/^@/, '');
+      botMeCache.id = Number(me.id || 0);
+      botMeCache.at = Date.now();
+      return me.username;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function upsertGroup(ctx, extra = {}) {
+    if (!isGroupChat(ctx) || !(mongoReady && mongoose.connection.readyState === 1)) return null;
+    const chatId = String(ctx.chat.id);
+    const patch = {
+      title: ctx.chat.title || null,
+      username: ctx.chat.username ? `@${ctx.chat.username}` : null,
+      chat_type: ctx.chat.type,
+      last_active_at: new Date(),
+      is_active: true,
+      ...extra
+    };
+    try {
+      return await GroupChat.findOneAndUpdate(
+        { bot_key: config.key, chat_id: chatId },
+        { $set: patch, $setOnInsert: { added_by: ctx.from?.id || null, added_by_username: ctx.from?.username || null, settings: defaultSettings() } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } catch (error) {
+      console.error(`${config.title} guruh saqlash:`, error.message);
+      return null;
+    }
+  }
+
+  async function getGroupSettings(chatId, chatMeta = null) {
+    const key = String(chatId);
+    const cached = settingsCache.get(key);
+    if (cached && Date.now() - cached.at < SETTINGS_TTL) return cached.value;
+    let value = defaultSettings();
+    if (mongoReady && mongoose.connection.readyState === 1) {
+      try {
+        let doc = await GroupChat.findOne({ bot_key: config.key, chat_id: key }).lean();
+        if (!doc && chatMeta) {
+          doc = await GroupChat.findOneAndUpdate(
+            { bot_key: config.key, chat_id: key },
+            {
+              $set: {
+                title: chatMeta.title || null,
+                username: chatMeta.username ? `@${chatMeta.username}` : null,
+                chat_type: chatMeta.type || 'supergroup',
+                last_active_at: new Date(),
+                is_active: true
+              },
+              $setOnInsert: { settings: defaultSettings() }
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          ).lean();
+        }
+        value = defaultSettings(doc?.settings || {});
+      } catch (error) {
+        console.error(`${config.title} settings:`, error.message);
+      }
+    }
+    settingsCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+
+  async function patchGroupSettings(chatId, patch) {
+    const key = String(chatId);
+    const current = await getGroupSettings(key);
+    const next = defaultSettings({ ...current, ...patch });
+    if (!(mongoReady && mongoose.connection.readyState === 1)) throw new Error('MongoDB ulanmagan');
+    await GroupChat.updateOne(
+      { bot_key: config.key, chat_id: key },
+      { $set: { settings: next, last_active_at: new Date(), is_active: true } },
+      { upsert: true }
+    );
+    settingsCache.set(key, { at: Date.now(), value: next });
+    return next;
+  }
+
+  async function isChatAdmin(chatId, userId) {
+    const uid = Number(userId);
+    if (!uid) return false;
+    if (adminIds.includes(uid) || GLOBAL_ADMIN_IDS.includes(uid)) return true;
+    const key = `${chatId}:${uid}`;
+    const cached = adminCache.get(key);
+    if (cached && Date.now() - cached.at < ADMIN_TTL) return cached.value;
+    let value = false;
+    try {
+      const member = await bot.telegram.getChatMember(chatId, uid);
+      value = ['creator', 'administrator'].includes(member.status);
+    } catch (_) {}
+    adminCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+
+  async function requireGroupAdmin(ctx) {
+    if (!isGroupChat(ctx)) {
+      await ctx.reply('ℹ️ Bu buyruq faqat guruh ichida ishlaydi.');
+      return false;
+    }
+    if (!(await isChatAdmin(ctx.chat.id, ctx.from.id))) {
+      await ctx.reply('⛔ Bu buyruq faqat guruh administratorlari uchun.');
+      return false;
+    }
+    return true;
+  }
+
+  function deleteMessageLater(chatId, messageId, seconds = 12) {
+    if (!messageId || !seconds) return;
+    const timer = setTimeout(() => bot.telegram.deleteMessage(chatId, messageId).catch(() => null), Math.max(2, Number(seconds)) * 1000);
+    timer.unref?.();
+  }
+
+  async function tempReply(ctx, text, settings, extra = {}) {
+    try {
+      const sent = await ctx.reply(text, extra);
+      deleteMessageLater(ctx.chat.id, sent.message_id, settings?.warning_delete_seconds ?? 12);
+      return sent;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function saveGroupMember(ctx, user = ctx.from, patch = {}, increments = {}) {
+    if (!isGroupChat(ctx) || !user || user.is_bot || !(mongoReady && mongoose.connection.readyState === 1)) return;
+    const update = {
+      $set: {
+        username: user.username || null,
+        first_name: user.first_name || null,
+        last_name: user.last_name || null,
+        last_message_at: new Date(),
+        ...patch
+      },
+      $setOnInsert: { status: 'active', joined_at: new Date() }
+    };
+    if (Object.keys(increments).length) update.$inc = increments;
+    GroupMember.updateOne(
+      { bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(user.id) },
+      update,
+      { upsert: true }
+    ).catch((error) => console.error(`${config.title} member save:`, error.message));
+  }
+
+  async function resolveTarget(ctx) {
+    const replyUser = ctx.message?.reply_to_message?.from;
+    const payload = commandPayload(ctx);
+    if (replyUser && !replyUser.is_bot) {
+      return { user: replyUser, reason: payload || '', source: 'reply' };
+    }
+    const [rawTarget, ...rest] = payload.split(/\s+/).filter(Boolean);
+    if (!rawTarget) return null;
+    let member = null;
+    if (/^\d{5,}$/.test(rawTarget)) {
+      member = await GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(rawTarget) }).lean();
+      if (!member) member = { user_id: Number(rawTarget), first_name: `ID ${rawTarget}` };
+    } else if (/^@[a-zA-Z0-9_]{5,32}$/.test(rawTarget)) {
+      member = await GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), username: new RegExp(`^${escapeRegex(rawTarget.slice(1))}$`, 'i') }).lean();
+    }
+    if (!member) return null;
+    return {
+      user: {
+        id: Number(member.user_id),
+        username: member.username || rawTarget.replace(/^@/, ''),
+        first_name: member.first_name || member.username || rawTarget,
+        last_name: member.last_name || ''
+      },
+      reason: rest.join(' '),
+      source: 'argument'
+    };
+  }
+
+  async function targetIsProtected(ctx, targetId) {
+    if (Number(targetId) === Number(ctx.from.id)) return 'O‘zingizga bu amalni qo‘llay olmaysiz.';
+    if (!botMeCache.id) { try { const me = await bot.telegram.getMe(); botMeCache.id = Number(me.id || 0); botMeCache.value = me.username || botMeCache.value; botMeCache.at = Date.now(); } catch (_) {} }
+    if (Number(targetId) === Number(botMeCache.id)) return 'Botga bu amalni qo‘llab bo‘lmaydi.';
+    if (await isChatAdmin(ctx.chat.id, targetId)) return 'Guruh administratoriga bu amalni qo‘llab bo‘lmaydi.';
+    return null;
+  }
+
+  async function logAction(ctx, action, targetId = null, reason = '', meta = {}) {
+    if (!(mongoReady && mongoose.connection.readyState === 1) || !isGroupChat(ctx)) return;
+    GroupAction.create({
+      bot_key: config.key,
+      chat_id: String(ctx.chat.id),
+      actor_id: ctx.from?.id || null,
+      target_id: targetId ? Number(targetId) : null,
+      action,
+      reason: String(reason || '').slice(0, 500),
+      meta
+    }).catch(() => null);
+  }
+
+  async function banUser(ctx, target, reason = 'Qoidabuzarlik', actorLabel = 'Admin') {
+    await bot.telegram.banChatMember(ctx.chat.id, target.id);
+    await GroupMember.updateOne(
+      { bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.id) },
+      { $set: { status: 'banned', last_warn_reason: reason }, $setOnInsert: { first_name: target.first_name || null, username: target.username || null } },
+      { upsert: true }
+    ).catch(() => null);
+    GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { bans_issued: 1 } }).catch(() => null);
+    await logAction(ctx, 'ban', target.id, reason, { actor_label: actorLabel });
+  }
+
+  async function applyWarning(ctx, target, reason = 'Guruh qoidalarini buzish', automatic = false) {
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const protectedReason = await targetIsProtected(ctx, target.id);
+    if (protectedReason) {
+      if (!automatic) await ctx.reply(`⛔ ${protectedReason}`);
+      return { ok: false, warns: 0 };
+    }
+    if (!(mongoReady && mongoose.connection.readyState === 1)) {
+      if (!automatic) await ctx.reply('⏳ Baza vaqtincha ulanmagan. Qayta urinib ko‘ring.');
+      return { ok: false, warns: 0 };
+    }
+    const member = await GroupMember.findOneAndUpdate(
+      { bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.id) },
+      {
+        $set: {
+          username: target.username || null,
+          first_name: target.first_name || null,
+          last_name: target.last_name || null,
+          last_warn_reason: reason,
+          status: 'active'
+        },
+        $inc: { warns: 1 },
+        $setOnInsert: { joined_at: new Date() }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { warnings_issued: 1 } }).catch(() => null);
+    await logAction(ctx, automatic ? 'auto_warn' : 'warn', target.id, reason, { warns: member.warns });
+
+    const displayName = [target.first_name, target.last_name].filter(Boolean).join(' ') || target.username || String(target.id);
+    if (member.warns >= Number(settings.warn_limit || 3)) {
+      try {
+        await banUser(ctx, target, `${reason}; ${member.warns}/${settings.warn_limit} ogohlantirish`, automatic ? 'Avtomatik himoya' : 'Admin');
+        const msg = await ctx.reply(
+          `🚫 ${mentionHtml(target.id, displayName)} guruhdan bloklandi.\n\nSabab: ${htmlEscape(reason)}\nOgohlantirish: ${member.warns}/${settings.warn_limit}`,
+          { parse_mode: 'HTML' }
+        );
+        deleteMessageLater(ctx.chat.id, msg.message_id, 30);
+      } catch (error) {
+        await ctx.reply(`❌ Ban berilmadi. Botga “Foydalanuvchilarni bloklash” admin huquqini bering.\n${error.description || error.message}`);
+      }
+      return { ok: true, warns: member.warns, banned: true };
+    }
+
+    const msg = await ctx.reply(
+      `⚠️ ${mentionHtml(target.id, displayName)} ogohlantirildi.\n\nSabab: ${htmlEscape(reason)}\nOgohlantirish: ${member.warns}/${settings.warn_limit}`,
+      { parse_mode: 'HTML' }
+    );
+    deleteMessageLater(ctx.chat.id, msg.message_id, settings.warning_delete_seconds);
+    return { ok: true, warns: member.warns, banned: false };
+  }
+
+  function parseDuration(value, fallbackMinutes = 60) {
+    const raw = String(value || '').trim().toLowerCase();
+    const m = raw.match(/^(\d+)(s|m|h|d|w)?$/);
+    if (!m) return fallbackMinutes * 60;
+    const n = Math.max(1, Number(m[1]));
+    const unit = m[2] || 'm';
+    const mult = unit === 's' ? 1 : unit === 'h' ? 3600 : unit === 'd' ? 86400 : unit === 'w' ? 604800 : 60;
+    return n * mult;
+  }
+
+  function mutePermissions(allowed) {
+    return {
+      can_send_messages: allowed,
+      can_send_audios: allowed,
+      can_send_documents: allowed,
+      can_send_photos: allowed,
+      can_send_videos: allowed,
+      can_send_video_notes: allowed,
+      can_send_voice_notes: allowed,
+      can_send_polls: allowed,
+      can_send_other_messages: allowed,
+      can_add_web_page_previews: allowed,
+      can_invite_users: allowed
+    };
+  }
+
+  function extractTextAndCaption(message) {
+    return String(message?.text || message?.caption || '').trim();
+  }
+
+  function messageHasLink(message, settings) {
+    const text = extractTextAndCaption(message);
+    const entities = [...(message?.entities || []), ...(message?.caption_entities || [])];
+    const entityHasLink = entities.some((entity) => ['url', 'text_link'].includes(entity.type));
+    const regexHasLink = /(https?:\/\/|www\.|t\.me\/|telegram\.me\/|telegram\.dog\/|tg:\/\/)/i.test(text);
+    if (!(entityHasLink || regexHasLink)) return false;
+    const allowed = (settings.allow_domains || []).map((x) => String(x).toLowerCase()).filter(Boolean);
+    if (allowed.length && allowed.some((domain) => text.toLowerCase().includes(domain))) return false;
+    return true;
+  }
+
+  function isForwarded(message) {
+    return Boolean(message?.forward_origin || message?.forward_from || message?.forward_from_chat || message?.forward_sender_name || message?.is_automatic_forward);
+  }
+
+  function isFlood(chatId, userId, settings) {
+    if (settings.anti_flood === false) return false;
+    const key = `${chatId}:${userId}`;
+    const now = Date.now();
+    const windowMs = Math.max(2, Number(settings.flood_window_sec || 8)) * 1000;
+    const limit = Math.max(3, Number(settings.flood_limit || 6));
+    const recent = (floodCache.get(key) || []).filter((time) => now - time <= windowMs);
+    recent.push(now);
+    floodCache.set(key, recent);
+    return recent.length > limit;
+  }
+
+  function settingsText(settings) {
+    return [
+      '⚙️ <b>GURUH MANAGER SOZLAMALARI</b>',
+      '',
+      `🔗 Anti-link: <b>${settings.anti_link !== false ? 'ON' : 'OFF'}</b>`,
+      `⚠️ Link uchun warn: <b>${settings.warn_on_link !== false ? 'ON' : 'OFF'}</b>`,
+      `🧹 Kirdi xabari: <b>${settings.clean_join !== false ? 'o‘chiriladi' : 'qoladi'}</b>`,
+      `🚪 Chiqdi xabari: <b>${settings.clean_leave !== false ? 'o‘chiriladi' : 'qoladi'}</b>`,
+      `📨 Forward himoyasi: <b>${settings.anti_forward === true ? 'ON' : 'OFF'}</b>`,
+      `⚡ Flood himoyasi: <b>${settings.anti_flood !== false ? 'ON' : 'OFF'}</b> (${settings.flood_limit}/${settings.flood_window_sec}s)`,
+      `👋 Salomlashuv: <b>${settings.welcome_enabled ? 'ON' : 'OFF'}</b>`,
+      `🚫 Warn limiti: <b>${settings.warn_limit}</b>`,
+      `🔇 Standart mute: <b>${settings.mute_minutes} daqiqa</b>`,
+      `🧾 Taqiqlangan so‘zlar: <b>${(settings.badwords || []).length}</b>`,
+      `✅ Ruxsatli domenlar: <b>${(settings.allow_domains || []).length}</b>`
+    ].join('\n');
+  }
+
+  function settingsKeyboard() {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('🔗 Anti-link', 'gm:t:anti_link'), Markup.button.callback('⚠️ Link warn', 'gm:t:warn_on_link')],
+      [Markup.button.callback('🧹 Kirdi', 'gm:t:clean_join'), Markup.button.callback('🚪 Chiqdi', 'gm:t:clean_leave')],
+      [Markup.button.callback('📨 Forward', 'gm:t:anti_forward'), Markup.button.callback('⚡ Flood', 'gm:t:anti_flood')],
+      [Markup.button.callback('👋 Salomlashuv', 'gm:t:welcome_enabled'), Markup.button.callback('🔄 Yangilash', 'gm:settings')]
+    ]);
+  }
+
+  function helpText() {
+    return [
+      '🛡 <b>ULTIMATE GROUP MANAGER</b>',
+      '',
+      '<b>Asosiy moderatsiya:</b>',
+      '• /warn — reply yoki /warn @username sabab',
+      '• /warnings — o‘zingiz yoki reply qilingan user warnlari',
+      '• /clearwarn — reply/ID/@username warnlarini tozalash',
+      '• /ban — reply/ID/@username bloklash',
+      '• /unban ID — blokdan chiqarish',
+      '• /kick — guruhdan chiqarish, qayta kira oladi',
+      '• /mute 10m — vaqtincha yozishni cheklash',
+      '• /unmute — cheklovni olib tashlash',
+      '• /del — reply qilingan xabarni o‘chirish',
+      '• /pin va /unpin — xabarni mahkamlash/olib tashlash',
+      '',
+      '<b>Sozlamalar:</b>',
+      '• /settings — shu guruh sozlamalari',
+      '• /setwarnlimit 3',
+      '• /setflood 6 8 — 8 soniyada 6 xabar',
+      '• /setwelcome matn ({name}, {username})',
+      '• /welcome on|off',
+      '• /setrules matn',
+      '• /badword add so‘z | /badword del so‘z | /badword list',
+      '• /allowdomain t.me | /deldomain t.me | /domains',
+      '• /trust va /untrust — reply userga link ruxsati',
+      '• /filter kalit | avtomatik javob',
+      '• /stopfilter kalit | /filters',
+      '',
+      '<b>Foydali:</b>',
+      '• /rules, /admins, /id, /groupstats, /report (reply)',
+      '',
+      'ℹ️ Buyruqlar reply orqali ishlatilsa eng ishonchli. Botga xabar o‘chirish, ban/restrict va pin huquqlarini bering.'
+    ].join('\n');
+  }
+
+  async function showSettings(ctx, edit = false) {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const opts = { parse_mode: 'HTML', ...settingsKeyboard() };
+    if (edit && ctx.callbackQuery?.message) {
+      return ctx.editMessageText(settingsText(settings), opts).catch(() => ctx.answerCbQuery('Yangilandi'));
+    }
+    return ctx.reply(settingsText(settings), opts);
+  }
+
+  bot.start(async (ctx) => {
+    utils.saveUser(ctx, true).catch(() => null);
+    if (isGroupChat(ctx)) {
+      upsertGroup(ctx).catch(() => null);
+      return ctx.reply('🛡 Guruh Manager ishga tushdi. Sozlash uchun /settings, buyruqlar uchun /help yozing.');
+    }
+    const username = await getBotUsername();
+    const rows = [];
+    if (username) rows.push([Markup.button.url('➕ Guruhga qo‘shish', `https://t.me/${username}?startgroup=true`)]);
+    rows.push([Markup.button.url('👨‍💼 Yordam / admin', `https://t.me/${String(OWNER_USERNAME).replace(/^@/, '')}`)]);
+    return ctx.reply(
+      '🛡 <b>Ultimate Group Manager Bot</b>\n\nBu bot faqat Telegram guruhlarini boshqarish uchun ishlaydi. Uni guruhga qo‘shib, quyidagi admin huquqlarini bering:\n\n✅ Xabarlarni o‘chirish\n✅ Foydalanuvchilarni cheklash/ban\n✅ Xabarlarni pin qilish\n\nHar bir guruh administratori o‘z guruhini /settings orqali alohida sozlaydi.',
+      { parse_mode: 'HTML', ...Markup.inlineKeyboard(rows) }
+    );
+  });
+
+  bot.command('help', async (ctx) => ctx.reply(helpText(), { parse_mode: 'HTML' }));
+  bot.command('commands', async (ctx) => ctx.reply(helpText(), { parse_mode: 'HTML' }));
+  bot.command('settings', async (ctx) => showSettings(ctx));
+
+  bot.action('gm:settings', async (ctx) => {
+    await ctx.answerCbQuery();
+    return showSettings(ctx, true);
+  });
+  bot.action(/^gm:t:(anti_link|warn_on_link|clean_join|clean_leave|anti_forward|anti_flood|welcome_enabled)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!(await requireGroupAdmin(ctx))) return;
+    const key = ctx.match[1];
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    await patchGroupSettings(ctx.chat.id, { [key]: !Boolean(settings[key]) });
+    return showSettings(ctx, true);
+  });
+
+  bot.command('warn', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki /warn @username sabab / /warn ID sabab formatida yuboring.');
+    return applyWarning(ctx, resolved.user, resolved.reason || 'Admin ogohlantirishi');
+  });
+
+  bot.command('warnings', async (ctx) => {
+    if (!isGroupChat(ctx)) return ctx.reply('ℹ️ Bu buyruq guruhda ishlaydi.');
+    let target = null;
+    const resolved = await resolveTarget(ctx);
+    if (resolved) target = resolved.user;
+    else target = ctx.from;
+    const member = await GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(target.id) }).lean();
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    return ctx.reply(`⚠️ ${target.first_name || target.username || target.id}: ${member?.warns || 0}/${settings.warn_limit} ogohlantirish.${member?.last_warn_reason ? `\nOxirgi sabab: ${member.last_warn_reason}` : ''}`);
+  });
+
+  bot.command('clearwarn', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki ID/@username yuboring.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { warns: 0, last_warn_reason: null } }, { upsert: true });
+    await logAction(ctx, 'clear_warn', resolved.user.id);
+    return ctx.reply('✅ Ogohlantirishlar tozalandi.');
+  });
+
+  bot.command('ban', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki /ban ID/@username sabab yuboring.');
+    const protectedReason = await targetIsProtected(ctx, resolved.user.id);
+    if (protectedReason) return ctx.reply(`⛔ ${protectedReason}`);
+    try {
+      await banUser(ctx, resolved.user, resolved.reason || 'Admin qarori');
+      return ctx.reply(`🚫 User bloklandi. ${resolved.reason ? `Sabab: ${resolved.reason}` : ''}`);
+    } catch (error) {
+      return ctx.reply(`❌ Ban berilmadi. Botning admin huquqlarini tekshiring.\n${error.description || error.message}`);
+    }
+  });
+
+  bot.command('unban', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ /unban ID yoki avval ma’lum bo‘lgan @username yuboring.');
+    try {
+      await bot.telegram.unbanChatMember(ctx.chat.id, resolved.user.id, { only_if_banned: true });
+      await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { status: 'active' } });
+      await logAction(ctx, 'unban', resolved.user.id);
+      return ctx.reply('✅ User blokdan chiqarildi.');
+    } catch (error) {
+      return ctx.reply(`❌ Unban xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('kick', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki ID/@username yuboring.');
+    const protectedReason = await targetIsProtected(ctx, resolved.user.id);
+    if (protectedReason) return ctx.reply(`⛔ ${protectedReason}`);
+    try {
+      await bot.telegram.banChatMember(ctx.chat.id, resolved.user.id, { until_date: Math.floor(Date.now() / 1000) + 60 });
+      await bot.telegram.unbanChatMember(ctx.chat.id, resolved.user.id);
+      await logAction(ctx, 'kick', resolved.user.id, resolved.reason || 'Admin qarori');
+      return ctx.reply('👢 User guruhdan chiqarildi. Qayta kirishi mumkin.');
+    } catch (error) {
+      return ctx.reply(`❌ Kick xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('mute', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling. Misol: reply + /mute 10m sabab');
+    const protectedReason = await targetIsProtected(ctx, resolved.user.id);
+    if (protectedReason) return ctx.reply(`⛔ ${protectedReason}`);
+    const payload = commandPayload(ctx);
+    const tokens = payload.split(/\s+/).filter(Boolean);
+    const durationRaw = resolved.source === 'reply' ? tokens[0] : tokens[1];
+    const seconds = parseDuration(durationRaw, (await getGroupSettings(ctx.chat.id, ctx.chat)).mute_minutes || 60);
+    const until = Math.floor(Date.now() / 1000) + Math.max(30, seconds);
+    try {
+      await bot.telegram.restrictChatMember(ctx.chat.id, resolved.user.id, { permissions: mutePermissions(false), until_date: until });
+      await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { status: 'muted', muted_until: new Date(until * 1000) } }, { upsert: true });
+      await logAction(ctx, 'mute', resolved.user.id, resolved.reason || '', { until });
+      return ctx.reply(`🔇 User ${Math.ceil(seconds / 60)} daqiqaga cheklab qo‘yildi.`);
+    } catch (error) {
+      return ctx.reply(`❌ Mute xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('unmute', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki ID/@username yuboring.');
+    try {
+      await bot.telegram.restrictChatMember(ctx.chat.id, resolved.user.id, { permissions: mutePermissions(true) });
+      await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { status: 'active', muted_until: null } });
+      await logAction(ctx, 'unmute', resolved.user.id);
+      return ctx.reply('🔊 User cheklovi olib tashlandi.');
+    } catch (error) {
+      return ctx.reply(`❌ Unmute xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('del', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const targetMessage = ctx.message?.reply_to_message;
+    if (!targetMessage) return ctx.reply('❌ O‘chiriladigan xabarni reply qiling.');
+    await bot.telegram.deleteMessage(ctx.chat.id, targetMessage.message_id).catch(() => null);
+    await safeDelete(ctx);
+    return logAction(ctx, 'delete_message', targetMessage.from?.id || null);
+  });
+
+  bot.command('pin', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const targetMessage = ctx.message?.reply_to_message;
+    if (!targetMessage) return ctx.reply('❌ Pin qilinadigan xabarni reply qiling.');
+    try {
+      await bot.telegram.pinChatMessage(ctx.chat.id, targetMessage.message_id, { disable_notification: true });
+      await safeDelete(ctx);
+    } catch (error) {
+      return ctx.reply(`❌ Pin xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('unpin', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    try {
+      if (ctx.message?.reply_to_message) await bot.telegram.unpinChatMessage(ctx.chat.id, ctx.message.reply_to_message.message_id);
+      else await bot.telegram.unpinAllChatMessages(ctx.chat.id);
+      await safeDelete(ctx);
+    } catch (error) {
+      return ctx.reply(`❌ Unpin xatosi: ${error.description || error.message}`);
+    }
+  });
+
+  bot.command('setwarnlimit', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const n = Math.max(1, Math.min(10, Number(commandPayload(ctx))));
+    if (!Number.isFinite(n)) return ctx.reply('❌ Misol: /setwarnlimit 3');
+    await patchGroupSettings(ctx.chat.id, { warn_limit: n });
+    return ctx.reply(`✅ Warn limiti ${n} ta qilindi.`);
+  });
+
+  bot.command('setflood', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const [limitRaw, secondsRaw] = commandPayload(ctx).split(/\s+/);
+    const limit = Math.max(3, Math.min(30, Number(limitRaw)));
+    const seconds = Math.max(2, Math.min(60, Number(secondsRaw)));
+    if (!Number.isFinite(limit) || !Number.isFinite(seconds)) return ctx.reply('❌ Misol: /setflood 6 8');
+    await patchGroupSettings(ctx.chat.id, { flood_limit: limit, flood_window_sec: seconds, anti_flood: true });
+    return ctx.reply(`✅ Flood himoyasi: ${seconds} soniyada ${limit} ta xabar.`);
+  });
+
+  bot.command('setwelcome', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const text = commandPayload(ctx) || ctx.message?.reply_to_message?.text || '';
+    if (!text) return ctx.reply('❌ Misol: /setwelcome Assalomu alaykum, {name}!');
+    await patchGroupSettings(ctx.chat.id, { welcome_text: text, welcome_enabled: true });
+    return ctx.reply('✅ Salomlashuv matni saqlandi.');
+  });
+
+  bot.command('welcome', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const raw = commandPayload(ctx).toLowerCase();
+    if (!['on', 'off'].includes(raw)) return ctx.reply('❌ /welcome on yoki /welcome off');
+    await patchGroupSettings(ctx.chat.id, { welcome_enabled: raw === 'on' });
+    return ctx.reply(`✅ Salomlashuv ${raw === 'on' ? 'yoqildi' : 'o‘chirildi'}.`);
+  });
+
+  bot.command('setrules', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const text = commandPayload(ctx) || ctx.message?.reply_to_message?.text || '';
+    if (!text) return ctx.reply('❌ Misol: /setrules Guruh qoidalari...');
+    await patchGroupSettings(ctx.chat.id, { rules_text: text });
+    return ctx.reply('✅ Guruh qoidalari saqlandi.');
+  });
+
+  bot.command('rules', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    return ctx.reply(settings.rules_text || DEFAULT_GROUP_SETTINGS.rules_text);
+  });
+
+  bot.command('badword', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const [action, ...rest] = commandPayload(ctx).split(/\s+/);
+    const word = normalizeTitle(rest.join(' '));
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    let words = [...(settings.badwords || [])];
+    if (action === 'list') return ctx.reply(words.length ? `🚫 Taqiqlangan so‘zlar:\n${words.map((w, i) => `${i + 1}. ${w}`).join('\n')}` : '📭 Taqiqlangan so‘z yo‘q.');
+    if (!word || !['add', 'del'].includes(action)) return ctx.reply('❌ /badword add so‘z | /badword del so‘z | /badword list');
+    if (action === 'add' && !words.includes(word)) words.push(word);
+    if (action === 'del') words = words.filter((item) => item !== word);
+    await patchGroupSettings(ctx.chat.id, { badwords: words });
+    return ctx.reply(`✅ “${word}” ${action === 'add' ? 'qo‘shildi' : 'o‘chirildi'}.`);
+  });
+
+  bot.command('allowdomain', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const domain = commandPayload(ctx).toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+    if (!domain) return ctx.reply('❌ Misol: /allowdomain example.com');
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const list = Array.from(new Set([...(settings.allow_domains || []), domain]));
+    await patchGroupSettings(ctx.chat.id, { allow_domains: list });
+    return ctx.reply(`✅ ${domain} ruxsatli domenlarga qo‘shildi.`);
+  });
+
+  bot.command('deldomain', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const domain = commandPayload(ctx).toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    await patchGroupSettings(ctx.chat.id, { allow_domains: (settings.allow_domains || []).filter((item) => item !== domain) });
+    return ctx.reply(`✅ ${domain || 'Domen'} ro‘yxatdan olib tashlandi.`);
+  });
+
+  bot.command('domains', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    return ctx.reply((settings.allow_domains || []).length ? `✅ Ruxsatli domenlar:\n${settings.allow_domains.join('\n')}` : '📭 Ruxsatli domenlar yo‘q.');
+  });
+
+  bot.command('trust', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki ID/@username yuboring.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { is_whitelisted: true } }, { upsert: true });
+    whitelistCache.delete(`${ctx.chat.id}:${resolved.user.id}`);
+    return ctx.reply('✅ User uchun link/anti-spam istisnosi yoqildi.');
+  });
+
+  bot.command('untrust', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const resolved = await resolveTarget(ctx);
+    if (!resolved) return ctx.reply('❌ Userni reply qiling yoki ID/@username yuboring.');
+    await GroupMember.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(resolved.user.id) }, { $set: { is_whitelisted: false } }, { upsert: true });
+    whitelistCache.delete(`${ctx.chat.id}:${resolved.user.id}`);
+    return ctx.reply('✅ User istisnosi o‘chirildi.');
+  });
+
+  bot.command('filter', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const [keyword, ...answerParts] = commandPayload(ctx).split('|').map((x) => x.trim());
+    const answer = answerParts.join(' | ').trim();
+    if (!keyword || !answer) return ctx.reply('❌ Misol: /filter narx | Narxlar admin bilan kelishiladi.');
+    const keywordNorm = normalizeTitle(keyword);
+    await GroupAutoReply.findOneAndUpdate(
+      { bot_key: config.key, chat_id: String(ctx.chat.id), keyword_norm: keywordNorm },
+      { $set: { keyword, answer, is_active: true, added_by: ctx.from.id, match_mode: 'exact' } },
+      { upsert: true, new: true }
+    );
+    autoReplyCache.delete(`${ctx.chat.id}:${keywordNorm}`);
+    return ctx.reply('✅ Avtomatik javob saqlandi.');
+  });
+
+  bot.command('stopfilter', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const keyword = normalizeTitle(commandPayload(ctx));
+    if (!keyword) return ctx.reply('❌ Misol: /stopfilter narx');
+    const result = await GroupAutoReply.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id), keyword_norm: keyword, is_active: true }, { $set: { is_active: false } });
+    autoReplyCache.delete(`${ctx.chat.id}:${keyword}`);
+    return ctx.reply(result.modifiedCount ? '✅ Avtomatik javob o‘chirildi.' : '❌ Topilmadi.');
+  });
+
+  bot.command('filters', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const list = await GroupAutoReply.find({ bot_key: config.key, chat_id: String(ctx.chat.id), is_active: true }).sort({ createdAt: -1 }).limit(50).lean();
+    return ctx.reply(list.length ? `🤖 Avtomatik javoblar:\n\n${list.map((item, i) => `${i + 1}. ${item.keyword} → ${item.answer}`).join('\n')}` : '📭 Avtomatik javob yo‘q.');
+  });
+
+  bot.command('report', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const targetMessage = ctx.message?.reply_to_message;
+    if (!targetMessage || !targetMessage.from) return ctx.reply('❌ Shikoyat qilinadigan xabarni reply qiling.');
+    const reason = commandPayload(ctx) || 'Sabab ko‘rsatilmagan';
+    await saveGroupMember(ctx, targetMessage.from, {}, { reports_received: 1 });
+    await logAction(ctx, 'report', targetMessage.from.id, reason, { message_id: targetMessage.message_id });
+    const admins = await bot.telegram.getChatAdministrators(ctx.chat.id).catch(() => []);
+    const adminMentions = admins.filter((a) => !a.user.is_bot).slice(0, 5).map((a) => mentionHtml(a.user.id, a.user.first_name)).join(', ');
+    const sent = await ctx.reply(`🚨 Adminlarga shikoyat yuborildi. ${adminMentions}\nSabab: ${htmlEscape(reason)}`, { parse_mode: 'HTML' });
+    deleteMessageLater(ctx.chat.id, sent.message_id, 20);
+    deleteMessageLater(ctx.chat.id, ctx.message.message_id, 3);
+  });
+
+  bot.command('admins', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const admins = await bot.telegram.getChatAdministrators(ctx.chat.id).catch(() => []);
+    if (!admins.length) return ctx.reply('❌ Adminlar ro‘yxatini olib bo‘lmadi.');
+    return ctx.reply(`👮 <b>Guruh administratorlari</b>\n\n${admins.filter((a) => !a.user.is_bot).map((a, i) => `${i + 1}. ${mentionHtml(a.user.id, a.user.first_name)} — ${a.status}`).join('\n')}`, { parse_mode: 'HTML' });
+  });
+
+  bot.command('id', async (ctx) => {
+    const replied = ctx.message?.reply_to_message?.from;
+    return ctx.reply(`🆔 Guruh ID: <code>${ctx.chat.id}</code>\n👤 Sizning ID: <code>${ctx.from.id}</code>${replied ? `\n↩️ Reply user ID: <code>${replied.id}</code>` : ''}`, { parse_mode: 'HTML' });
+  });
+
+  bot.command('groupstats', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const chatId = String(ctx.chat.id);
+    const [group, members, warned, banned, actions] = await Promise.all([
+      GroupChat.findOne({ bot_key: config.key, chat_id: chatId }).lean(),
+      GroupMember.countDocuments({ bot_key: config.key, chat_id: chatId }),
+      GroupMember.countDocuments({ bot_key: config.key, chat_id: chatId, warns: { $gt: 0 } }),
+      GroupMember.countDocuments({ bot_key: config.key, chat_id: chatId, status: 'banned' }),
+      GroupAction.countDocuments({ bot_key: config.key, chat_id: chatId })
+    ]);
+    return ctx.reply(
+      `📊 GURUH STATISTIKASI\n\n👥 Kuzatilgan a’zolar: ${members}\n⚠️ Warn olganlar: ${warned}\n🚫 Bloklanganlar: ${banned}\n🧹 O‘chirilgan xabarlar: ${group?.deleted_messages || 0}\n⚠️ Berilgan warnlar: ${group?.warnings_issued || 0}\n📋 Moderatsiya amallari: ${actions}`
+    );
+  });
+
+  bot.on('my_chat_member', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const update = ctx.myChatMember || ctx.update?.my_chat_member;
+    const status = update?.new_chat_member?.status;
+    const isActive = ['member', 'administrator'].includes(status);
+    const isAdmin = status === 'administrator';
+    await upsertGroup(ctx, { bot_is_admin: isAdmin, is_active: isActive }).catch(() => null);
+    if (isActive) {
+      const text = isAdmin
+        ? '✅ Guruh Manager ulandi va admin huquqlarini oldi.\n\n⚙️ /settings — sozlash\n📖 /help — barcha buyruqlar'
+        : '⚠️ Guruh Manager qo‘shildi, lekin to‘liq ishlashi uchun botga admin huquqi bering: xabarlarni o‘chirish, userlarni ban/restrict qilish va pin.';
+      await ctx.reply(text).catch(() => null);
+    }
+  });
+
+  bot.on('new_chat_members', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    upsertGroup(ctx).catch(() => null);
+    GroupChat.updateOne(
+      { bot_key: config.key, chat_id: String(ctx.chat.id) },
+      { $inc: { members_seen: (ctx.message.new_chat_members || []).filter((u) => !u.is_bot).length } }
+    ).catch(() => null);
+    for (const member of ctx.message.new_chat_members || []) {
+      if (!member.is_bot) saveGroupMember(ctx, member, { status: 'active', joined_at: new Date(), left_at: null }).catch(() => null);
+    }
+    if (settings.clean_join !== false) await safeDelete(ctx);
+    if (settings.welcome_enabled) {
+      for (const member of ctx.message.new_chat_members || []) {
+        if (member.is_bot) continue;
+        const text = String(settings.welcome_text || DEFAULT_GROUP_SETTINGS.welcome_text)
+          .replace(/\{name\}/g, member.first_name || 'do‘st')
+          .replace(/\{username\}/g, member.username ? `@${member.username}` : '');
+        const sent = await ctx.reply(text).catch(() => null);
+        if (sent) deleteMessageLater(ctx.chat.id, sent.message_id, 60);
+      }
+    }
+  });
+
+  bot.on('left_chat_member', async (ctx) => {
+    if (!isGroupChat(ctx)) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const member = ctx.message.left_chat_member;
+    if (member && !member.is_bot) saveGroupMember(ctx, member, { status: 'left', left_at: new Date() }).catch(() => null);
+    if (settings.clean_leave !== false) await safeDelete(ctx);
+  });
+
+  bot.on('message', async (ctx) => {
+    if (!isGroupChat(ctx) || !ctx.message || !ctx.from || ctx.from.is_bot) return;
+    utils.saveUser(ctx).catch(() => null);
+    saveGroupMember(ctx, ctx.from, {}, { messages_count: 1 }).catch(() => null);
+    GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { messages_seen: 1 }, $set: { last_active_at: new Date(), title: ctx.chat.title || null } }, { upsert: true }).catch(() => null);
+
+    const text = extractTextAndCaption(ctx.message);
+    if (text.startsWith('/')) return;
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    const isAdmin = await isChatAdmin(ctx.chat.id, ctx.from.id);
+    if (isAdmin) return;
+
+    const whitelistKey = `${ctx.chat.id}:${ctx.from.id}`;
+    let whitelistState = whitelistCache.get(whitelistKey);
+    if (!whitelistState || Date.now() - whitelistState.at > 30_000) {
+      const memberRecord = await GroupMember.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(ctx.from.id) }).select('is_whitelisted').lean().catch(() => null);
+      whitelistState = { at: Date.now(), value: Boolean(memberRecord?.is_whitelisted) };
+      whitelistCache.set(whitelistKey, whitelistState);
+    }
+    if (whitelistState.value) return;
+
+    let violation = null;
+    let statField = null;
+    if (settings.anti_link !== false && messageHasLink(ctx.message, settings)) {
+      violation = 'Ruxsatsiz link/reklama yuborildi';
+      statField = 'links_deleted';
+    } else if (settings.anti_forward === true && isForwarded(ctx.message)) {
+      violation = 'Forward/reklama xabari yuborildi';
+      statField = 'deleted_count';
+    } else {
+      const norm = normalizeTitle(text);
+      const badword = (settings.badwords || []).find((word) => word && norm.includes(normalizeTitle(word)));
+      if (badword) {
+        violation = `Taqiqlangan so‘z ishlatildi: ${badword}`;
+        statField = 'badwords_deleted';
+      } else if (isFlood(ctx.chat.id, ctx.from.id, settings)) {
+        violation = 'Juda tez ko‘p xabar yuborildi (flood)';
+        statField = 'flood_deleted';
+      }
+    }
+
+    if (violation) {
+      await safeDelete(ctx);
+      GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { deleted_messages: 1 } }).catch(() => null);
+      const increments = { deleted_count: 1 };
+      if (statField) increments[statField] = 1;
+      saveGroupMember(ctx, ctx.from, {}, increments).catch(() => null);
+      if (settings.warn_on_link !== false || statField !== 'links_deleted') {
+        await applyWarning(ctx, ctx.from, violation, true);
+      } else {
+        await tempReply(ctx, `🛡 ${ctx.from.first_name || 'Foydalanuvchi'}, ${violation.toLowerCase()}.`, settings);
+      }
+      return;
+    }
+
+    if (text) {
+      const norm = normalizeTitle(text);
+      const replyCacheKey = `${ctx.chat.id}:${norm}`;
+      let cachedReply = autoReplyCache.get(replyCacheKey);
+      if (!cachedReply || Date.now() - cachedReply.at > 30_000) {
+        const exact = await GroupAutoReply.findOne({ bot_key: config.key, chat_id: String(ctx.chat.id), keyword_norm: norm, is_active: true }).lean().catch(() => null);
+        cachedReply = { at: Date.now(), value: exact?.answer || null };
+        autoReplyCache.set(replyCacheKey, cachedReply);
+      }
+      if (cachedReply.value) return ctx.reply(cachedReply.value);
+    }
+  });
+
   bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
   return { key: config.key, title: config.title, bot, config };
 }
@@ -4961,6 +6220,7 @@ async function startManagedRecord(record, source = 'db') {
   else if (engine === 'giveaway') active = createGiveawayBot(config, token, adminIds);
   else if (engine === 'channel_form') active = createChannelFormBot(config, token, adminIds);
   else if (engine === 'group_tools') active = createGroupToolsBot(config, token, adminIds);
+  else if (engine === 'chat_learning') active = createChatLearningBot(config, token, adminIds);
   else active = createContentBot(config, token, adminIds);
   if (!active) return null;
   await activateBot(active, source);
@@ -4971,7 +6231,7 @@ function typeRows(prefix = 'factory:type') {
   const entries = Object.entries(TYPE_PRESETS).filter(([, preset]) => preset && preset.title);
   const rows = [];
   for (const [key, preset] of entries) {
-    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : 'Media';
+    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : 'Media';
     rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
   }
   return rows;

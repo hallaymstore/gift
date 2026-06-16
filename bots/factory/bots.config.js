@@ -26,8 +26,10 @@ const typePresets = {
   konkurs: { engine: 'giveaway', key: 'konkurs', title: 'Tech Konkurs Game Bot', itemTitle: 'Konkurs', mainEmoji: '🎮', description: 'Homiy kanal/guruh obunasi, guruh ichida inline qatnashish, referral invite link, TOP-10 reyting, countdown va avtomatik natija.' },
   kanal_ariza: { engine: 'channel_form', key: 'kanal_ariza', title: 'Kanal Ariza + Autopost Bot', itemTitle: 'Ariza bot', mainEmoji: '📢', description: 'Kanal egasi uchun custom inputlar, reklama/akkount savdo arizasi, shifrli kalit, autopost.' },
   reklama_buyurtma: { engine: 'channel_form', key: 'reklama_buyurtma', title: 'Reklama Buyurtma Bot', itemTitle: 'Reklama bot', mainEmoji: '📣', description: 'Reklama buyurtmasi, custom maydonlar, admin tasdiqlash va to‘lovga yo‘naltirish.' },
-  group_cleaner: { engine: 'group_tools', key: 'group_cleaner', title: 'Guruh Tozalovchi + AntiSpam Bot', itemTitle: 'Guruh bot', mainEmoji: '🛡', description: 'Kirdi/chiqdi tozalash, anti-link, badword, FAQ, salomlashuv.' },
-  faq_support: { engine: 'group_tools', key: 'faq_support', title: 'FAQ + Support Guruh Bot', itemTitle: 'FAQ bot', mainEmoji: '❓', description: 'FAQ javoblar, salomlashuv, guruh qoidalari va admin xabarlari.' }
+  group_manager: { engine: 'group_tools', key: 'group_manager', title: 'Ultimate Group Manager Bot', itemTitle: 'Guruh manager', mainEmoji: '🛡', description: 'Anti-reklama, link tozalash, 3 ta warn→ban, mute/ban/kick, kirdi-chiqdi tozalash, flood himoyasi, qoidalar, FAQ va har bir guruh uchun alohida sozlamalar.' },
+  group_cleaner: { engine: 'group_tools', key: 'group_cleaner', title: 'Guruh Tozalovchi + AntiSpam Bot', itemTitle: 'Guruh bot', mainEmoji: '🧹', description: 'Kirdi/chiqdi tozalash, anti-link, badword, ogohlantirish va guruh sozlamalari.' },
+  faq_support: { engine: 'group_tools', key: 'faq_support', title: 'FAQ + Support Guruh Bot', itemTitle: 'FAQ bot', mainEmoji: '❓', description: 'FAQ javoblar, salomlashuv, guruh qoidalari, moderator buyruqlari va anti-spam.' },
+  suhbatchi: { engine: 'chat_learning', key: 'suhbatchi', title: 'Suhbatchi Gap O‘rganuvchi Bot', itemTitle: 'Suhbatchi bot', mainEmoji: '🧠', description: 'Guruhda reply qilingan savol-javoblarni o‘rganadi, keyingi o‘xshash xabarlarga tez javob beradi va guruh aktivligini oshiradi.' }
 };
 
 module.exports = {
