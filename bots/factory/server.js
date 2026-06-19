@@ -6995,7 +6995,142 @@ async function disableManagedBot(record, adminId, reason = 'admin_disabled') {
   record.disabled_reason = reason;
   record.rejected_by = adminId;
   await record.save();
+
+  try {
+    await stopManagedRecord(record, `disabled_${reason || 'manual'}`, false);
+  } catch (error) {
+    console.error(`⚠️ @${record.telegram_username || record.bot_key} runtime to‘xtatish xatosi:`, error.message);
+  }
   return record;
+}
+
+function managedRecordKey(recordOrKey) {
+  if (!recordOrKey) return '';
+  if (typeof recordOrKey === 'string') return recordOrKey;
+  return String(recordOrKey.bot_key || (recordOrKey._id ? `m_${String(recordOrKey._id)}` : '')).trim();
+}
+
+async function cleanupManagedWebhook(record, dropPending = false) {
+  if (!record) return false;
+  try {
+    const token = decryptToken(record);
+    const tg = new Telegram(token);
+    await tg.deleteWebhook({ drop_pending_updates: Boolean(dropPending) });
+    return true;
+  } catch (error) {
+    console.error(`⚠️ @${record.telegram_username || record.bot_key} webhook tozalash xatosi:`, error.message);
+    return false;
+  }
+}
+
+async function stopManagedRecord(recordOrKey, source = 'manual_stop', dropPending = false) {
+  const key = managedRecordKey(recordOrKey);
+  if (!key || key === 'factory') return false;
+
+  const active = activeBots.get(key);
+  if (active?.bot) {
+    try {
+      await active.bot.telegram.deleteWebhook({ drop_pending_updates: Boolean(dropPending) });
+    } catch (error) {
+      console.error(`⚠️ ${active.title || key} webhook o‘chirish xatosi (${source}):`, error.message);
+    }
+    try {
+      active.bot.stop?.(source);
+    } catch (_) {}
+  } else if (recordOrKey && typeof recordOrKey !== 'string') {
+    await cleanupManagedWebhook(recordOrKey, dropPending);
+  }
+
+  activeBots.delete(key);
+  return true;
+}
+
+async function deleteManagedBotData(botKey) {
+  const key = String(botKey || '').trim();
+  if (!key) return { deletedCollections: 0 };
+
+  const tasks = [
+    User.deleteMany({ bot_key: key }),
+    Subscription.deleteMany({ bot_key: key }),
+    JoinRequest.deleteMany({ bot_key: key }),
+    Content.deleteMany({ bot_key: key }),
+    ContentPart.deleteMany({ bot_key: key }),
+    BotSetting.deleteMany({ bot_key: key }),
+    FormField.deleteMany({ bot_key: key }),
+    FormSubmission.deleteMany({ bot_key: key }),
+    AutoPost.deleteMany({ bot_key: key }),
+    VideoDownload.deleteMany({ bot_key: key }),
+    VipRequest.deleteMany({ bot_key: key }),
+    VipMember.deleteMany({ bot_key: key }),
+    Giveaway.deleteMany({ bot_key: key }),
+    GiveawayParticipant.deleteMany({ bot_key: key }),
+    GiveawaySource.deleteMany({ bot_key: key }),
+    GroupFaq.deleteMany({ bot_key: key }),
+    ChatLearningSetting.deleteMany({ bot_key: key }),
+    LearnedReply.deleteMany({ bot_key: key }),
+    GroupChat.deleteMany({ bot_key: key }),
+    GroupMember.deleteMany({ bot_key: key }),
+    GroupAction.deleteMany({ bot_key: key }),
+    GroupAutoReply.deleteMany({ bot_key: key })
+  ];
+
+  const settled = await Promise.allSettled(tasks);
+  const failed = settled.filter((x) => x.status === 'rejected');
+  for (const f of failed) console.error('⚠️ Bot data delete xatosi:', f.reason?.message || f.reason);
+  return { deletedCollections: settled.length - failed.length, failedCollections: failed.length };
+}
+
+async function deleteManagedBot(record, actorId) {
+  if (!record) return false;
+  const key = managedRecordKey(record);
+  await stopManagedRecord(record, `delete_by_${actorId || 'unknown'}`, true);
+  if (key) await deleteManagedBotData(key);
+  await ManagedBot.deleteOne({ _id: record._id });
+  return true;
+}
+
+async function replaceManagedBotToken(record, rawToken, actorId) {
+  if (!record) throw new Error('Bot topilmadi');
+  if (!hasUsableToken(rawToken)) throw new Error('Token noto‘g‘ri ko‘rinadi');
+
+  const tmp = new Telegraf(rawToken);
+  const me = await tmp.telegram.getMe();
+  const duplicate = await ManagedBot.findOne({
+    _id: { $ne: record._id },
+    telegram_bot_id: me.id,
+    status: { $in: ['pending', 'approved', 'disabled', 'expired'] }
+  });
+  if (duplicate) throw new Error(`Bu token @${duplicate.telegram_username} nomli boshqa factory botga ulangan`);
+
+  await stopManagedRecord(record, `token_replace_by_${actorId || 'unknown'}`, true);
+
+  const encrypted = encryptToken(rawToken);
+  record.telegram_bot_id = me.id;
+  record.telegram_username = me.username;
+  record.telegram_first_name = me.first_name;
+  record.token_enc = encrypted.token_enc;
+  record.token_iv = encrypted.token_iv;
+  record.token_tag = encrypted.token_tag;
+  record.token_mask = maskToken(rawToken);
+  if (!record.bot_key) record.bot_key = `m_${String(record._id)}`;
+  await record.save();
+
+  if (record.status === 'approved' && record.is_enabled) {
+    const expired = await markRecordExpiredIfNeeded(record);
+    if (!expired) await startManagedRecord(record, `token_replaced_by_${actorId || 'unknown'}`);
+  }
+
+  return record;
+}
+
+async function restartManagedBot(record, actorId) {
+  if (!record) throw new Error('Bot topilmadi');
+  await stopManagedRecord(record, `restart_by_${actorId || 'unknown'}`, false);
+  const expired = await markRecordExpiredIfNeeded(record);
+  if (expired || record.status !== 'approved' || !record.is_enabled) {
+    throw new Error(`Bot aktiv emas: ${botStatusLabel(record)}`);
+  }
+  return startManagedRecord(record, `restart_by_${actorId || 'unknown'}`);
 }
 
 async function getBotStats(botKey) {
@@ -7118,15 +7253,20 @@ async function searchManagedBots(query) {
 }
 
 function botActionKeyboard(record) {
+  const id = String(record._id);
   const rows = [];
   if (record.status === 'pending') {
-    rows.push([Markup.button.callback('✅ Ruxsat berish / 1 oy aktiv qilish', `factory:approve:${String(record._id)}`)]);
-    rows.push([Markup.button.callback('❌ Rad etish', `factory:reject:${String(record._id)}`)]);
+    rows.push([Markup.button.callback('✅ Ruxsat berish / 1 oy aktiv qilish', `factory:approve:${id}`)]);
+    rows.push([Markup.button.callback('❌ Rad etish', `factory:reject:${id}`)]);
   } else {
-    rows.push([Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${String(record._id)}`)]);
-    if (record.status !== 'disabled') rows.push([Markup.button.callback('⏸ To‘xtatish', `factory:disable:${String(record._id)}`)]);
+    rows.push([Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${id}`)]);
+    if (record.status !== 'disabled') rows.push([Markup.button.callback('⏸ To‘xtatish', `factory:disable:${id}`)]);
   }
-  rows.push([Markup.button.callback('🔄 Yangilash', `factory:bot:${String(record._id)}`)]);
+  rows.push([Markup.button.callback('🔄 Qayta ishga tushirish', `factory:restart:${id}`)]);
+  rows.push([Markup.button.callback('🔐 API token almashtirish', `factory:change_token:${id}`)]);
+  rows.push([Markup.button.callback('👨‍💻 Admin ID almashtirish', `factory:change_admins:${id}`)]);
+  rows.push([Markup.button.callback('🗑 Botni o‘chirish', `factory:delete_ask:${id}`)]);
+  rows.push([Markup.button.callback('🔎 Yangilash', `factory:bot:${id}`)]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -7353,6 +7493,50 @@ function createFactoryBot() {
     ctx.session.draft = {};
   }
 
+  function canManageManagedBot(ctx, record) {
+    if (!ctx?.from || !record) return false;
+    return isOwner(ctx.from.id) || Number(record.owner_user_id) === Number(ctx.from.id);
+  }
+
+  function canOwnerOnlyManageManagedBot(ctx, record) {
+    if (!ctx?.from || !record) return false;
+    return Number(record.owner_user_id) === Number(ctx.from.id);
+  }
+
+  function myBotActionKeyboard(record) {
+    const id = String(record._id);
+    const rows = [
+      [Markup.button.callback('🔎 Batafsil / boshqarish', `factory:mybot:${id}`)],
+      [Markup.button.callback('🔄 Qayta ishga tushirish', `factory:restart:${id}`)],
+      [Markup.button.callback('🔐 API token almashtirish', `factory:change_token:${id}`)],
+      [Markup.button.callback('👨‍💻 Admin ID almashtirish', `factory:change_admins:${id}`)],
+      [Markup.button.callback('🗑 Botni o‘chirish', `factory:delete_ask:${id}`)],
+      [Markup.button.url('☎️ Asosiy admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
+    ];
+    return Markup.inlineKeyboard(rows);
+  }
+
+  function deleteConfirmKeyboard(record) {
+    const id = String(record._id);
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Ha, butunlay o‘chirish', `factory:delete_yes:${id}`)],
+      [Markup.button.callback('❌ Bekor qilish', `factory:mybot:${id}`)]
+    ]);
+  }
+
+  async function loadManageableBot(ctx, id) {
+    const rec = await ManagedBot.findOne({ _id: id });
+    if (!rec) {
+      await ctx.reply('❌ Bot topilmadi yoki allaqachon o‘chirilgan.', userKeyboard(ctx));
+      return null;
+    }
+    if (!canManageManagedBot(ctx, rec)) {
+      await ctx.reply('⛔ Bu botni boshqarish huquqingiz yo‘q.');
+      return null;
+    }
+    return rec;
+  }
+
   function userKeyboard(ctx) {
     const rows = [
       ['🤖 Bot tayyorlash', '💰 Narxlar'],
@@ -7535,6 +7719,7 @@ function createFactoryBot() {
   }
 
   async function showMyBots(ctx) {
+    if (!(await requireMongo(ctx, 'Botlar ro‘yxatini ko‘rish uchun maʼlumotlar bazasi kerak'))) return;
     const list = await ManagedBot.find({ owner_user_id: ctx.from.id }).sort({ createdAt: -1 }).limit(20);
     if (!list.length) return ctx.reply('📭 Sizda hali bot soʻrovi yoʻq.', userKeyboard(ctx));
 
@@ -7548,12 +7733,11 @@ function createFactoryBot() {
         `   🏷 ${tariffTitle(b.tariff_key)} | 💰 ${formatMoney(b.monthly_price, b.currency)} / oy | ⏳ ${formatDate(b.current_period_end)}`
       );
     });
+    const rows = list.map((b, i) => [Markup.button.callback(`${i + 1}. @${b.telegram_username} boshqarish`, `factory:mybot:${String(b._id)}`)]);
 
-    return ctx.reply(`📋 Mening botlarim:
-
-${lines.join('\n\n')}\n\nObunani tiklash/uzaytirish uchun ${OWNER_USERNAME} ga yozing.`, userKeyboard(ctx));
+    await ctx.reply(`📋 Mening botlarim:\n\n${lines.join('\n\n')}\n\nPastdagi tugmadan kerakli botni tanlang:`, Markup.inlineKeyboard(rows));
+    return ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
   }
-
   async function showPending(ctx) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Bu bo‘lim faqat asosiy admin uchun.');
     const list = await ManagedBot.find({ status: 'pending' }).sort({ createdAt: 1 }).limit(30);
@@ -7594,7 +7778,9 @@ ${lines.join('\n\n')}\n\nObunani tiklash/uzaytirish uchun ${OWNER_USERNAME} ga y
     if (!list.length) return ctx.reply('📭 Hali yaratilgan botlar yo‘q.', userKeyboard(ctx));
 
     const lines = list.map((b, i) => `${i + 1}. @${b.telegram_username} — ${b.title} | ${getPreset(b.type_key).itemTitle || b.type_key} | ${botStatusLabel(b)} | ${formatDate(b.current_period_end)}`);
-    return ctx.reply(`📋 SO‘NGGI 30 TA BOT\n\n${lines.join('\n')}\n\nTo‘liq ko‘rish uchun “🔍 Bot qidirish”dan foydalaning.`, userKeyboard(ctx));
+    const rows = list.slice(0, 20).map((b, i) => [Markup.button.callback(`${i + 1}. @${b.telegram_username}`, `factory:bot:${String(b._id)}`)]);
+    await ctx.reply(`📋 SO‘NGGI 30 TA BOT\n\n${lines.join('\n')}\n\nBoshqarish uchun pastdagi tugmalardan foydalaning yoki “🔍 Bot qidirish”dan qidiring.`, Markup.inlineKeyboard(rows));
+    return ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
   }
 
   async function showOverallStats(ctx) {
@@ -7902,6 +8088,117 @@ ${preset.title}
     );
   });
 
+  bot.action(/^factory:mybot:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    await markRecordExpiredIfNeeded(rec);
+    const keyboard = isOwner(ctx.from.id) ? botActionKeyboard(rec) : myBotActionKeyboard(rec);
+    try {
+      return ctx.editMessageText(await botDetailText(rec), keyboard);
+    } catch (_) {
+      return ctx.reply(await botDetailText(rec), keyboard);
+    }
+  });
+
+  bot.action(/^factory:restart:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    try {
+      await restartManagedBot(rec, ctx.from.id);
+      await ctx.reply(`✅ @${rec.telegram_username} qayta ishga tushirildi va webhook/commands sinxron qilindi.`, userKeyboard(ctx));
+    } catch (error) {
+      await ctx.reply(`❌ Qayta ishga tushirib bo‘lmadi: ${error.message}`, userKeyboard(ctx));
+    }
+  });
+
+  bot.action(/^factory:change_token:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    ctx.session.mode = 'replace_token';
+    ctx.session.draft = { manage_bot_id: String(rec._id) };
+    return ctx.reply(
+      `🔐 API token almashtirish
+
+` +
+        `Bot: @${rec.telegram_username}
+` +
+        `BotFather’dan yangi tokenni yuboring.
+
+` +
+        `✅ Eski bot maʼlumotlari saqlanadi.
+` +
+        `⚠️ Token yuborilgach eski webhook tozalanadi, yangi token bilan bot qayta ishga tushadi.
+
+` +
+        `❌ Bekor qilish: /cancel`
+    );
+  });
+
+  bot.action(/^factory:change_admins:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    ctx.session.mode = 'replace_admin_ids';
+    ctx.session.draft = { manage_bot_id: String(rec._id) };
+    return ctx.reply(
+      `👨‍💻 Admin ID almashtirish
+
+` +
+        `Bot: @${rec.telegram_username}
+` +
+        `Hozirgi admin IDlar: ${(rec.admin_ids || []).join(', ') || '—'}
+
+` +
+        `Yangi admin IDlarni yuboring. Bir nechta bo‘lsa vergul bilan yozing:
+` +
+        `6606638731,901126203
+
+` +
+        `✅ Bot egasi ID avtomatik qo‘shiladi.
+` +
+        `❌ Bekor qilish: /cancel`
+    );
+  });
+
+  bot.action(/^factory:delete_ask:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    return ctx.reply(
+      `⚠️ Botni butunlay o‘chirishni tasdiqlang.
+
+` +
+        `🤖 Bot: @${rec.telegram_username}
+` +
+        `📦 Nomi: ${rec.title}
+
+` +
+        `O‘chirilsa Factory DB’dan bot yozuvi, userlar, kontent, obuna, statistika va shu botga tegishli barcha maʼlumotlar tozalanadi. Token bekor qilinmaydi — tokenni BotFather’dan alohida revoke/delete qiling.`,
+      deleteConfirmKeyboard(rec)
+    );
+  });
+
+  bot.action(/^factory:delete_yes:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const rec = await loadManageableBot(ctx, ctx.match[1]);
+    if (!rec) return;
+    const username = rec.telegram_username;
+    const ownerId = rec.owner_user_id;
+    try {
+      await deleteManagedBot(rec, ctx.from.id);
+      await ctx.editMessageText(`🗑 @${username} Factory’dan butunlay o‘chirildi. Webhook tozalandi, runtime to‘xtatildi.`);
+      if (Number(ownerId) !== Number(ctx.from.id)) {
+        try { await bot.telegram.sendMessage(ownerId, `🗑 @${username} botingiz asosiy admin tomonidan Factory’dan o‘chirildi.`); } catch (_) {}
+      }
+      return ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
+    } catch (error) {
+      return ctx.reply(`❌ O‘chirishda xatolik: ${error.message}`, userKeyboard(ctx));
+    }
+  });
+
   bot.action(/^factory:bot:([a-f0-9]{24})$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
@@ -7996,6 +8293,69 @@ ${preset.title}
     if (ctx.session.mode === 'global_add_channel') return addGlobalSubscription(ctx, text, 'channel');
     if (ctx.session.mode === 'global_add_group') return addGlobalSubscription(ctx, text, 'group');
     if (ctx.session.mode === 'global_remove_subscription') return removeGlobalSubscription(ctx, text);
+
+    if (ctx.session.mode === 'replace_token') {
+      if (!(await requireMongo(ctx, 'API tokenni almashtirish uchun DB kerak'))) return;
+      const rec = await loadManageableBot(ctx, ctx.session.draft?.manage_bot_id);
+      if (!rec) { reset(ctx); return; }
+      if (!hasUsableToken(text)) return ctx.reply('❌ Token noto‘g‘ri ko‘rinadi. BotFather bergan tokenni to‘liq yuboring yoki /cancel bosing.');
+      try {
+        const beforeUsername = rec.telegram_username;
+        await replaceManagedBotToken(rec, text, ctx.from.id);
+        reset(ctx);
+        const msg =
+          `✅ API token almashtirildi!
+
+` +
+          `Oldingi: @${beforeUsername}
+` +
+          `Yangi: @${rec.telegram_username}
+` +
+          `🔐 Token: ${rec.token_mask || '***'}
+` +
+          `📌 Holat: ${botStatusLabel(rec)}`;
+        await ctx.reply(msg, isOwner(ctx.from.id) ? botActionKeyboard(rec) : myBotActionKeyboard(rec));
+        if (Number(rec.owner_user_id) !== Number(ctx.from.id)) {
+          try { await bot.telegram.sendMessage(rec.owner_user_id, `🔐 @${rec.telegram_username} botingiz API tokeni asosiy admin tomonidan almashtirildi.`); } catch (_) {}
+        }
+        return ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
+      } catch (error) {
+        console.error('Factory token almashtirish xatosi:', error.message);
+        return ctx.reply(`❌ Tokenni almashtirib bo‘lmadi: ${error.message}
+
+Qayta token yuboring yoki /cancel bosing.`);
+      }
+    }
+
+    if (ctx.session.mode === 'replace_admin_ids') {
+      if (!(await requireMongo(ctx, 'Admin IDlarni almashtirish uchun DB kerak'))) return;
+      const rec = await loadManageableBot(ctx, ctx.session.draft?.manage_bot_id);
+      if (!rec) { reset(ctx); return; }
+      const ids = parseIds(text);
+      if (!ids.length) return ctx.reply('❌ Kamida bitta admin ID yuboring. Faqat raqamlar va vergul ishlating.');
+      const merged = Array.from(new Set([Number(rec.owner_user_id), ...ids.map(Number).filter(Boolean)]));
+      rec.admin_ids = merged;
+      await rec.save();
+      try {
+        if (rec.status === 'approved' && rec.is_enabled) await restartManagedBot(rec, ctx.from.id);
+      } catch (error) {
+        console.error('Admin ID almashtirgandan keyin restart xatosi:', error.message);
+      }
+      reset(ctx);
+      await ctx.reply(
+        `✅ Admin IDlar yangilandi!
+
+` +
+          `🤖 Bot: @${rec.telegram_username}
+` +
+          `👨‍💻 Admin IDlar: ${rec.admin_ids.join(', ')}`,
+        isOwner(ctx.from.id) ? botActionKeyboard(rec) : myBotActionKeyboard(rec)
+      );
+      if (Number(rec.owner_user_id) !== Number(ctx.from.id)) {
+        try { await bot.telegram.sendMessage(rec.owner_user_id, `👨‍💻 @${rec.telegram_username} botingiz admin IDlari asosiy admin tomonidan yangilandi: ${rec.admin_ids.join(', ')}`); } catch (_) {}
+      }
+      return ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
+    }
 
     if (ctx.session.mode === 'search_bot') {
       if (!isOwner(ctx.from.id)) return;
