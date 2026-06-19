@@ -30,7 +30,8 @@ const typePresets = {
   qoriqchi: { engine: 'group_tools', key: 'qoriqchi', title: 'Qo‘riqchi + Aʼzo Yig‘uvchi Bot', itemTitle: 'Qo‘riqchi bot', mainEmoji: '👮🏻‍♂️', description: 'Guruhlarda anti-reklama, warn/ban, majburiy kanal obunasi, majburiy odam qo‘shish, aʼzo hisoblash, TOP reyting, badword va premium guruh boshqaruv funksiyalari.' },
   group_cleaner: { engine: 'group_tools', key: 'group_cleaner', title: 'Guruh Tozalovchi + AntiSpam Bot', itemTitle: 'Guruh bot', mainEmoji: '🧹', description: 'Kirdi/chiqdi tozalash, anti-link, badword, ogohlantirish va guruh sozlamalari.' },
   faq_support: { engine: 'group_tools', key: 'faq_support', title: 'FAQ + Support Guruh Bot', itemTitle: 'FAQ bot', mainEmoji: '❓', description: 'FAQ javoblar, salomlashuv, guruh qoidalari, moderator buyruqlari va anti-spam.' },
-  suhbatchi: { engine: 'chat_learning', key: 'suhbatchi', title: 'Suhbatchi Gap O‘rganuvchi Bot', itemTitle: 'Suhbatchi bot', mainEmoji: '🧠', description: 'Guruhda reply qilingan savol-javoblarni o‘rganadi, keyingi o‘xshash xabarlarga tez javob beradi va guruh aktivligini oshiradi.' }
+  suhbatchi: { engine: 'chat_learning', key: 'suhbatchi', title: 'Suhbatchi Gap O‘rganuvchi Bot', itemTitle: 'Suhbatchi bot', mainEmoji: '🧠', description: 'Guruhda reply qilingan savol-javoblarni o‘rganadi, keyingi o‘xshash xabarlarga tez javob beradi va guruh aktivligini oshiradi.' },
+  video_downloader: { engine: 'video_downloader', key: 'video_downloader', title: 'Video Downloader Bot', itemTitle: 'Video yuklovchi', mainEmoji: '📥', description: 'YouTube, Instagram va TikTok public videolarini 360p/480p/720p/1080p/best formatlarda yuklash, audio yoki MP3 ajratish.' }
 };
 
 module.exports = {

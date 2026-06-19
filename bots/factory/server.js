@@ -3,7 +3,11 @@
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const https = require('https');
+const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const BOT_CONFIGS_RAW = require('./bots.config');
@@ -27,6 +31,9 @@ const STANDARD_WATERMARK_TEXT = String(
     `🤖 ${BUILDER_BOT_USERNAME} orqali tayyorlandi. Siz ham o‘z botingizni qurmoqchi bo‘lsangiz ${BUILDER_BOT_USERNAME} siz uchun.`
 ).trim();
 const PLUS_PRICE_MULTIPLIER = Math.max(1, Number(process.env.FACTORY_PLUS_PRICE_MULTIPLIER || 2));
+const VIDEO_DL_MAX_MB = Math.max(5, Number(process.env.VIDEO_DL_MAX_MB || process.env.FACTORY_VIDEO_DL_MAX_MB || 49));
+const VIDEO_DL_TIMEOUT_MS = Math.max(60_000, Number(process.env.VIDEO_DL_TIMEOUT_MS || process.env.FACTORY_VIDEO_DL_TIMEOUT_MS || 8 * 60_000));
+const VIDEO_DL_TEMP_DIR = process.env.VIDEO_DL_TEMP_DIR || path.join(os.tmpdir(), 'botfactory-video-downloads');
 
 function parseIds(value) {
   return String(value || '')
@@ -472,6 +479,27 @@ const autoPostSchema = new mongoose.Schema(
   { timestamps: true, collection: 'multibot_auto_posts' }
 );
 const AutoPost = mongoose.model('AutoPost', autoPostSchema);
+
+
+const videoDownloadSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    username: String,
+    first_name: String,
+    url: String,
+    platform: { type: String, index: true },
+    media_type: { type: String, enum: ['video', 'audio'], default: 'video', index: true },
+    quality: String,
+    title: String,
+    file_size: Number,
+    status: { type: String, enum: ['success', 'failed'], default: 'success', index: true },
+    error: String
+  },
+  { timestamps: true, collection: 'multibot_video_downloads' }
+);
+videoDownloadSchema.index({ bot_key: 1, createdAt: -1 });
+const VideoDownload = mongoose.model('VideoDownload', videoDownloadSchema);
 
 const vipRequestSchema = new mongoose.Schema(
   {
@@ -2489,6 +2517,589 @@ function registerCommonAdminHandlers(bot, config, utils, adminKeyboard, options 
     return utils.handleSubscriptionCallback(ctx, adminKeyboard, '✅ Obuna tasdiqlandi!');
   });
   bot.action('noop', async (ctx) => ctx.answerCbQuery('Private chat uchun admin bergan ko‘rsatma bo‘yicha obuna bo‘ling.'));
+}
+
+
+// =========================
+// VIDEO DOWNLOADER BOT (YouTube / Instagram / TikTok)
+// =========================
+const videoDownloadRuntime = {
+  ytDlpCommandPromise: null,
+  activeUsers: new Map()
+};
+
+function videoPlatformFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (host === 'youtu.be' || host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) return 'YouTube';
+    if (host.endsWith('instagram.com')) return 'Instagram';
+    if (host.endsWith('tiktok.com') || host === 'vm.tiktok.com' || host === 'vt.tiktok.com') return 'TikTok';
+    return '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function normalizeVideoUrl(value) {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return '';
+  const platform = videoPlatformFromUrl(raw);
+  if (!platform) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (_) {
+    return raw;
+  }
+}
+
+function sanitizeFileName(name, fallback = 'video') {
+  const clean = String(name || fallback)
+    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  return clean || fallback;
+}
+
+function bytesToMb(bytes) {
+  return Number(bytes || 0) / 1024 / 1024;
+}
+
+function formatBytes(bytes) {
+  const mb = bytesToMb(bytes);
+  if (!Number.isFinite(mb) || mb <= 0) return '—';
+  return `${mb.toFixed(mb >= 10 ? 1 : 2)} MB`;
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function ensureDir(dir) {
+  await fs.promises.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+function runProcess(command, args = [], options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd || process.cwd(),
+      env: { ...process.env, ...(options.env || {}) },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let finished = false;
+    const maxBuffer = Number(options.maxBuffer || 8 * 1024 * 1024);
+    const killTimer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      const err = new Error(options.timeoutMessage || 'Jarayon vaqti tugadi.');
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    }, Number(options.timeoutMs || VIDEO_DL_TIMEOUT_MS));
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8');
+      if (stdout.length > maxBuffer) stdout = stdout.slice(-maxBuffer);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+      if (stderr.length > maxBuffer) stderr = stderr.slice(-maxBuffer);
+    });
+    child.on('error', (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(killTimer);
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(killTimer);
+      if (code === 0) return resolve({ stdout, stderr, code });
+      const err = new Error((stderr || stdout || `Jarayon ${code} kodi bilan tugadi.`).trim().slice(-1200));
+      err.stdout = stdout;
+      err.stderr = stderr;
+      err.code = code;
+      reject(err);
+    });
+  });
+}
+
+async function commandWorks(command, argsPrefix = []) {
+  try {
+    await runProcess(command, [...argsPrefix, '--version'], { timeoutMs: 15_000, maxBuffer: 256 * 1024 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function ytDlpStandaloneUrl() {
+  const platform = os.platform();
+  const arch = os.arch();
+  if (platform === 'win32') return 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+  if (platform === 'darwin') return arch === 'arm64'
+    ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos'
+    : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos';
+  if (platform === 'linux' && arch === 'arm64') return 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64';
+  return 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
+}
+
+function downloadFile(url, targetPath, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects < 5) {
+        res.resume();
+        const nextUrl = new URL(res.headers.location, url).toString();
+        return resolve(downloadFile(nextUrl, targetPath, redirects + 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`yt-dlp yuklab olinmadi: HTTP ${res.statusCode}`));
+      }
+      const file = fs.createWriteStream(targetPath, { mode: 0o755 });
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+      file.on('error', reject);
+    });
+    req.setTimeout(120_000, () => {
+      req.destroy(new Error('yt-dlp yuklab olish vaqti tugadi.'));
+    });
+    req.on('error', reject);
+  });
+}
+
+async function ensureYtDlpCommand() {
+  if (videoDownloadRuntime.ytDlpCommandPromise) return videoDownloadRuntime.ytDlpCommandPromise;
+
+  videoDownloadRuntime.ytDlpCommandPromise = (async () => {
+    const envPath = String(process.env.YTDLP_PATH || process.env.YT_DLP_PATH || '').trim();
+    if (envPath && await commandWorks(envPath)) return { command: envPath, argsPrefix: [] };
+
+    const localDir = process.env.YTDLP_BIN_DIR || path.join(os.tmpdir(), 'botfactory-tools');
+    const localPath = path.join(localDir, os.platform() === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+    if (fs.existsSync(localPath) && await commandWorks(localPath)) return { command: localPath, argsPrefix: [] };
+
+    if (await commandWorks('yt-dlp')) return { command: 'yt-dlp', argsPrefix: [] };
+    if (await commandWorks('python3', ['-m', 'yt_dlp'])) return { command: 'python3', argsPrefix: ['-m', 'yt_dlp'] };
+    if (await commandWorks('python', ['-m', 'yt_dlp'])) return { command: 'python', argsPrefix: ['-m', 'yt_dlp'] };
+
+    if (String(process.env.ALLOW_YTDLP_DOWNLOAD || 'true').toLowerCase() !== 'false') {
+      await ensureDir(localDir);
+      await downloadFile(ytDlpStandaloneUrl(), localPath);
+      if (os.platform() !== 'win32') await fs.promises.chmod(localPath, 0o755).catch(() => null);
+      if (await commandWorks(localPath)) return { command: localPath, argsPrefix: [] };
+    }
+
+    throw new Error('yt-dlp topilmadi. Render/VPS build commandga `pip install -U yt-dlp` yoki serverga `yt-dlp` o‘rnating.');
+  })();
+
+  return videoDownloadRuntime.ytDlpCommandPromise;
+}
+
+async function ytDlp(args, options = {}) {
+  const cmd = await ensureYtDlpCommand();
+  return runProcess(cmd.command, [...cmd.argsPrefix, ...args], options);
+}
+
+async function hasFfmpeg() {
+  if (hasFfmpeg.cache !== undefined) return hasFfmpeg.cache;
+  hasFfmpeg.cache = await commandWorks(process.env.FFMPEG_PATH || 'ffmpeg');
+  return hasFfmpeg.cache;
+}
+
+async function readVideoInfo(url) {
+  const { stdout } = await ytDlp([
+    '--dump-single-json',
+    '--no-warnings',
+    '--no-playlist',
+    '--skip-download',
+    url
+  ], { timeoutMs: 60_000, maxBuffer: 20 * 1024 * 1024 });
+  const info = JSON.parse(stdout);
+  return {
+    id: info.id || '',
+    title: sanitizeFileName(info.title || 'video'),
+    duration: Number(info.duration || 0),
+    uploader: info.uploader || info.channel || info.creator || '',
+    webpage_url: info.webpage_url || url,
+    formats: Array.isArray(info.formats) ? info.formats : []
+  };
+}
+
+function availableQualityButtons(info) {
+  const heights = new Set();
+  for (const f of info.formats || []) {
+    const h = Number(f.height || 0);
+    if (h >= 240) heights.add(h);
+  }
+  const preferred = [360, 480, 720, 1080].filter((h) => heights.has(h) || [...heights].some((x) => x >= h - 30 && x <= h + 30));
+  const rows = [];
+  const row1 = [];
+  for (const h of preferred) row1.push(Markup.button.callback(`🎬 ${h}p`, `vdl:video:${h}`));
+  if (row1.length) rows.push(row1.slice(0, 2));
+  if (row1.length > 2) rows.push(row1.slice(2));
+  rows.push([Markup.button.callback('🔥 Eng yaxshi', 'vdl:video:best'), Markup.button.callback('🎧 Audio', 'vdl:audio:raw')]);
+  rows.push([Markup.button.callback('🎵 MP3', 'vdl:audio:mp3'), Markup.button.callback('❌ Bekor qilish', 'vdl:cancel')]);
+  return rows;
+}
+
+function buildVideoFormat(height, ffmpegReady) {
+  if (height === 'best') {
+    return ffmpegReady
+      ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+      : 'best[ext=mp4]/best';
+  }
+  const h = Number(height);
+  if (!Number.isFinite(h) || h <= 0) return buildVideoFormat('best', ffmpegReady);
+  return ffmpegReady
+    ? `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}][ext=mp4]/best[height<=${h}]`
+    : `best[height<=${h}][ext=mp4]/best[height<=${h}]/best[ext=mp4]/best`;
+}
+
+async function findNewestDownloadedFile(dir) {
+  const files = await fs.promises.readdir(dir).catch(() => []);
+  let best = null;
+  for (const name of files) {
+    const full = path.join(dir, name);
+    const stat = await fs.promises.stat(full).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    if (!best || stat.mtimeMs > best.stat.mtimeMs) best = { path: full, name, stat };
+  }
+  return best;
+}
+
+async function downloadMediaFile({ url, title, type, quality, userId }) {
+  const ffmpegReady = await hasFfmpeg();
+  const jobId = `${Date.now()}_${userId}_${crypto.randomBytes(4).toString('hex')}`;
+  const dir = path.join(VIDEO_DL_TEMP_DIR, jobId);
+  await ensureDir(dir);
+  const safeTitle = sanitizeFileName(title || 'video');
+  const output = path.join(dir, `${safeTitle}.%(ext)s`);
+
+  const baseArgs = [
+    '--no-playlist',
+    '--no-warnings',
+    '--restrict-filenames',
+    '--trim-filenames', '80',
+    '--socket-timeout', '25',
+    '--retries', '2',
+    '--fragment-retries', '2',
+    '--max-filesize', `${VIDEO_DL_MAX_MB}M`,
+    '-o', output
+  ];
+
+  let args;
+  let expectedType = type;
+  if (type === 'audio') {
+    if (quality === 'mp3' && ffmpegReady) {
+      args = [...baseArgs, '-f', 'bestaudio/best', '-x', '--audio-format', 'mp3', '--audio-quality', '0', url];
+    } else {
+      args = [...baseArgs, '-f', 'bestaudio[ext=m4a]/bestaudio/best', url];
+    }
+  } else {
+    args = [...baseArgs, '-f', buildVideoFormat(quality, ffmpegReady), '--merge-output-format', 'mp4', url];
+    expectedType = 'video';
+  }
+
+  await ytDlp(args, {
+    timeoutMs: VIDEO_DL_TIMEOUT_MS,
+    cwd: dir,
+    maxBuffer: 2 * 1024 * 1024,
+    timeoutMessage: 'Yuklash vaqti tugadi. Video juda katta yoki platforma sekin javob berdi.'
+  });
+
+  const found = await findNewestDownloadedFile(dir);
+  if (!found) throw new Error('Yuklangan fayl topilmadi. Link public ekanini tekshiring.');
+  if (bytesToMb(found.stat.size) > VIDEO_DL_MAX_MB) {
+    throw new Error(`Fayl Telegram limiti uchun katta: ${formatBytes(found.stat.size)}. Pastroq format tanlang.`);
+  }
+  return { ...found, dir, mediaType: expectedType, ffmpegReady };
+}
+
+async function cleanupDownloadDir(dir) {
+  if (!dir || !String(dir).startsWith(VIDEO_DL_TEMP_DIR)) return;
+  await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => null);
+}
+
+function publicDownloadRulesText() {
+  return '⚠️ Faqat o‘zingizga tegishli yoki yuklab olishga ruxsat berilgan public videolarni ishlating. Private/DRM/restriction/cookie talab qiladigan linklar qo‘llab-quvvatlanmaydi.';
+}
+
+function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+
+  const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, adminIds, { downloadUrl: null, downloadTitle: null });
+  const utils = createSharedUtils(bot, config, adminIds);
+
+  function adminKeyboard() {
+    return Markup.keyboard(commonAdminRows([
+      ['🧹 Eski yuklashlarni tozalash']
+    ])).resize().oneTime(false);
+  }
+
+  function userStartKeyboard() {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Obunani tekshirish', 'check_subscription')],
+      [Markup.button.url('👨‍💻 Admin', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
+    ]);
+  }
+
+  async function showStart(ctx) {
+    await utils.saveUser(ctx, true);
+    if (utils.isAdmin(ctx.from.id)) {
+      return ctx.reply(
+        `📥 ${config.title} admin paneli\n\n` +
+          `Userlar YouTube, Instagram yoki TikTok public link yuboradi. Bot format tanlatib video/audio yuboradi.`,
+        adminKeyboard()
+      );
+    }
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
+    return ctx.reply(
+      `📥 Video Downloader botiga xush kelibsiz!\n\n` +
+        `YouTube / Instagram / TikTok public video linkini yuboring.\n\n` +
+        `✅ Formatlar: 360p, 480p, 720p, 1080p, best\n` +
+        `🎧 Audio: m4a/webm yoki MP3 (serverda ffmpeg bo‘lsa)\n\n` +
+        publicDownloadRulesText(),
+      userStartKeyboard()
+    );
+  }
+
+  async function logDownload(ctx, patch) {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return;
+    await VideoDownload.create({
+      bot_key: config.key,
+      user_id: ctx.from?.id,
+      username: ctx.from?.username || null,
+      first_name: ctx.from?.first_name || null,
+      ...patch
+    }).catch((error) => console.error(`${config.title} download log xatosi:`, error.message));
+  }
+
+  async function sendFormatMenu(ctx, rawUrl) {
+    const url = normalizeVideoUrl(rawUrl);
+    if (!url) {
+      return ctx.reply(
+        '❌ Link noto‘g‘ri yoki qo‘llab-quvvatlanmaydi. Faqat YouTube, Instagram va TikTok public link yuboring.\n\nMisol:\nhttps://youtu.be/...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...'
+      );
+    }
+
+    const platform = videoPlatformFromUrl(url);
+    const loading = await ctx.reply(`🔎 ${platform} link tekshirilmoqda...`);
+    try {
+      const info = await readVideoInfo(url);
+      ctx.session.downloadUrl = url;
+      ctx.session.downloadTitle = info.title;
+      const durationText = info.duration ? `⏱ ${Math.floor(info.duration / 60)}:${String(Math.floor(info.duration % 60)).padStart(2, '0')}` : '⏱ —';
+      const uploaderText = info.uploader ? `\n👤 ${info.uploader}` : '';
+      try { await ctx.deleteMessage(loading.message_id); } catch (_) {}
+      return ctx.reply(
+        `✅ Video topildi\n\n` +
+          `🌐 Platforma: ${platform}\n` +
+          `🎬 Nomi: ${info.title}\n` +
+          `${durationText}${uploaderText}\n\n` +
+          `Qaysi formatda yuklaymiz?`,
+        Markup.inlineKeyboard(availableQualityButtons(info))
+      );
+    } catch (error) {
+      try { await ctx.deleteMessage(loading.message_id); } catch (_) {}
+      await logDownload(ctx, { url, platform, status: 'failed', error: String(error.message || error).slice(0, 500) });
+      return ctx.reply(
+        `❌ Videoni o‘qib bo‘lmadi.\n\n` +
+          `Sabab: ${String(error.message || error).slice(0, 700)}\n\n` +
+          `Eslatma: private/restricted videolar, login/cookie talab qiladigan Instagram postlar va juda katta fayllar ishlamasligi mumkin.`
+      );
+    }
+  }
+
+  async function handleDownloadChoice(ctx, type, quality) {
+    await ctx.answerCbQuery('Yuklash boshlandi...').catch(() => null);
+    const userId = Number(ctx.from?.id || 0);
+    const url = ctx.session.downloadUrl;
+    const title = ctx.session.downloadTitle || 'video';
+    if (!url) return ctx.reply('❌ Sessiya topilmadi. Iltimos, linkni qaytadan yuboring.');
+    if (videoDownloadRuntime.activeUsers.has(`${config.key}:${userId}`)) {
+      return ctx.reply('⏳ Sizda bitta yuklash jarayoni allaqachon ishlayapti. Tugagach keyingisini yuboring.');
+    }
+
+    const lockKey = `${config.key}:${userId}`;
+    videoDownloadRuntime.activeUsers.set(lockKey, Date.now());
+    let downloaded = null;
+    const platform = videoPlatformFromUrl(url);
+    let qualityLabel = type === 'audio' ? (quality === 'mp3' ? 'MP3 audio' : 'Audio') : (quality === 'best' ? 'Best video' : `${quality}p video`);
+    const progress = await ctx.reply(`⏬ ${qualityLabel} tayyorlanmoqda...\n\nTelegram limit: ${VIDEO_DL_MAX_MB} MB. Katta video bo‘lsa pastroq format tanlang.`);
+
+    try {
+      downloaded = await downloadMediaFile({ url, title, type, quality, userId });
+      if (type === 'audio' && quality === 'mp3' && !downloaded.ffmpegReady) qualityLabel = 'Audio (serverda ffmpeg yo‘q, MP3 o‘rniga original audio)';
+      const caption = `📥 ${sanitizeFileName(title)}\n🌐 ${platform}\n⚙️ ${qualityLabel}\n📦 ${formatBytes(downloaded.stat.size)}\n\n${publicDownloadRulesText()}`;
+      const ext = path.extname(downloaded.name).toLowerCase();
+      const fileStream = { source: downloaded.path, filename: downloaded.name };
+
+      if (downloaded.mediaType === 'audio' && ['.mp3', '.m4a', '.webm', '.opus', '.ogg'].includes(ext)) {
+        await ctx.replyWithAudio(fileStream, { caption: caption.slice(0, 1024), title: sanitizeFileName(title) }).catch(async () => {
+          await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+        });
+      } else if (downloaded.mediaType === 'video' && ['.mp4', '.mov', '.m4v', '.webm'].includes(ext)) {
+        await ctx.replyWithVideo(fileStream, { caption: caption.slice(0, 1024), supports_streaming: true }).catch(async () => {
+          await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+        });
+      } else {
+        await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+      }
+
+      await logDownload(ctx, {
+        url,
+        platform,
+        media_type: type === 'audio' ? 'audio' : 'video',
+        quality: String(quality),
+        title,
+        file_size: downloaded.stat.size,
+        status: 'success'
+      });
+      try { await ctx.deleteMessage(progress.message_id); } catch (_) {}
+      ctx.session.downloadUrl = null;
+      ctx.session.downloadTitle = null;
+    } catch (error) {
+      await logDownload(ctx, {
+        url,
+        platform,
+        media_type: type === 'audio' ? 'audio' : 'video',
+        quality: String(quality),
+        title,
+        status: 'failed',
+        error: String(error.message || error).slice(0, 500)
+      });
+      return ctx.reply(
+        `❌ Yuklashda xatolik bo‘ldi.\n\n` +
+          `Sabab: ${String(error.message || error).slice(0, 900)}\n\n` +
+          `Yechim: pastroq format tanlang, link public ekanini tekshiring yoki boshqa video yuboring.`
+      );
+    } finally {
+      videoDownloadRuntime.activeUsers.delete(lockKey);
+      if (downloaded?.dir) await cleanupDownloadDir(downloaded.dir);
+    }
+  }
+
+  bot.start(showStart);
+  bot.command('help', async (ctx) => ctx.reply(
+    `📥 Yordam\n\n` +
+      `1) YouTube/Instagram/TikTok link yuboring.\n` +
+      `2) 480p/720p/1080p yoki audio tanlang.\n` +
+      `3) Bot faylni Telegramga yuboradi.\n\n` +
+      `Buyruqlar: /start, /help, /cancel\n\n` +
+      publicDownloadRulesText()
+  ));
+  bot.command('cancel', async (ctx) => {
+    ctx.session.downloadUrl = null;
+    ctx.session.downloadTitle = null;
+    ctx.session.mode = null;
+    ctx.session.draft = {};
+    return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : undefined);
+  });
+
+  bot.hears('🧹 Eski yuklashlarni tozalash', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    await ensureDir(VIDEO_DL_TEMP_DIR);
+    const before = Date.now() - 60 * 60 * 1000;
+    let count = 0;
+    const items = await fs.promises.readdir(VIDEO_DL_TEMP_DIR, { withFileTypes: true }).catch(() => []);
+    for (const item of items) {
+      if (!item.isDirectory()) continue;
+      const full = path.join(VIDEO_DL_TEMP_DIR, item.name);
+      const stat = await fs.promises.stat(full).catch(() => null);
+      if (stat && stat.mtimeMs < before) {
+        await fs.promises.rm(full, { recursive: true, force: true }).catch(() => null);
+        count += 1;
+      }
+    }
+    return ctx.reply(`✅ ${count} ta eski vaqtinchalik papka tozalandi.`, adminKeyboard());
+  });
+
+  bot.hears('📊 Statistika', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const [users, active, blocked, subs, total, success, failed, audio, video] = await Promise.all([
+      User.countDocuments({ bot_key: config.key }),
+      User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }),
+      User.countDocuments({ bot_key: config.key, is_blocked: true }),
+      Subscription.countDocuments({ bot_key: config.key }),
+      VideoDownload.countDocuments({ bot_key: config.key }),
+      VideoDownload.countDocuments({ bot_key: config.key, status: 'success' }),
+      VideoDownload.countDocuments({ bot_key: config.key, status: 'failed' }),
+      VideoDownload.countDocuments({ bot_key: config.key, media_type: 'audio', status: 'success' }),
+      VideoDownload.countDocuments({ bot_key: config.key, media_type: 'video', status: 'success' })
+    ]);
+    return ctx.reply(
+      `📊 VIDEO DOWNLOADER STATISTIKASI\n\n` +
+        `👥 Userlar: ${users}\n` +
+        `✅ Aktiv: ${active}\n` +
+        `🚫 Blok: ${blocked}\n` +
+        `🔒 Majburiy obuna: ${subs}\n\n` +
+        `📥 Jami urinishlar: ${total}\n` +
+        `✅ Muvaffaqiyatli: ${success}\n` +
+        `❌ Xato: ${failed}\n` +
+        `🎬 Video: ${video}\n` +
+        `🎧 Audio: ${audio}`
+    );
+  });
+
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard, {
+    onSubscriptionSuccess: (ctx) => ctx.reply('✅ Obuna tasdiqlandi! Endi YouTube/Instagram/TikTok link yuboring.')
+  });
+
+  bot.action(/^vdl:video:(360|480|720|1080|best)$/, async (ctx) => handleDownloadChoice(ctx, 'video', ctx.match[1]));
+  bot.action(/^vdl:audio:(raw|mp3)$/, async (ctx) => handleDownloadChoice(ctx, 'audio', ctx.match[1]));
+  bot.action('vdl:cancel', async (ctx) => {
+    await ctx.answerCbQuery('Bekor qilindi').catch(() => null);
+    ctx.session.downloadUrl = null;
+    ctx.session.downloadTitle = null;
+    try { await ctx.editMessageText('❌ Yuklash bekor qilindi. Yangi link yuborishingiz mumkin.'); } catch (_) { await ctx.reply('❌ Yuklash bekor qilindi.'); }
+  });
+
+  bot.on('text', async (ctx) => {
+    await utils.saveUser(ctx);
+    const text = ctx.message.text.trim();
+    if (text === '/cancel') return;
+
+    if (utils.isAdmin(ctx.from.id)) {
+      const common = await handleCommonAdminText(ctx, config, utils, adminKeyboard);
+      if (common) return common;
+      if (ctx.session.mode === 'broadcasting') {
+        const r = await utils.broadcastMessage(ctx, adminKeyboard);
+        ctx.session.mode = null;
+        return r;
+      }
+    }
+
+    const ok = await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok && !utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx);
+    return sendFormatMenu(ctx, text);
+  });
+
+  bot.on(['photo', 'document', 'video', 'animation', 'audio', 'voice', 'sticker'], async (ctx) => {
+    await utils.saveUser(ctx);
+    if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'broadcasting') {
+      const r = await utils.broadcastMessage(ctx, adminKeyboard);
+      ctx.session.mode = null;
+      return r;
+    }
+    return ctx.reply('🔗 Iltimos, video linkni matn ko‘rinishida yuboring.');
+  });
+
+  bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
+  return { key: config.key, title: config.title, bot, config };
 }
 
 // =========================
@@ -5988,6 +6599,7 @@ function commandListForConfig(config = {}) {
     return [...base, { command: 'learn_on', description: 'O‘rganishni yoqish' }, { command: 'learn_off', description: 'O‘rganishni o‘chirish' }, { command: 'reply_on', description: 'Avto-javobni yoqish' }, { command: 'reply_off', description: 'Avto-javobni o‘chirish' }, { command: 'learnstats', description: 'O‘rganish statistikasi' }];
   }
   if (engine === 'giveaway') return [...base, { command: 'konkurs', description: 'Konkurs e’loni' }, { command: 'contest', description: 'Konkurs e’loni' }, { command: 'reyting', description: 'Konkurs reytingi' }, { command: 'top', description: 'TOP qatnashchilar' }, { command: 'statistika', description: 'Konkurs statistikasi' }];
+  if (engine === 'video_downloader') return [...base, { command: 'cancel', description: 'Yuklash jarayonini bekor qilish' }];
   return base;
 }
 
@@ -6387,7 +6999,7 @@ async function disableManagedBot(record, adminId, reason = 'admin_disabled') {
 }
 
 async function getBotStats(botKey) {
-  const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, viewsAgg, partViewsAgg, formFields, formSubs, autoPosts, vipReqs, vipMembers, giveaways, giveawayParts, faqs] = await Promise.all([
+  const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, viewsAgg, partViewsAgg, formFields, formSubs, autoPosts, vipReqs, vipMembers, giveaways, giveawayParts, faqs, videoDownloads, videoDownloadSuccess, videoDownloadFailed] = await Promise.all([
     User.countDocuments({ bot_key: botKey }),
     User.countDocuments({ bot_key: botKey, is_blocked: { $ne: true } }),
     User.countDocuments({ bot_key: botKey, is_blocked: true }),
@@ -6405,7 +7017,10 @@ async function getBotStats(botKey) {
     VipMember.countDocuments({ bot_key: botKey, is_active: true }),
     Giveaway.countDocuments({ bot_key: botKey }),
     GiveawayParticipant.countDocuments({ bot_key: botKey }),
-    GroupFaq.countDocuments({ bot_key: botKey, is_active: true })
+    GroupFaq.countDocuments({ bot_key: botKey, is_active: true }),
+    VideoDownload.countDocuments({ bot_key: botKey }),
+    VideoDownload.countDocuments({ bot_key: botKey, status: 'success' }),
+    VideoDownload.countDocuments({ bot_key: botKey, status: 'failed' })
   ]);
   return {
     users,
@@ -6426,7 +7041,10 @@ async function getBotStats(botKey) {
     vipMembers,
     giveaways,
     giveawayParticipants: giveawayParts,
-    faqs
+    faqs,
+    videoDownloads,
+    videoDownloadSuccess,
+    videoDownloadFailed
   };
 }
 
@@ -6470,12 +7088,17 @@ async function botDetailText(record) {
 
 ` +
     (stats
-      ? `📊 BOT STATISTIKASI\n` +
-        `👥 Userlar: ${stats.users} | aktiv: ${stats.activeUsers} | blok: ${stats.blockedUsers}\n` +
-        `📦 Kontent: ${stats.contents} | qismsiz: ${stats.singles} | qismli: ${stats.withParts}\n` +
-        `🎞 Qismlar: ${stats.parts}\n` +
-        `🔒 Majburiy obuna: ${stats.subscriptions}\n` +
-        `👁 Ko‘rishlar: ${stats.contentViews + stats.partViews} | qidiruv: ${stats.searches}`
+      ? (preset.engine === 'video_downloader'
+        ? `📊 BOT STATISTIKASI\n` +
+          `👥 Userlar: ${stats.users} | aktiv: ${stats.activeUsers} | blok: ${stats.blockedUsers}\n` +
+          `🔒 Majburiy obuna: ${stats.subscriptions}\n` +
+          `📥 Yuklash urinishlari: ${stats.videoDownloads} | ✅ ${stats.videoDownloadSuccess} | ❌ ${stats.videoDownloadFailed}`
+        : `📊 BOT STATISTIKASI\n` +
+          `👥 Userlar: ${stats.users} | aktiv: ${stats.activeUsers} | blok: ${stats.blockedUsers}\n` +
+          `📦 Kontent: ${stats.contents} | qismsiz: ${stats.singles} | qismli: ${stats.withParts}\n` +
+          `🎞 Qismlar: ${stats.parts}\n` +
+          `🔒 Majburiy obuna: ${stats.subscriptions}\n` +
+          `👁 Ko‘rishlar: ${stats.contentViews + stats.partViews} | qidiruv: ${stats.searches}`)
       : `📊 Bot hali tasdiqlanmagan yoki bot_key yo‘q.`)
   );
 }
@@ -6522,6 +7145,7 @@ async function startManagedRecord(record, source = 'db') {
   else if (engine === 'channel_form') active = createChannelFormBot(config, token, adminIds);
   else if (engine === 'group_tools') active = createGroupToolsBot(config, token, adminIds);
   else if (engine === 'chat_learning') active = createChatLearningBot(config, token, adminIds);
+  else if (engine === 'video_downloader') active = createVideoDownloaderBot(config, token, adminIds);
   else active = createContentBot(config, token, adminIds);
   if (!active) return null;
   await activateBot(active, source);
@@ -6532,7 +7156,7 @@ function typeRows(prefix = 'factory:type') {
   const entries = Object.entries(TYPE_PRESETS).filter(([, preset]) => preset && preset.title);
   const rows = [];
   for (const [key, preset] of entries) {
-    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : 'Media';
+    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
     rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
   }
   return rows;
