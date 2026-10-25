@@ -7658,6 +7658,15 @@ function commandListForConfig(config = {}) {
     { command: 'help', description: 'Yordam va buyruqlar' },
     { command: 'commands', description: 'Barcha buyruqlar ro‘yxati' }
   ];
+  if (key === 'factory') {
+    return [
+      { command: 'start', description: 'Bosh menyu' },
+      { command: 'help', description: 'Yordam' },
+      { command: 'id', description: 'Telegram ID ni bilish' },
+      { command: 'admin', description: 'Admin panel (faqat adminlar)' },
+      { command: 'cancel', description: 'Jarayonni bekor qilish' }
+    ];
+  }
   if (engine === 'group_tools' || ['group_manager', 'group_cleaner', 'faq_support', 'qoriqchi'].includes(key)) {
     return [
       ...base,
@@ -9046,6 +9055,36 @@ function createFactoryBot() {
     return ctx.reply('❌ Jarayon bekor qilindi.', userKeyboard(ctx));
   });
 
+  bot.command(['help', 'commands'], async (ctx) => {
+    reset(ctx);
+    const lines = [
+      'ℹ️ YORDAM',
+      '',
+      '🤖 Bot tayyorlash — BotFather tokeni bilan yangi bot yaratish',
+      '💰 Narxlar — bot turlari va oylik tariflar',
+      '📋 Mening botlarim — botlaringizni boshqarish (restart, token/admin almashtirish)',
+      '☎️ Admin bilan kelishish — to‘lov va ruxsat',
+      '',
+      'Buyruqlar: /start, /help, /id, /cancel'
+    ];
+    if (isOwner(ctx.from.id)) {
+      lines.push('', '👑 Admin: /admin — admin panel (kutilayotgan so‘rovlar, barcha botlar, global obuna, e’lon, narxlar)');
+    }
+    return ctx.reply(lines.join('\n'), userKeyboard(ctx));
+  });
+
+  bot.command('id', async (ctx) => ctx.reply(`🆔 Sizning Telegram ID: ${ctx.from.id}`));
+
+  bot.command('admin', async (ctx) => {
+    reset(ctx);
+    if (!isOwner(ctx.from.id)) {
+      return ctx.reply(
+        `⛔ Siz bu botda admin sifatida ro‘yxatdan o‘tmagansiz.\n\n🆔 Sizning ID: ${ctx.from.id}\n\nAgar bot egasi bo‘lsangiz, serverdagi ADMIN_IDS (yoki FACTORY_ADMIN_IDS) o‘zgaruvchisiga shu ID ni yozing va qayta deploy qiling.`
+      );
+    }
+    return ctx.reply('👑 Admin panel:', userKeyboard(ctx));
+  });
+
   bot.hears('☎️ Admin bilan kelishish', async (ctx) => {
     return ctx.reply(`Narx, muddat va ruxsat uchun admin bilan bog‘laning: ${OWNER_USERNAME}`, Markup.inlineKeyboard([[Markup.button.url('Admin bilan yozishish', `https://t.me/${OWNER_USERNAME.replace('@', '')}`)]]));
   });
@@ -9200,7 +9239,29 @@ ${preset.title}
       await restartManagedBot(rec, ctx.from.id);
       await ctx.reply(`✅ @${rec.telegram_username} qayta ishga tushirildi va webhook/commands sinxron qilindi.`, userKeyboard(ctx));
     } catch (error) {
-      await ctx.reply(`❌ Qayta ishga tushirib bo‘lmadi: ${error.message}`, userKeyboard(ctx));
+      const msg = String(error.message || error);
+      const owner = isOwner(ctx.from.id);
+      // Muddati tugagan / to‘xtatilgan bot: restart emas, uzaytirish kerak.
+      if (msg.startsWith('Bot aktiv emas')) {
+        return ctx.reply(
+          `⏸ @${rec.telegram_username} hozir ishga tusha olmaydi.\nHolat: ${botStatusLabel(rec)}\n\n` +
+            (owner
+              ? 'Siz asosiy adminsiz — pastdagi tugma bilan 1 oyga uzaytiring, bot darhol ishga tushadi (barcha ma’lumotlar saqlangan).'
+              : `Bot ishlashi uchun obunani yangilash kerak. Kelishish: ${OWNER_USERNAME}\n\n🆔 Sizning ID: ${ctx.from.id}`),
+          owner
+            ? Markup.inlineKeyboard([[Markup.button.callback('✅ 1 oyga uzaytirish', `factory:extend:${String(rec._id)}`)]])
+            : userKeyboard(ctx)
+        );
+      }
+      // Token shifrini ochib bo‘lmadi: server BOT_TOKEN_SECRET o‘zgargan (masalan, yangi Render servis).
+      if (/unable to authenticate|Unsupported state|bad decrypt/i.test(msg)) {
+        return ctx.reply(
+          `🔐 @${rec.telegram_username} tokenini ochib bo‘lmadi: serverdagi BOT_TOKEN_SECRET bot yaratilgandagidan boshqacha.\n\n` +
+            'Yechim: eski servisdagi BOT_TOKEN_SECRET (yoki WEBHOOK_SECRET/APP_SECRET) qiymatini yangi servisga aynan ko‘chiring, yoki “🔐 API token almashtirish” orqali tokenni qayta kiriting.',
+          Markup.inlineKeyboard([[Markup.button.callback('🔐 API token almashtirish', `factory:change_token:${String(rec._id)}`)]])
+        );
+      }
+      await ctx.reply(`❌ Qayta ishga tushirib bo‘lmadi: ${msg}`, userKeyboard(ctx));
     }
   });
 
@@ -9333,12 +9394,17 @@ ${preset.title}
     if (!rec) return ctx.reply('❌ Bot topilmadi.');
 
     await extendManagedBot(rec, ctx.from.id, 1);
+    let startWarning = '';
     try {
       await startManagedRecord(rec, 'factory_extend');
     } catch (error) {
       console.error('Extend/start xatosi:', error.message);
+      startWarning = /unable to authenticate|Unsupported state|bad decrypt/i.test(error.message)
+        ? '\n\n⚠️ Lekin bot ishga tushmadi: tokenni ochib bo‘lmadi (serverdagi BOT_TOKEN_SECRET o‘zgargan). Eski servisdagi BOT_TOKEN_SECRET ni ko‘chiring yoki “🔐 API token almashtirish” orqali tokenni qayta kiriting.'
+        : `\n\n⚠️ Lekin bot ishga tushmadi: ${error.message}`;
     }
-    await ctx.editMessageText(`✅ @${rec.telegram_username} 1 oyga uzaytirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}`);
+    const doneText = `✅ @${rec.telegram_username} 1 oyga uzaytirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}${startWarning}`;
+    try { await ctx.editMessageText(doneText); } catch (_) { await ctx.reply(doneText); }
     try {
       await bot.telegram.sendMessage(rec.owner_user_id, `✅ @${rec.telegram_username} botingiz uchun oylik ruxsat uzaytirildi.\n\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}`);
     } catch (_) {}
