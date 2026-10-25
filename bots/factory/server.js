@@ -9218,17 +9218,24 @@ ${preset.title}
     );
   });
 
+  // Kartochkani yangilaydi; matn o‘zgarmagan bo‘lsa (Telegram “message is not modified”)
+  // yoki tahrirlab bo‘lmasa, panelni yangi xabar qilib yuboradi — tugma “jim” qolmaydi.
+  async function showBotDetail(ctx, rec, keyboard) {
+    const text = await botDetailText(rec);
+    try {
+      return await ctx.editMessageText(text, keyboard);
+    } catch (_) {
+      return ctx.reply(text, keyboard);
+    }
+  }
+
   bot.action(/^factory:mybot:([a-f0-9]{24})$/, async (ctx) => {
     await ctx.answerCbQuery();
     const rec = await loadManageableBot(ctx, ctx.match[1]);
     if (!rec) return;
     await markRecordExpiredIfNeeded(rec);
     const keyboard = isOwner(ctx.from.id) ? botActionKeyboard(rec) : myBotActionKeyboard(rec);
-    try {
-      return ctx.editMessageText(await botDetailText(rec), keyboard);
-    } catch (_) {
-      return ctx.reply(await botDetailText(rec), keyboard);
-    }
+    return showBotDetail(ctx, rec, keyboard);
   });
 
   bot.action(/^factory:restart:([a-f0-9]{24})$/, async (ctx) => {
@@ -9357,7 +9364,7 @@ ${preset.title}
     const rec = await ManagedBot.findOne({ _id: ctx.match[1] });
     if (!rec) return ctx.reply('❌ Bot topilmadi.');
     await markRecordExpiredIfNeeded(rec);
-    return ctx.editMessageText(await botDetailText(rec), botActionKeyboard(rec));
+    return showBotDetail(ctx, rec, botActionKeyboard(rec));
   });
 
   bot.action(/^factory:approve:([a-f0-9]{24})$/, async (ctx) => {
