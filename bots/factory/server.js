@@ -19,6 +19,8 @@ const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.type
 // =========================
 const MONGODB_URL = process.env.MONGODB_URL || process.env.MONGODB_URI || process.env.MONGO_URI || process.env.FACTORY_MONGODB_URI || '';
 const PORT = Number(process.env.PORT || 3000);
+// Diqqat: quyidagi URL o‘zgaruvchisi global URL klassini to‘sadi, link parsing uchun NodeURL ishlating.
+const NodeURL = require('url').URL;
 const URL = String(process.env.URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_webhook_secret';
 const BOT_TOKEN_SECRET = process.env.BOT_TOKEN_SECRET || WEBHOOK_SECRET;
@@ -493,12 +495,17 @@ const videoDownloadSchema = new mongoose.Schema(
     quality: String,
     title: String,
     file_size: Number,
+    // Telegram file_id kesh: shu link+format qayta so‘ralsa, qayta yuklamasdan darrov yuboriladi.
+    file_id: String,
+    file_kind: String,
+    from_cache: { type: Boolean, default: false },
     status: { type: String, enum: ['success', 'failed'], default: 'success', index: true },
     error: String
   },
   { timestamps: true, collection: 'multibot_video_downloads' }
 );
 videoDownloadSchema.index({ bot_key: 1, createdAt: -1 });
+videoDownloadSchema.index({ bot_key: 1, url: 1, media_type: 1, quality: 1, status: 1 });
 const VideoDownload = mongoose.model('VideoDownload', videoDownloadSchema);
 
 const vipRequestSchema = new mongoose.Schema(
@@ -512,7 +519,14 @@ const vipRequestSchema = new mongoose.Schema(
     approved_by: Number,
     invite_link: String,
     expires_at: Date,
-    access_until: Date
+    access_until: Date,
+    plan_title: String,
+    plan_days: Number,
+    plan_price: String,
+    receipt_file_id: String,
+    receipt_type: String,
+    receipt_at: Date,
+    is_renewal: { type: Boolean, default: false }
   },
   { timestamps: true, collection: 'multibot_vip_requests' }
 );
@@ -528,7 +542,11 @@ const vipMemberSchema = new mongoose.Schema(
     access_until: { type: Date, index: true },
     is_active: { type: Boolean, default: true, index: true },
     removed_at: Date,
-    last_request_id: mongoose.Schema.Types.ObjectId
+    last_request_id: mongoose.Schema.Types.ObjectId,
+    // Eslatma qaysi access_until uchun yuborilganini saqlaymiz (qayta yubormaslik uchun).
+    reminder_for: Date,
+    reminder_stage: { type: Number, default: 0 },
+    total_paid_periods: { type: Number, default: 0 }
   },
   { timestamps: true, collection: 'multibot_vip_members' }
 );
@@ -708,6 +726,9 @@ const learnedReplySchema = new mongoose.Schema(
     answer_chat_id: Number,
     answer_message_id: Number,
     answer_type: { type: String, default: 'text' },
+    // Stiker/rasm/gif/ovozli javoblar uchun
+    answer_file_id: String,
+    answer_media: String,
     learned_from_user_id: Number,
     learned_from_username: String,
     uses: { type: Number, default: 0 },
@@ -810,6 +831,20 @@ const groupAutoReplySchema = new mongoose.Schema(
 );
 groupAutoReplySchema.index({ bot_key: 1, chat_id: 1, keyword_norm: 1 }, { unique: true, partialFilterExpression: { is_active: true } });
 const GroupAutoReply = mongoose.model('GroupAutoReply', groupAutoReplySchema);
+
+// Kontent botlarda foydalanuvchining "⭐ Saqlanganlar" ro‘yxati.
+const contentFavoriteSchema = new mongoose.Schema(
+  {
+    bot_key: { type: String, required: true, index: true },
+    user_id: { type: Number, required: true, index: true },
+    content_id: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    content_code_norm: String,
+    content_title: String
+  },
+  { timestamps: true, collection: 'multibot_content_favorites' }
+);
+contentFavoriteSchema.index({ bot_key: 1, user_id: 1, content_id: 1 }, { unique: true });
+const ContentFavorite = mongoose.model('ContentFavorite', contentFavoriteSchema);
 
 
 // =========================
@@ -1332,21 +1367,26 @@ async function sendStoredMessageToChat(telegram, chatId, stored) {
   throw new Error('Saqlangan xabar turi yuborilmadi');
 }
 
-async function copyStoredMessage(ctx, stored) {
+async function copyStoredMessage(ctx, stored, extra = {}) {
+  // extra: { reply_markup, protect_content } — tugmalar va nusxa olishdan himoya.
+  const sendExtra = {};
+  if (extra.reply_markup) sendExtra.reply_markup = extra.reply_markup;
+  if (extra.protect_content) sendExtra.protect_content = true;
   try {
-    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id);
+    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id, sendExtra);
     return;
   } catch (copyError) {
     console.error('copyMessage xatosi, fallback ishlaydi:', copyError.message);
   }
 
   const captionExtra = {
+    ...sendExtra,
     caption: stored.caption || undefined,
     caption_entities: stored.caption_entities || undefined
   };
 
   if (stored.message_type === 'text') {
-    return ctx.reply(stored.text || 'Matn topilmadi.', { entities: stored.entities || undefined });
+    return ctx.reply(stored.text || 'Matn topilmadi.', { ...sendExtra, entities: stored.entities || undefined });
   }
   if (stored.message_type === 'photo') return ctx.replyWithPhoto(stored.file_id, captionExtra);
   if (stored.message_type === 'video') return ctx.replyWithVideo(stored.file_id, captionExtra);
@@ -1354,7 +1394,7 @@ async function copyStoredMessage(ctx, stored) {
   if (stored.message_type === 'document') return ctx.replyWithDocument(stored.file_id, captionExtra);
   if (stored.message_type === 'audio') return ctx.replyWithAudio(stored.file_id, captionExtra);
   if (stored.message_type === 'voice') return ctx.replyWithVoice(stored.file_id, captionExtra);
-  if (stored.message_type === 'sticker') return ctx.replyWithSticker(stored.file_id);
+  if (stored.message_type === 'sticker') return ctx.replyWithSticker(stored.file_id, sendExtra);
 
   return ctx.reply('❌ Bu postni yuborishda xatolik bo‘ldi. Admin postni qayta joylashi kerak.');
 }
@@ -1574,18 +1614,106 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return `🗑 ${config.itemTitle} oʻchirish`;
   }
 
+  const USER_BTN = {
+    top: '🔥 Top',
+    fresh: '🆕 Yangilari',
+    random: '🎲 Tasodifiy',
+    favs: '⭐ Saqlanganlarim',
+    help: 'ℹ️ Yordam'
+  };
+
   function adminKeyboard() {
     return Markup.keyboard([
       [addButton(), partButton()],
       [listButton(), '📊 Statistika'],
+      ['✏️ Tahrirlash', '🔒 Kontent himoyasi'],
       [deleteButton(), '🧹 Qism oʻchirish'],
-      ['📢 Broadcast'],
+      ['📢 Broadcast', USER_BTN.top],
       ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
       ['📋 Obunalar', '➖ Obuna oʻchirish'],
       ['🏠 Bosh menyu']
     ])
       .resize()
       .oneTime(false);
+  }
+
+  function userKeyboard() {
+    return Markup.keyboard([
+      [USER_BTN.top, USER_BTN.fresh],
+      [USER_BTN.random, USER_BTN.favs],
+      [USER_BTN.help]
+    ])
+      .resize()
+      .oneTime(false);
+  }
+
+  function botUsername(ctx) {
+    return String(ctx?.botInfo?.username || config.telegramUsername || '').replace(/^@/, '').trim();
+  }
+
+  function contentDeepLink(ctx, content) {
+    const username = botUsername(ctx);
+    return username && content?.code_norm ? `https://t.me/${username}?start=c_${content.code_norm}` : '';
+  }
+
+  async function isProtectEnabled() {
+    const st = await getBotSettings(config.key).catch(() => ({}));
+    return Boolean(st && st.protect_content);
+  }
+
+  async function contentActionsKeyboard(ctx, content, part = null) {
+    const rows = [];
+    if (part) {
+      const [prev, next] = await Promise.all([
+        ContentPart.findOne({ bot_key: config.key, content_id: content._id, is_active: true, part_no: { $lt: part.part_no } })
+          .sort({ part_no: -1 })
+          .select('_id part_no'),
+        ContentPart.findOne({ bot_key: config.key, content_id: content._id, is_active: true, part_no: { $gt: part.part_no } })
+          .sort({ part_no: 1 })
+          .select('_id part_no')
+      ]);
+      const nav = [];
+      if (prev) nav.push(Markup.button.callback(`⬅️ ${prev.part_no}-qism`, `p:e:${String(prev._id)}`));
+      if (next) nav.push(Markup.button.callback(`${next.part_no}-qism ▶️`, `p:e:${String(next._id)}`));
+      if (nav.length) rows.push(nav);
+      rows.push([Markup.button.callback('📋 Barcha qismlar', `p:l:${String(content._id)}`)]);
+    }
+    const isFav = ctx.from
+      ? await ContentFavorite.exists({ bot_key: config.key, user_id: ctx.from.id, content_id: content._id }).catch(() => null)
+      : null;
+    const row = [
+      Markup.button.callback(isFav ? '💔 Saqlanganlardan olish' : '⭐ Saqlash', `p:f:${String(content._id)}:${part ? String(part._id) : '0'}`)
+    ];
+    const link = contentDeepLink(ctx, content);
+    if (link) {
+      const shareText = `${config.mainEmoji} ${content.title}${part ? ` — ${part.part_no}-qism` : ''}`;
+      row.push(Markup.button.url('↗️ Ulashish', `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`));
+    }
+    rows.push(row);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  async function sendContentList(ctx, contents, heading) {
+    if (!contents.length) return ctx.reply(`📭 Hozircha ${config.item} yoʻq.`);
+    const rows = contents.map((c, i) => [
+      Markup.button.callback(`${i + 1}. ${c.has_parts ? '🎞' : config.mainEmoji} ${shortText(c.title, 40)}`, `p:o:${String(c._id)}`)
+    ]);
+    return ctx.reply(heading, Markup.inlineKeyboard(rows));
+  }
+
+  async function passesGate(ctx) {
+    if (isAdmin(ctx.from.id)) return true;
+    const ok = await checkAllSubscriptions(ctx.from.id);
+    if (!ok) await sendSubscriptionWarning(ctx);
+    return ok;
+  }
+
+  async function deliverByCode(ctx, code) {
+    const content = await Content.findOne({ bot_key: config.key, code_norm: normalizeCode(code), is_active: true });
+    if (!content) {
+      return ctx.reply(`❌ Bu ${config.item} topilmadi yoki oʻchirilgan. Nomi yoki kodini yozib qidirib koʻring.`, isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard());
+    }
+    return deliverOrShowParts(ctx, content, false, 0);
   }
 
   async function findContentsByQuery(input, limit = 8) {
@@ -1662,8 +1790,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
           await ctx.deleteMessage();
         } catch (_) {}
       }
-      await copyStoredMessage(ctx, content);
-      await Content.updateOne({ _id: content._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
+      const keyboard = await contentActionsKeyboard(ctx, content);
+      await copyStoredMessage(ctx, content, { reply_markup: keyboard.reply_markup, protect_content: await isProtectEnabled() });
+      await Content.updateOne({ _id: content._id }, { $inc: { views: 1, search_count: 1 }, $set: { last_view_at: new Date() } });
       return;
     }
 
@@ -1692,19 +1821,45 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     await saveUser(ctx, true);
     resetSession(ctx);
 
+    // Deep link: t.me/bot?start=c_<kod> — ulashilgan kontent darrov ochiladi.
+    const payload = String(ctx.startPayload || ctx.payload || '').trim();
+    const deepCode = /^c_[a-z0-9_-]{1,40}$/i.test(payload) ? payload.slice(2) : '';
+
     if (isAdmin(ctx.from.id)) {
+      if (deepCode) return deliverByCode(ctx, deepCode);
       return ctx.reply(`🏠 ${config.title || config.itemTitle} admin paneli:`, adminKeyboard());
     }
 
     const ok = await checkAllSubscriptions(ctx.from.id);
-    if (!ok) return sendSubscriptionWarning(ctx);
+    if (!ok) {
+      ctx.session.pendingCode = deepCode || null;
+      return sendSubscriptionWarning(ctx);
+    }
+
+    if (deepCode) return deliverByCode(ctx, deepCode);
 
     return ctx.reply(
       `${config.mainEmoji || '🤖'} ${config.title || config.itemTitle} botiga xush kelibsiz!
 
 ` +
         `${config.welcomeLine || ((config.itemTitle || 'Kontent') + ' nomi yoki kodini yuboring.')}\n` +
-        `Masalan: ${config.codeExamples || 'kod'}`
+        `Masalan: ${config.codeExamples || 'kod'}\n\n` +
+        `${USER_BTN.top} — eng ko‘p ko‘rilganlar\n${USER_BTN.fresh} — so‘nggi qo‘shilganlar\n${USER_BTN.random} — tasodifiy tanlov\n${USER_BTN.favs} — o‘zingiz saqlaganlar`,
+      userKeyboard()
+    );
+  });
+
+  bot.command('help', async (ctx) => {
+    await saveUser(ctx);
+    const username = botUsername(ctx);
+    return ctx.reply(
+      `ℹ️ YORDAM\n\n` +
+        `🔎 ${config.itemTitle} nomi yoki kodini yozing — bot darrov topib beradi.\n` +
+        `🎞 Qismli ${config.itemPlural}da qismni tanlang, keyin “▶️” tugmasi bilan keyingisiga o‘ting.\n` +
+        `⭐ Yoqqanini “Saqlash” tugmasi bilan saqlang va “${USER_BTN.favs}”dan oching.\n` +
+        `↗️ “Ulashish” tugmasi do‘stingizga to‘g‘ridan-to‘g‘ri havola yuboradi.\n` +
+        (username ? `\n💡 Istalgan chatda @${username} deb yozib ${config.item} qidirishingiz mumkin (inline rejim).` : ''),
+      isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()
     );
   });
 
@@ -1722,11 +1877,116 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const ok = await checkAllSubscriptions(ctx.from.id);
     if (!ok) return sendSubscriptionWarning(ctx);
 
-    return ctx.reply(`${config.mainEmoji} ${config.itemTitle} nomi yoki kodini yuboring. Masalan: ${config.codeExamples}`);
+    return ctx.reply(`${config.mainEmoji} ${config.itemTitle} nomi yoki kodini yuboring. Masalan: ${config.codeExamples}`, userKeyboard());
   });
 
   bot.action('check_subscription', async (ctx) => {
-    return handleSubscriptionCallback(ctx, adminKeyboard, `✅ Obuna tasdiqlandi! Endi ${config.item} nomi yoki kodini yuboring.`);
+    const pendingCode = ctx.session?.pendingCode || null;
+    await handleSubscriptionCallback(ctx, adminKeyboard, `✅ Obuna tasdiqlandi! Endi ${config.item} nomi yoki kodini yuboring.`);
+    if (!pendingCode || !ctx.from) return;
+    const ok = isAdmin(ctx.from.id) || (await checkAllSubscriptions(ctx.from.id));
+    if (!ok) return;
+    ctx.session.pendingCode = null;
+    return deliverByCode(ctx, pendingCode);
+  });
+
+  bot.hears(USER_BTN.top, async (ctx) => {
+    await saveUser(ctx);
+    if (!(await passesGate(ctx))) return;
+    const items = await Content.find({ bot_key: config.key, is_active: true }).sort({ views: -1, search_count: -1, createdAt: -1 }).limit(10);
+    return sendContentList(ctx, items, `🔥 TOP-10 ${config.itemPlural}:`);
+  });
+
+  bot.hears(USER_BTN.fresh, async (ctx) => {
+    await saveUser(ctx);
+    if (!(await passesGate(ctx))) return;
+    const items = await Content.find({ bot_key: config.key, is_active: true }).sort({ createdAt: -1 }).limit(10);
+    return sendContentList(ctx, items, `🆕 So‘nggi qo‘shilgan ${config.itemPlural}:`);
+  });
+
+  bot.hears(USER_BTN.random, async (ctx) => {
+    await saveUser(ctx);
+    if (!(await passesGate(ctx))) return;
+    const [doc] = await Content.aggregate([{ $match: { bot_key: config.key, is_active: true } }, { $sample: { size: 1 } }]);
+    if (!doc) return ctx.reply(`📭 Hozircha ${config.item} yoʻq.`);
+    return deliverOrShowParts(ctx, Content.hydrate(doc), false, 0);
+  });
+
+  bot.hears(USER_BTN.favs, async (ctx) => {
+    await saveUser(ctx);
+    if (!(await passesGate(ctx))) return;
+    const favs = await ContentFavorite.find({ bot_key: config.key, user_id: ctx.from.id }).sort({ createdAt: -1 }).limit(30);
+    if (!favs.length) return ctx.reply(`⭐ Saqlanganlar ro‘yxatingiz bo‘sh.\n\n${config.itemTitle}ni ochganda “⭐ Saqlash” tugmasini bosing.`);
+    const contents = await Content.find({ _id: { $in: favs.map((f) => f.content_id) }, bot_key: config.key, is_active: true });
+    const byId = new Map(contents.map((c) => [String(c._id), c]));
+    const ordered = favs.map((f) => byId.get(String(f.content_id))).filter(Boolean);
+    return sendContentList(ctx, ordered, `⭐ Saqlangan ${config.itemPlural} (${ordered.length} ta):`);
+  });
+
+  bot.hears(USER_BTN.help, async (ctx) => {
+    const username = botUsername(ctx);
+    return ctx.reply(
+      `ℹ️ ${config.itemTitle} nomi yoki kodini yozing — bot topib beradi.\n` +
+        `⭐ Saqlash, ↗️ Ulashish va ▶️ Keyingi qism tugmalari har bir postda bor.` +
+        (username ? `\n💡 Istalgan chatda @${username} deb yozib qidiring.` : ''),
+      isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()
+    );
+  });
+
+  bot.action(/^p:l:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    await saveUser(ctx);
+    if (!(await passesGate(ctx))) return;
+    const content = await Content.findOne({ _id: ctx.match[1], bot_key: config.key, is_active: true });
+    if (!content) return ctx.reply(`❌ ${config.itemTitle} topilmadi yoki oʻchirilgan.`);
+    return deliverOrShowParts(ctx, content, false, 0);
+  });
+
+  bot.action(/^p:f:([a-f0-9]{24}):([a-f0-9]{24}|0)$/, async (ctx) => {
+    await saveUser(ctx);
+    const content = await Content.findOne({ _id: ctx.match[1], bot_key: config.key, is_active: true });
+    if (!content) return ctx.answerCbQuery(`❌ ${config.itemTitle} topilmadi.`).catch(() => null);
+    const filter = { bot_key: config.key, user_id: ctx.from.id, content_id: content._id };
+    const removed = await ContentFavorite.deleteOne(filter);
+    if (!removed.deletedCount) {
+      await ContentFavorite.updateOne(
+        filter,
+        { $set: { content_code_norm: content.code_norm, content_title: content.title } },
+        { upsert: true }
+      ).catch(() => null);
+    }
+    await ctx.answerCbQuery(removed.deletedCount ? '💔 Saqlanganlardan olindi' : '⭐ Saqlandi! “Saqlanganlarim” bo‘limidan oching.').catch(() => null);
+    const part = ctx.match[2] !== '0'
+      ? await ContentPart.findOne({ _id: ctx.match[2], bot_key: config.key, is_active: true })
+      : null;
+    const keyboard = await contentActionsKeyboard(ctx, content, part);
+    try { await ctx.editMessageReplyMarkup(keyboard.reply_markup); } catch (_) {}
+  });
+
+  bot.on('inline_query', async (ctx) => {
+    try {
+      if (!(mongoReady && mongoose.connection.readyState === 1)) return ctx.answerInlineQuery([], { cache_time: 5 });
+      const q = String(ctx.inlineQuery?.query || '').trim();
+      const items = q
+        ? await findContentsByQuery(q, 20)
+        : await Content.find({ bot_key: config.key, is_active: true }).sort({ views: -1, createdAt: -1 }).limit(20);
+      const username = botUsername(ctx);
+      const results = items.map((c) => ({
+        type: 'article',
+        id: String(c._id),
+        title: `${c.has_parts ? '🎞' : config.mainEmoji} ${c.title}`,
+        description: `Kod: ${c.code}${c.has_parts ? ' • qismli' : ''}${c.description ? ` • ${shortText(c.description, 60)}` : ''}`,
+        input_message_content: {
+          message_text: `${config.mainEmoji} ${c.title}\n🔎 Kod: ${c.code}${c.description ? `\n📝 ${c.description}` : ''}\n\n👇 Ko‘rish uchun tugmani bosing`
+        },
+        ...(username
+          ? { reply_markup: { inline_keyboard: [[{ text: '▶️ Ko‘rish', url: `https://t.me/${username}?start=c_${c.code_norm}` }]] } }
+          : {})
+      }));
+      return ctx.answerInlineQuery(results, { cache_time: 30, is_personal: false });
+    } catch (error) {
+      console.error(`${config.title} inline_query xatosi:`, error.message);
+    }
   });
 
   bot.action('noop', async (ctx) => {
@@ -1791,8 +2051,11 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const part = await ContentPart.findOne({ _id: ctx.match[1], bot_key: config.key, is_active: true });
     if (!part) return ctx.reply('❌ Qism topilmadi yoki oʻchirilgan.');
 
-    await copyStoredMessage(ctx, part);
+    const content = await Content.findOne({ _id: part.content_id, bot_key: config.key, is_active: true });
+    const keyboard = content ? await contentActionsKeyboard(ctx, content, part) : null;
+    await copyStoredMessage(ctx, part, { reply_markup: keyboard?.reply_markup, protect_content: await isProtectEnabled() });
     await ContentPart.updateOne({ _id: part._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
+    if (content) await Content.updateOne({ _id: content._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
   });
 
   bot.hears(addButton(), async (ctx) => {
@@ -1839,26 +2102,23 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply(`${config.listEmoji} Soʻnggi 20 ta ${config.item}:\n\n${lines.join('\n\n')}`);
   });
 
-  bot.hears('📍 Manba statistikasi', async (ctx) => {
-    if (!utils.isAdmin(ctx.from.id)) return;
-    const g = await latestGiveaway();
-    if (!g) return ctx.reply('📭 Konkurs yo‘q.');
-    const sources = await GiveawaySource.find({ bot_key: config.key, giveaway_id: g._id }).sort({ joins_count: -1, clicks_count: -1, createdAt: 1 }).limit(50);
-    const direct = await GiveawayParticipant.countDocuments({
-      bot_key: config.key,
-      giveaway_id: g._id,
-      onboarding_status: 'active',
-      $or: [{ source_code: null }, { source_code: { $exists: false } }]
-    });
-    if (!sources.length) return ctx.reply(`📍 MANBA STATISTIKASI\n\nHali kanal/guruhga maxsus konkurs posti yuborilmagan.\nTo‘g‘ridan-to‘g‘ri kirganlar: ${direct}`);
+  bot.hears('✏️ Tahrirlash', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    resetSession(ctx);
+    ctx.session.mode = 'edit_content';
     return ctx.reply(
-      `📍 MANBA STATISTIKASI\n\n` +
-      sources.map((src, i) =>
-        `${i + 1}. ${src.chat_title || src.chat_username || src.chat_id}\n` +
-        `   👀 Bosilgan: ${src.clicks_count || 0} | ✅ Qo‘shilgan: ${src.joins_count || 0} | 📣 Post: ${src.posts_count || 0}\n` +
-        `   🆔 ${src.chat_id}${src.chat_username ? ` | ${src.chat_username}` : ''}`
-      ).join('\n\n') +
-      `\n\n➡️ To‘g‘ridan-to‘g‘ri kirganlar: ${direct}`,
+      `✏️ ${config.itemTitle} tahrirlash.\n\nFormat:\nkod | yangi nom | yangi tavsif\n\nO‘zgartirmaslik uchun “-” yozing. Misol:\navatar | Avatar 2 | -\n\n❌ Bekor qilish: /cancel`
+    );
+  });
+
+  bot.hears('🔒 Kontent himoyasi', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    const next = !(await isProtectEnabled());
+    await updateBotSettings(config.key, { protect_content: next });
+    return ctx.reply(
+      next
+        ? '🔒 Himoya YOQILDI. Foydalanuvchilar endi postlarni forward qila olmaydi va saqlab ololmaydi.'
+        : '🔓 Himoya o‘chirildi. Postlarni forward qilish mumkin.',
       adminKeyboard()
     );
   });
@@ -1866,6 +2126,12 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   bot.hears('📊 Statistika', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
 
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [newUsers24h, active24h, favorites] = await Promise.all([
+      User.countDocuments({ bot_key: config.key, joined_at: { $gte: since24h } }),
+      User.countDocuments({ bot_key: config.key, last_active_at: { $gte: since24h } }),
+      ContentFavorite.countDocuments({ bot_key: config.key })
+    ]);
     const [users, activeUsers, blockedUsers, contents, singles, withParts, parts, subs, topContents, topParts] = await Promise.all([
       User.countDocuments({ bot_key: config.key }),
       User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }),
@@ -1890,8 +2156,11 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply(
       `📊 ${config.title.toUpperCase()} STATISTIKASI\n\n` +
         `👥 Jami foydalanuvchi: ${users}\n` +
+        `🆕 Oxirgi 24 soatda qo‘shilgan: ${newUsers24h}\n` +
+        `🔥 Oxirgi 24 soatda faol: ${active24h}\n` +
         `✅ Aktiv: ${activeUsers}\n` +
         `🚫 Botni bloklaganlar: ${blockedUsers}\n` +
+        `⭐ Saqlanganlar: ${favorites}\n` +
         `${config.mainEmoji} Jami ${config.itemPlural}: ${contents}\n` +
         `📦 Qismsiz: ${singles}\n` +
         `🎞 Qismli: ${withParts}\n` +
@@ -2006,8 +2275,10 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
             added_by: userId
           });
           resetSession(ctx);
+          const link = contentDeepLink(ctx, { code_norm: codeNorm });
           return ctx.reply(
-            `✅ Qismsiz ${config.item} saqlandi!\n\n${config.mainEmoji} Nomi: ${title}\n🔎 Kod: ${code}\n\nFoydalanuvchi kod/nom yuborsa, post darrov yuboriladi.`,
+            `✅ Qismsiz ${config.item} saqlandi!\n\n${config.mainEmoji} Nomi: ${title}\n🔎 Kod: ${code}\n\nFoydalanuvchi kod/nom yuborsa, post darrov yuboriladi.` +
+              (link ? `\n\n🔗 To‘g‘ridan-to‘g‘ri havola (kanalga joylang):\n${link}` : ''),
             adminKeyboard()
           );
         } catch (error) {
@@ -2041,8 +2312,10 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
             added_by: userId
           });
           resetSession(ctx);
+          const link = contentDeepLink(ctx, { code_norm: codeNorm });
           return ctx.reply(
-            `✅ Qismli ${config.item} yaratildi!\n\n${config.mainEmoji} Nomi: ${title}\n🔎 Kod: ${code}\n\nEndi “🎞 Qism qoʻshish” orqali qismlarini joylang.`,
+            `✅ Qismli ${config.item} yaratildi!\n\n${config.mainEmoji} Nomi: ${title}\n🔎 Kod: ${code}\n\nEndi “🎞 Qism qoʻshish” orqali qismlarini joylang. 1-qismni kiritgach, keyingi qismlarni ketma-ket yuborishingiz mumkin.` +
+              (link ? `\n\n🔗 Havola: ${link}` : ''),
             adminKeyboard()
           );
         } catch (error) {
@@ -2123,6 +2396,28 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         return ctx.reply('❌ Bunday aktiv qism topilmadi.', adminKeyboard());
       }
 
+      if (ctx.session.mode === 'edit_content') {
+        const [codeRaw, titleRaw, descRaw] = text.split('|').map((x) => x.trim());
+        const content = codeRaw
+          ? await Content.findOne({ bot_key: config.key, code_norm: normalizeCode(codeRaw), is_active: true })
+          : null;
+        if (!content) return ctx.reply(`❌ “${codeRaw || ''}” kodli ${config.item} topilmadi. Aniq kodni yuboring yoki /cancel.`);
+        const patch = {};
+        if (titleRaw && titleRaw !== '-') {
+          if (titleRaw.length < 2) return ctx.reply('❌ Nom juda qisqa.');
+          patch.title = titleRaw;
+          patch.title_norm = normalizeTitle(titleRaw);
+        }
+        if (descRaw !== undefined && descRaw !== '-') patch.description = descRaw || '';
+        if (!Object.keys(patch).length) return ctx.reply('❌ O‘zgartirish yo‘q. Format: kod | yangi nom | yangi tavsif');
+        await Content.updateOne({ _id: content._id }, { $set: patch });
+        if (patch.title) {
+          await ContentPart.updateMany({ bot_key: config.key, content_id: content._id }, { $set: { content_title: patch.title } });
+        }
+        resetSession(ctx);
+        return ctx.reply(`✅ Yangilandi: ${patch.title || content.title} (kod: ${content.code})`, adminKeyboard());
+      }
+
       if (ctx.session.mode === 'broadcasting') {
         const result = await broadcastMessage(ctx, adminKeyboard);
         resetSession(ctx);
@@ -2135,7 +2430,10 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
     const matches = await findContentsByQuery(text, 8);
     if (!matches.length) {
-      return ctx.reply(`❌ Bunday ${config.item} topilmadi.\n\n${config.itemTitle} nomi yoki kodini tekshirib qayta yuboring. Masalan: ${config.codeExamples}`);
+      return ctx.reply(
+        `❌ Bunday ${config.item} topilmadi.\n\n${config.itemTitle} nomi yoki kodini tekshirib qayta yuboring. Masalan: ${config.codeExamples}\n\n💡 ${USER_BTN.top} yoki ${USER_BTN.fresh} bo‘limini ham ko‘ring.`,
+        isAdmin(userId) ? undefined : userKeyboard()
+      );
     }
 
     if (matches.length > 1) return showContentChoices(ctx, matches);
@@ -2191,9 +2489,16 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
           added_by: ctx.from.id
         });
 
-        resetSession(ctx);
+        // Ketma-ket yuklash: keyingi bo‘sh qism raqamiga avtomatik o‘tamiz.
+        let nextNo = temp.part_no + 1;
+        while (nextNo < temp.part_no + 500 && await ContentPart.exists({ bot_key: config.key, content_id: content._id, part_no: nextNo, is_active: true })) {
+          nextNo += 1;
+        }
+        ctx.session.tempPart = { ...temp, part_no: nextNo, title: `${nextNo}-qism` };
+        ctx.session.mode = 'part_wait_message';
         return ctx.reply(
-          `✅ Qism saqlandi!\n\n${config.mainEmoji} ${config.itemTitle}: ${content.title}\n🎞 Qism: ${temp.part_no}\n🔎 Kod: ${content.code}`,
+          `✅ Qism saqlandi!\n\n${config.mainEmoji} ${config.itemTitle}: ${content.title}\n🎞 Qism: ${temp.part_no}\n🔎 Kod: ${content.code}\n\n` +
+            `➡️ Endi ${nextNo}-qismni yuboring yoki forward qiling (ketma-ket yuklash).\n✅ Tugatish: /cancel yoki “🏠 Bosh menyu”`,
           adminKeyboard()
         );
       } catch (error) {
@@ -2316,6 +2621,8 @@ function attachGlobalSubscriptionGate(bot, config, adminIds = []) {
   if (!config.managed || config.engine === 'giveaway') return;
   bot.use(async (ctx, next) => {
     if (!ctx.from) return next();
+    // Inline qidiruvda chat yo‘q: javob faqat botga deep link beradi, obuna bot ichida tekshiriladi.
+    if (!ctx.chat) return next();
     // Global obuna faqat botning private chatida tekshiriladi.
     // Kanal/guruhga odam qo‘shilganda yoki guruhdagi oddiy xabarlarda ogohlantirish yuborilmaydi.
     if (ctx.chat && ctx.chat.type !== 'private') return next();
@@ -2530,11 +2837,21 @@ const videoDownloadRuntime = {
 
 function videoPlatformFromUrl(rawUrl) {
   try {
-    const parsed = new URL(String(rawUrl || '').trim());
+    const parsed = new NodeURL(String(rawUrl || '').trim());
     const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
     if (host === 'youtu.be' || host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) return 'YouTube';
     if (host.endsWith('instagram.com')) return 'Instagram';
     if (host.endsWith('tiktok.com') || host === 'vm.tiktok.com' || host === 'vt.tiktok.com') return 'TikTok';
+    if (host.endsWith('facebook.com') || host === 'fb.watch' || host === 'fb.com') return 'Facebook';
+    if (host === 'x.com' || host.endsWith('.x.com') || host.endsWith('twitter.com')) return 'X (Twitter)';
+    if (host.endsWith('pinterest.com') || host === 'pin.it') return 'Pinterest';
+    if (host.endsWith('threads.net') || host.endsWith('threads.com')) return 'Threads';
+    if (host.endsWith('snapchat.com')) return 'Snapchat';
+    if (host.endsWith('likee.video') || host === 'l.likee.video') return 'Likee';
+    if (host.endsWith('vk.com') || host.endsWith('vkvideo.ru')) return 'VK';
+    if (host.endsWith('vimeo.com')) return 'Vimeo';
+    if (host.endsWith('reddit.com') || host === 'redd.it') return 'Reddit';
+    if (host.endsWith('dailymotion.com') || host === 'dai.ly') return 'Dailymotion';
     return '';
   } catch (_) {
     return '';
@@ -2547,12 +2864,23 @@ function normalizeVideoUrl(value) {
   const platform = videoPlatformFromUrl(raw);
   if (!platform) return '';
   try {
-    const parsed = new URL(raw);
+    const parsed = new NodeURL(raw);
     parsed.hash = '';
     return parsed.toString();
   } catch (_) {
     return raw;
   }
+}
+
+// Matn ichidan birinchi qo‘llab-quvvatlanadigan linkni topadi (caption, izoh va h.k. bilan yuborilsa ham).
+function extractVideoUrl(text) {
+  const matches = String(text || '').match(/https?:\/\/[^\s<>"']+/gi) || [];
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[),.!?]+$/, '');
+    const url = normalizeVideoUrl(cleaned);
+    if (url) return url;
+  }
+  return '';
 }
 
 function sanitizeFileName(name, fallback = 'video') {
@@ -2659,7 +2987,7 @@ function downloadFile(url, targetPath, redirects = 0) {
     const req = https.get(url, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects < 5) {
         res.resume();
-        const nextUrl = new URL(res.headers.location, url).toString();
+        const nextUrl = new NodeURL(res.headers.location, url).toString();
         return resolve(downloadFile(nextUrl, targetPath, redirects + 1));
       }
       if (res.statusCode !== 200) {
@@ -2731,6 +3059,8 @@ async function readVideoInfo(url) {
     title: sanitizeFileName(info.title || 'video'),
     duration: Number(info.duration || 0),
     uploader: info.uploader || info.channel || info.creator || '',
+    thumbnail: typeof info.thumbnail === 'string' && /^https:\/\//i.test(info.thumbnail) ? info.thumbnail : '',
+    view_count: Number(info.view_count || 0),
     webpage_url: info.webpage_url || url,
     formats: Array.isArray(info.formats) ? info.formats : []
   };
@@ -2845,8 +3175,41 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
 
   function adminKeyboard() {
     return Markup.keyboard(commonAdminRows([
-      ['🧹 Eski yuklashlarni tozalash']
+      ['🧹 Eski yuklashlarni tozalash', '⚙️ Kunlik limit'],
+      ['🗑 Keshni tozalash']
     ])).resize().oneTime(false);
+  }
+
+  const SUPPORTED_PLATFORMS_TEXT = 'YouTube, Instagram, TikTok, Facebook, X (Twitter), Pinterest, Threads, Snapchat, Likee, VK, Vimeo, Reddit, Dailymotion';
+
+  async function dailyLimit() {
+    const st = await getBotSettings(config.key).catch(() => ({}));
+    return Math.max(0, Number(st?.daily_limit || 0));
+  }
+
+  async function usedToday(userId) {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    return VideoDownload.countDocuments({ bot_key: config.key, user_id: userId, status: 'success', createdAt: { $gte: since } });
+  }
+
+  async function findCachedFile(url, type, quality) {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return null;
+    return VideoDownload.findOne({
+      bot_key: config.key,
+      url,
+      media_type: type === 'audio' ? 'audio' : 'video',
+      quality: String(quality),
+      status: 'success',
+      file_id: { $exists: true, $ne: null }
+    }).sort({ createdAt: -1 });
+  }
+
+  function sentFileId(message) {
+    if (!message) return { id: null, kind: null };
+    if (message.video) return { id: message.video.file_id, kind: 'video' };
+    if (message.audio) return { id: message.audio.file_id, kind: 'audio' };
+    if (message.document) return { id: message.document.file_id, kind: 'document' };
+    return { id: null, kind: null };
   }
 
   function userStartKeyboard() {
@@ -2869,8 +3232,9 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
     if (!ok) return utils.sendSubscriptionWarning(ctx);
     return ctx.reply(
       `📥 Video Downloader botiga xush kelibsiz!\n\n` +
-        `YouTube / Instagram / TikTok public video linkini yuboring.\n\n` +
+        `Video linkini yuboring:\n${SUPPORTED_PLATFORMS_TEXT}\n\n` +
         `✅ Formatlar: 360p, 480p, 720p, 1080p, best\n` +
+        `⚡ Avval yuklangan videolar soniyalar ichida qayta yuboriladi\n` +
         `🎧 Audio: m4a/webm yoki MP3 (serverda ffmpeg bo‘lsa)\n\n` +
         publicDownloadRulesText(),
       userStartKeyboard()
@@ -2889,10 +3253,10 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
   }
 
   async function sendFormatMenu(ctx, rawUrl) {
-    const url = normalizeVideoUrl(rawUrl);
+    const url = extractVideoUrl(rawUrl);
     if (!url) {
       return ctx.reply(
-        '❌ Link noto‘g‘ri yoki qo‘llab-quvvatlanmaydi. Faqat YouTube, Instagram va TikTok public link yuboring.\n\nMisol:\nhttps://youtu.be/...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...'
+        `❌ Link noto‘g‘ri yoki qo‘llab-quvvatlanmaydi.\n\nQo‘llab-quvvatlanadi: ${SUPPORTED_PLATFORMS_TEXT}\n\nMisol:\nhttps://youtu.be/...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...`
       );
     }
 
@@ -2905,14 +3269,20 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
       const durationText = info.duration ? `⏱ ${Math.floor(info.duration / 60)}:${String(Math.floor(info.duration % 60)).padStart(2, '0')}` : '⏱ —';
       const uploaderText = info.uploader ? `\n👤 ${info.uploader}` : '';
       try { await ctx.deleteMessage(loading.message_id); } catch (_) {}
-      return ctx.reply(
+      const viewsText = info.view_count ? `\n👁 ${info.view_count.toLocaleString('uz-UZ')} marta ko‘rilgan` : '';
+      const menuText =
         `✅ Video topildi\n\n` +
-          `🌐 Platforma: ${platform}\n` +
-          `🎬 Nomi: ${info.title}\n` +
-          `${durationText}${uploaderText}\n\n` +
-          `Qaysi formatda yuklaymiz?`,
-        Markup.inlineKeyboard(availableQualityButtons(info))
-      );
+        `🌐 Platforma: ${platform}\n` +
+        `🎬 Nomi: ${info.title}\n` +
+        `${durationText}${uploaderText}${viewsText}\n\n` +
+        `Qaysi formatda yuklaymiz?`;
+      const keyboard = Markup.inlineKeyboard(availableQualityButtons(info));
+      if (info.thumbnail) {
+        try {
+          return await ctx.replyWithPhoto(info.thumbnail, { caption: menuText.slice(0, 1024), ...keyboard });
+        } catch (_) {}
+      }
+      return ctx.reply(menuText, keyboard);
     } catch (error) {
       try { await ctx.deleteMessage(loading.message_id); } catch (_) {}
       await logDownload(ctx, { url, platform, status: 'failed', error: String(error.message || error).slice(0, 500) });
@@ -2934,11 +3304,40 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
       return ctx.reply('⏳ Sizda bitta yuklash jarayoni allaqachon ishlayapti. Tugagach keyingisini yuboring.');
     }
 
+    const platform = videoPlatformFromUrl(url);
+    let qualityLabel = type === 'audio' ? (quality === 'mp3' ? 'MP3 audio' : 'Audio') : (quality === 'best' ? 'Best video' : `${quality}p video`);
+
+    if (!utils.isAdmin(userId)) {
+      const limit = await dailyLimit();
+      if (limit > 0 && await usedToday(userId) >= limit) {
+        return ctx.reply(`⏳ Kunlik limit tugadi: 24 soatda ${limit} ta yuklash mumkin. Birozdan keyin qayta urinib ko‘ring.`);
+      }
+    }
+
+    // ⚡ Kesh: shu link+format oldin yuklangan bo‘lsa, Telegram file_id orqali darrov yuboramiz.
+    const cached = await findCachedFile(url, type, quality).catch(() => null);
+    if (cached?.file_id) {
+      const caption = `📥 ${sanitizeFileName(cached.title || title)}\n🌐 ${platform}\n⚙️ ${qualityLabel}\n⚡ Tezkor (keshdan)`;
+      try {
+        if (cached.file_kind === 'video') await ctx.replyWithVideo(cached.file_id, { caption, supports_streaming: true });
+        else if (cached.file_kind === 'audio') await ctx.replyWithAudio(cached.file_id, { caption });
+        else await ctx.replyWithDocument(cached.file_id, { caption });
+        await logDownload(ctx, {
+          url, platform, media_type: type === 'audio' ? 'audio' : 'video', quality: String(quality),
+          title: cached.title || title, file_size: cached.file_size, status: 'success', from_cache: true
+        });
+        ctx.session.downloadUrl = null;
+        ctx.session.downloadTitle = null;
+        return;
+      } catch (error) {
+        console.warn(`${config.title} kesh file_id ishlamadi, qayta yuklanadi:`, error.message);
+        await VideoDownload.updateMany({ bot_key: config.key, file_id: cached.file_id }, { $unset: { file_id: 1 } }).catch(() => null);
+      }
+    }
+
     const lockKey = `${config.key}:${userId}`;
     videoDownloadRuntime.activeUsers.set(lockKey, Date.now());
     let downloaded = null;
-    const platform = videoPlatformFromUrl(url);
-    let qualityLabel = type === 'audio' ? (quality === 'mp3' ? 'MP3 audio' : 'Audio') : (quality === 'best' ? 'Best video' : `${quality}p video`);
     const progress = await ctx.reply(`⏬ ${qualityLabel} tayyorlanmoqda...\n\nTelegram limit: ${VIDEO_DL_MAX_MB} MB. Katta video bo‘lsa pastroq format tanlang.`);
 
     try {
@@ -2946,20 +3345,22 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
       if (type === 'audio' && quality === 'mp3' && !downloaded.ffmpegReady) qualityLabel = 'Audio (serverda ffmpeg yo‘q, MP3 o‘rniga original audio)';
       const caption = `📥 ${sanitizeFileName(title)}\n🌐 ${platform}\n⚙️ ${qualityLabel}\n📦 ${formatBytes(downloaded.stat.size)}\n\n${publicDownloadRulesText()}`;
       const ext = path.extname(downloaded.name).toLowerCase();
-      const fileStream = { source: downloaded.path, filename: downloaded.name };
+      const fileStream = () => ({ source: downloaded.path, filename: downloaded.name });
+      let sent = null;
 
       if (downloaded.mediaType === 'audio' && ['.mp3', '.m4a', '.webm', '.opus', '.ogg'].includes(ext)) {
-        await ctx.replyWithAudio(fileStream, { caption: caption.slice(0, 1024), title: sanitizeFileName(title) }).catch(async () => {
-          await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+        sent = await ctx.replyWithAudio(fileStream(), { caption: caption.slice(0, 1024), title: sanitizeFileName(title) }).catch(async () => {
+          return ctx.replyWithDocument(fileStream(), { caption: caption.slice(0, 1024) });
         });
       } else if (downloaded.mediaType === 'video' && ['.mp4', '.mov', '.m4v', '.webm'].includes(ext)) {
-        await ctx.replyWithVideo(fileStream, { caption: caption.slice(0, 1024), supports_streaming: true }).catch(async () => {
-          await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+        sent = await ctx.replyWithVideo(fileStream(), { caption: caption.slice(0, 1024), supports_streaming: true }).catch(async () => {
+          return ctx.replyWithDocument(fileStream(), { caption: caption.slice(0, 1024) });
         });
       } else {
-        await ctx.replyWithDocument(fileStream, { caption: caption.slice(0, 1024) });
+        sent = await ctx.replyWithDocument(fileStream(), { caption: caption.slice(0, 1024) });
       }
 
+      const sentFile = sentFileId(sent);
       await logDownload(ctx, {
         url,
         platform,
@@ -2967,6 +3368,8 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
         quality: String(quality),
         title,
         file_size: downloaded.stat.size,
+        file_id: sentFile.id,
+        file_kind: sentFile.kind,
         status: 'success'
       });
       try { await ctx.deleteMessage(progress.message_id); } catch (_) {}
@@ -2996,7 +3399,7 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
   bot.start(showStart);
   bot.command('help', async (ctx) => ctx.reply(
     `📥 Yordam\n\n` +
-      `1) YouTube/Instagram/TikTok link yuboring.\n` +
+      `1) Video linkini yuboring (${SUPPORTED_PLATFORMS_TEXT}).\n` +
       `2) 480p/720p/1080p yoki audio tanlang.\n` +
       `3) Bot faylni Telegramga yuboradi.\n\n` +
       `Buyruqlar: /start, /help, /cancel\n\n` +
@@ -3028,8 +3431,33 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
     return ctx.reply(`✅ ${count} ta eski vaqtinchalik papka tozalandi.`, adminKeyboard());
   });
 
+  bot.hears('⚙️ Kunlik limit', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'vdl_set_limit';
+    const current = await dailyLimit();
+    return ctx.reply(`⚙️ Har bir user 24 soatda nechta fayl yuklay olsin?\n\nHozir: ${current || 'cheksiz'}\n0 = cheksiz. Masalan: 20\n\n❌ Bekor qilish: /cancel`);
+  });
+
+  bot.hears('🗑 Keshni tozalash', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const res = await VideoDownload.updateMany({ bot_key: config.key, file_id: { $exists: true } }, { $unset: { file_id: 1 } });
+    return ctx.reply(`✅ Kesh tozalandi: ${res.modifiedCount || 0} ta yozuv.`, adminKeyboard());
+  });
+
   bot.hears('📊 Statistika', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const [today, cacheHits, byPlatform] = await Promise.all([
+      VideoDownload.countDocuments({ bot_key: config.key, status: 'success', createdAt: { $gte: since24h } }),
+      VideoDownload.countDocuments({ bot_key: config.key, status: 'success', from_cache: true }),
+      VideoDownload.aggregate([
+        { $match: { bot_key: config.key, status: 'success' } },
+        { $group: { _id: '$platform', n: { $sum: 1 } } },
+        { $sort: { n: -1 } },
+        { $limit: 8 }
+      ])
+    ]);
+    const platformLines = byPlatform.length ? byPlatform.map((x) => `• ${x._id || '—'}: ${x.n}`).join('\n') : '—';
     const [users, active, blocked, subs, total, success, failed, audio, video] = await Promise.all([
       User.countDocuments({ bot_key: config.key }),
       User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }),
@@ -3051,12 +3479,15 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
         `✅ Muvaffaqiyatli: ${success}\n` +
         `❌ Xato: ${failed}\n` +
         `🎬 Video: ${video}\n` +
-        `🎧 Audio: ${audio}`
+        `🎧 Audio: ${audio}\n` +
+        `📅 Oxirgi 24 soat: ${today}\n` +
+        `⚡ Keshdan yuborilgan: ${cacheHits}\n\n` +
+        `🌐 Platformalar:\n${platformLines}`
     );
   });
 
   registerCommonAdminHandlers(bot, config, utils, adminKeyboard, {
-    onSubscriptionSuccess: (ctx) => ctx.reply('✅ Obuna tasdiqlandi! Endi YouTube/Instagram/TikTok link yuboring.')
+    onSubscriptionSuccess: (ctx) => ctx.reply('✅ Obuna tasdiqlandi! Endi video linkini yuboring.')
   });
 
   bot.action(/^vdl:video:(360|480|720|1080|best)$/, async (ctx) => handleDownloadChoice(ctx, 'video', ctx.match[1]));
@@ -3081,7 +3512,17 @@ function createVideoDownloaderBot(config, tokenOverride = null, adminIdsOverride
         ctx.session.mode = null;
         return r;
       }
+      if (ctx.session.mode === 'vdl_set_limit') {
+        const n = Number(text);
+        if (!Number.isFinite(n) || n < 0) return ctx.reply('❌ Raqam kiriting. 0 = cheksiz.');
+        await updateBotSettings(config.key, { daily_limit: Math.floor(n) });
+        ctx.session.mode = null;
+        return ctx.reply(`✅ Kunlik limit: ${Math.floor(n) || 'cheksiz'}`, adminKeyboard());
+      }
     }
+
+    // Guruhlarda faqat link bor xabarlarga javob beramiz, oddiy suhbatga aralashmaymiz.
+    if (ctx.chat?.type !== 'private' && !extractVideoUrl(text)) return;
 
     const ok = await utils.checkAllSubscriptions(ctx.from.id);
     if (!ok && !utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx);
@@ -3109,60 +3550,293 @@ function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
   const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
   if (!hasUsableToken(token)) return null;
   const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
-  const bot = createBaseBot(token, config, adminIds);
+  const bot = createBaseBot(token, config, adminIds, { vipRequestId: null });
   const utils = createSharedUtils(bot, config, adminIds);
+
+  const USER_BTN = {
+    join: '💎 VIP obuna olish',
+    mine: '👤 Mening obunam',
+    plans: '💰 Tariflar',
+    help: '☎️ Admin bilan aloqa'
+  };
 
   function adminKeyboard() {
     return Markup.keyboard(commonAdminRows([
       ['⚙️ VIP sozlamalar', '📋 VIP soʻrovlar'],
-      ['👥 VIP aʼzolar', '💳 Toʻlov matni']
+      ['👥 VIP aʼzolar', '💳 Toʻlov matni'],
+      ['💎 Tariflar sozlash', '⏰ Tugayotganlar'],
+      ['➕ Qoʻlda VIP berish', '➖ VIPdan chiqarish']
     ])).resize().oneTime(false);
+  }
+
+  function userKeyboard() {
+    return Markup.keyboard([[USER_BTN.join, USER_BTN.mine], [USER_BTN.plans, USER_BTN.help]]).resize().oneTime(false);
+  }
+
+  function contactUrl(st) {
+    return `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@', '')}`;
+  }
+
+  // Tariflar: settings.plans = [{ title, days, price }]. Bo‘sh bo‘lsa eski yagona tarif ishlaydi.
+  function getPlans(st) {
+    const list = Array.isArray(st.plans) ? st.plans.filter((p) => p && Number(p.days) > 0 && p.title) : [];
+    if (list.length) return list.slice(0, 8);
+    return [{ title: `${Number(st.access_days || 30)} kunlik VIP`, days: Number(st.access_days || 30), price: '' }];
+  }
+
+  function planLabel(p) {
+    return `${p.title} — ${p.days} kun${p.price ? ` — ${p.price}` : ''}`;
+  }
+
+  function daysLeft(date) {
+    if (!date) return 0;
+    return Math.max(0, Math.ceil((new Date(date).getTime() - Date.now()) / (24 * 60 * 60 * 1000)));
   }
 
   async function settingsText() {
     const st = await getBotSettings(config.key);
+    const plans = getPlans(st);
     return `⚙️ VIP SOZLAMALAR\n\n` +
       `🔐 Maxfiy kanal/guruh: ${st.vip_chat || 'kiritilmagan'}\n` +
       `💰 Narx matni: ${st.price_text || 'kiritilmagan'}\n` +
-      `⏳ Dostup muddati: ${Number(st.access_days || 30)} kun\n` +
+      `⏳ Standart dostup: ${Number(st.access_days || 30)} kun\n` +
       `🔗 Link yashash muddati: ${Number(st.link_minutes || 30)} daqiqa\n` +
-      `👨‍💻 To‘lov/admin username: ${st.admin_contact || OWNER_USERNAME}\n\n` +
+      `👨‍💻 To‘lov/admin username: ${st.admin_contact || OWNER_USERNAME}\n` +
+      `🔔 Eslatma: muddat tugashidan 3 kun va 1 kun oldin\n\n` +
+      `💎 Tariflar:\n${plans.map((p, i) => `${i + 1}. ${planLabel(p)}`).join('\n')}\n\n` +
       `Sozlash uchun tugmalardan foydalaning.`;
   }
 
+  function plansKeyboard(st, prefix = 'vip:plan') {
+    const plans = getPlans(st);
+    const rows = plans.map((p, i) => [Markup.button.callback(`💎 ${planLabel(p)}`, `${prefix}:${i}`)]);
+    rows.push([Markup.button.url('☎️ Admin bilan toʻlovni kelishish', contactUrl(st))]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  async function kickFromVip(chat, userId) {
+    if (!chat) return;
+    await bot.telegram.banChatMember(chat, userId);
+    await bot.telegram.unbanChatMember(chat, userId, { only_if_banned: true }).catch(() => null);
+  }
+
   async function expireVipMembers() {
+    if (!(mongoReady && mongoose.connection.readyState === 1)) return;
     const expired = await VipMember.find({ bot_key: config.key, is_active: true, access_until: { $lte: new Date() } }).limit(50);
     for (const member of expired) {
       try {
-        if (member.channel_chat) {
-          await bot.telegram.banChatMember(member.channel_chat, member.user_id);
-          await bot.telegram.unbanChatMember(member.channel_chat, member.user_id, { only_if_banned: true }).catch(() => null);
-        }
+        await kickFromVip(member.channel_chat, member.user_id);
       } catch (error) {
         console.error(`${config.title} VIP chiqarish xatosi:`, error.message);
       }
       member.is_active = false;
       member.removed_at = new Date();
       await member.save();
-      try { await bot.telegram.sendMessage(member.user_id, '⏳ VIP obunangiz muddati tugadi. Uzaytirish uchun admin bilan bog‘laning.'); } catch (_) {}
+      try {
+        await bot.telegram.sendMessage(
+          member.user_id,
+          '⏳ VIP obunangiz muddati tugadi. Qayta ulanish uchun tarifni tanlang.',
+          Markup.inlineKeyboard([[Markup.button.callback('🔄 Obunani yangilash', 'vip:renew')]])
+        );
+      } catch (_) {}
+    }
+
+    // Muddat tugashidan oldin eslatma: 3 kun (stage 1) va 1 kun (stage 2) qolganda.
+    const soon = await VipMember.find({
+      bot_key: config.key,
+      is_active: true,
+      access_until: { $gt: new Date(), $lte: nowPlusDays(3) }
+    }).limit(100);
+    for (const member of soon) {
+      const left = daysLeft(member.access_until);
+      const sameWindow = member.reminder_for && new Date(member.reminder_for).getTime() === new Date(member.access_until).getTime();
+      const stage = sameWindow ? Number(member.reminder_stage || 0) : 0;
+      const needStage = left <= 1 ? 2 : 1;
+      if (stage >= needStage) continue;
+      try {
+        await bot.telegram.sendMessage(
+          member.user_id,
+          `🔔 VIP obunangiz tugashiga ${left} kun qoldi (${formatDate(member.access_until)}).\n\nUzilib qolmaslik uchun hozir uzaytiring — qolgan kunlaringiz yo‘qolmaydi.`,
+          Markup.inlineKeyboard([[Markup.button.callback('🔄 Uzaytirish', 'vip:renew')]])
+        );
+      } catch (_) {}
+      member.reminder_for = member.access_until;
+      member.reminder_stage = needStage;
+      await member.save().catch(() => null);
     }
   }
   const timer = setInterval(() => expireVipMembers().catch((e) => console.error('VIP expire xatosi:', e.message)), 10 * 60 * 1000);
   timer.unref?.();
 
+  async function sendStart(ctx) {
+    const st = await getBotSettings(config.key);
+    const member = await VipMember.findOne({ bot_key: config.key, user_id: ctx.from.id, is_active: true });
+    const status = member
+      ? `\n\n✅ Sizda aktiv VIP bor: ${formatDate(member.access_until)} gacha (${daysLeft(member.access_until)} kun qoldi).`
+      : '';
+    return ctx.reply(
+      `💎 VIP obuna botiga xush kelibsiz!\n\n${st.price_text || 'VIP kanalga kirish uchun tarifni tanlang. To‘lovni tasdiqlagach bot sizga shaxsiy, bir martalik maxfiy link beradi.'}${status}`,
+      userKeyboard()
+    ).then(() => ctx.reply('👇 Tarifni tanlang:', plansKeyboard(st)));
+  }
+
+  async function createRequest(ctx, planIndex, isRenewal = false) {
+    const st = await getBotSettings(config.key);
+    const plans = getPlans(st);
+    const plan = plans[Number(planIndex)] || plans[0];
+
+    // Bir xil tarif uchun 10 daqiqa ichida qayta-qayta so‘rov yaratilmaydi.
+    const recent = await VipRequest.findOne({
+      bot_key: config.key,
+      user_id: ctx.from.id,
+      status: 'pending',
+      plan_days: plan.days,
+      createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) }
+    });
+    const activeMember = await VipMember.findOne({ bot_key: config.key, user_id: ctx.from.id, is_active: true });
+    const req = recent || await VipRequest.create({
+      bot_key: config.key,
+      user_id: ctx.from.id,
+      username: ctx.from.username || null,
+      first_name: ctx.from.first_name || null,
+      secret_code: makeSecretCode('VIP'),
+      plan_title: plan.title,
+      plan_days: plan.days,
+      plan_price: plan.price || '',
+      is_renewal: Boolean(isRenewal || activeMember)
+    });
+
+    if (!recent) {
+      const adminText =
+        `💎 YANGI VIP SOʻROV${req.is_renewal ? ' (UZAYTIRISH)' : ''}\n\n` +
+        `👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@' + ctx.from.username : ''}\n` +
+        `🆔 User ID: ${ctx.from.id}\n` +
+        `💎 Tarif: ${planLabel(plan)}\n` +
+        `🔐 Maxfiy shifr: ${req.secret_code}\n\n` +
+        `Foydalanuvchi to‘lov chekini shu bot orqali yuboradi.`;
+      for (const id of adminIds) {
+        try {
+          await bot.telegram.sendMessage(id, adminText, Markup.inlineKeyboard([[
+            Markup.button.callback('✅ Tasdiqlash', `vip:approve:${String(req._id)}`),
+            Markup.button.callback('❌ Rad etish', `vip:reject:${String(req._id)}`)
+          ]]));
+        } catch (_) {}
+      }
+    }
+
+    ctx.session.mode = 'vip_receipt';
+    ctx.session.vipRequestId = String(req._id);
+    return ctx.reply(
+      `✅ So‘rov qabul qilindi!\n\n` +
+        `💎 Tarif: ${planLabel(plan)}\n` +
+        `🔐 Maxfiy shifringiz: ${req.secret_code}\n\n` +
+        `${st.price_text ? `💳 ${st.price_text}\n\n` : ''}` +
+        `📸 To‘lov qilgach, chek (skrinshot) rasmini shu yerga yuboring — admin tezroq tasdiqlaydi.\n` +
+        `Admin bilan yozishsangiz, shu shifrni ayting.`,
+      Markup.inlineKeyboard([[Markup.button.url('💳 Admin bilan toʻlov qilish', contactUrl(st))]])
+    );
+  }
+
+  async function grantAccess(req, adminId) {
+    const st = await getBotSettings(config.key);
+    const chat = st.vip_chat;
+    if (!chat) throw new Error('Avval “⚙️ VIP sozlamalar”dan maxfiy kanal/guruhni kiriting.');
+    const days = Number(req.plan_days || st.access_days || 30);
+    const existing = await VipMember.findOne({ bot_key: config.key, user_id: req.user_id, channel_chat: chat });
+    // Aktiv obuna bo‘lsa, qolgan kunlar ustiga qo‘shiladi.
+    const base = existing && existing.is_active && existing.access_until && new Date(existing.access_until) > new Date()
+      ? new Date(existing.access_until)
+      : new Date();
+    const accessUntil = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
+
+    let inviteLink = '';
+    let linkExpires = null;
+    const alreadyInside = existing && existing.is_active;
+    if (!alreadyInside) {
+      const expireDate = Math.floor(nowPlusMinutes(Number(st.link_minutes || 30)).getTime() / 1000);
+      const invite = await bot.telegram.createChatInviteLink(chat, {
+        expire_date: expireDate,
+        member_limit: 1,
+        creates_join_request: false,
+        name: `VIP ${req.user_id} ${req.secret_code}`.slice(0, 32)
+      });
+      inviteLink = invite.invite_link;
+      linkExpires = new Date(expireDate * 1000);
+    }
+
+    req.status = 'approved';
+    req.approved_by = adminId;
+    req.invite_link = inviteLink || req.invite_link;
+    req.expires_at = linkExpires;
+    req.access_until = accessUntil;
+    await req.save();
+
+    await VipMember.updateOne(
+      { bot_key: config.key, user_id: req.user_id, channel_chat: chat },
+      {
+        $set: {
+          username: req.username,
+          first_name: req.first_name,
+          access_until: accessUntil,
+          is_active: true,
+          removed_at: null,
+          last_request_id: req._id,
+          reminder_stage: 0,
+          reminder_for: null
+        },
+        $inc: { total_paid_periods: 1 }
+      },
+      { upsert: true }
+    );
+
+    const userText = inviteLink
+      ? `✅ VIP ruxsat tasdiqlandi!\n\n🔗 Shaxsiy maxfiy link (faqat 1 kishi uchun): ${inviteLink}\n⏳ Link amal qiladi: ${formatDate(linkExpires)} gacha\n💎 Dostup: ${formatDate(accessUntil)} gacha`
+      : `✅ VIP obunangiz uzaytirildi!\n\n💎 Yangi muddat: ${formatDate(accessUntil)} gacha (${daysLeft(accessUntil)} kun).`;
+    await bot.telegram.sendMessage(req.user_id, userText).catch(() => null);
+    return { accessUntil, inviteLink };
+  }
+
   bot.start(async (ctx) => {
     await utils.saveUser(ctx, true);
+    ctx.session.mode = null;
     if (utils.isAdmin(ctx.from.id)) return ctx.reply(`💎 ${config.title} admin paneli`, adminKeyboard());
     const ok = await utils.checkAllSubscriptions(ctx.from.id);
     if (!ok) return utils.sendSubscriptionWarning(ctx);
+    return sendStart(ctx);
+  });
+
+  bot.command('help', async (ctx) => ctx.reply(
+    `ℹ️ YORDAM\n\n1) “${USER_BTN.join}” → tarifni tanlang.\n2) To‘lov qiling va chek rasmini botga yuboring.\n3) Admin tasdiqlagach shaxsiy link keladi.\n4) Muddat tugashidan oldin bot eslatadi, “Uzaytirish” bilan davom ettirasiz.`,
+    utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()
+  ));
+
+  bot.hears([USER_BTN.join, USER_BTN.plans], async (ctx) => {
+    await utils.saveUser(ctx);
+    const ok = utils.isAdmin(ctx.from.id) || await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
     const st = await getBotSettings(config.key);
-    return ctx.reply(
-      `💎 VIP obuna botiga xush kelibsiz!\n\n${st.price_text || 'VIP kanalga kirish uchun so‘rov yuboring. Admin tasdiqlagach vaqtlik maxfiy link beriladi.'}`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback('💎 VIPga kirish uchun soʻrov', 'vip:req')],
-        [Markup.button.url('☎️ Admin bilan toʻlovni kelishish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@', '')}`)]
-      ])
-    );
+    return ctx.reply(`💎 TARIFLAR\n\n${getPlans(st).map((p, i) => `${i + 1}. ${planLabel(p)}`).join('\n')}\n\n👇 Tanlang:`, plansKeyboard(st));
+  });
+
+  bot.hears(USER_BTN.mine, async (ctx) => {
+    await utils.saveUser(ctx);
+    const member = await VipMember.findOne({ bot_key: config.key, user_id: ctx.from.id }).sort({ updatedAt: -1 });
+    const pending = await VipRequest.findOne({ bot_key: config.key, user_id: ctx.from.id, status: 'pending' }).sort({ createdAt: -1 });
+    const lines = ['👤 MENING OBUNAM', ''];
+    if (member && member.is_active) {
+      lines.push(`✅ Holat: aktiv`, `📅 Tugash: ${formatDate(member.access_until)}`, `⏳ Qoldi: ${daysLeft(member.access_until)} kun`, `🔁 To‘langan davrlar: ${member.total_paid_periods || 1}`);
+    } else if (member) {
+      lines.push('⛔ Holat: muddati tugagan', `📅 Tugagan: ${formatDate(member.access_until)}`);
+    } else {
+      lines.push('📭 Sizda hali VIP obuna yo‘q.');
+    }
+    if (pending) lines.push('', `⏳ Kutilayotgan so‘rov: ${pending.secret_code} (${pending.plan_title || 'VIP'})${pending.receipt_file_id ? ' — chek yuborilgan' : ' — chek yuborilmagan'}`);
+    return ctx.reply(lines.join('\n'), Markup.inlineKeyboard([[Markup.button.callback(member?.is_active ? '🔄 Uzaytirish' : '💎 Obuna olish', 'vip:renew')]]));
+  });
+
+  bot.hears(USER_BTN.help, async (ctx) => {
+    const st = await getBotSettings(config.key);
+    return ctx.reply(`☎️ Admin: ${st.admin_contact || OWNER_USERNAME}`, Markup.inlineKeyboard([[Markup.button.url('✍️ Yozish', contactUrl(st))]]));
   });
 
   bot.hears('⚙️ VIP sozlamalar', async (ctx) => {
@@ -3170,109 +3844,183 @@ function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
     return ctx.reply(await settingsText(), Markup.inlineKeyboard([
       [Markup.button.callback('🔐 Maxfiy kanal/guruh', 'vipset:chat')],
       [Markup.button.callback('💰 Narx/toʻlov matni', 'vipset:pay')],
-      [Markup.button.callback('⏳ Dostup kunlari', 'vipset:days'), Markup.button.callback('🔗 Link daqiqasi', 'vipset:link')],
-      [Markup.button.callback('👨‍💻 Admin username', 'vipset:admin')]
+      [Markup.button.callback('⏳ Standart kunlar', 'vipset:days'), Markup.button.callback('🔗 Link daqiqasi', 'vipset:link')],
+      [Markup.button.callback('👨‍💻 Admin username', 'vipset:admin'), Markup.button.callback('💎 Tariflar', 'vipset:plans')]
     ]));
   });
   bot.hears('💳 Toʻlov matni', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'vip_set_pay';
-    return ctx.reply('💳 Foydalanuvchiga ko‘rinadigan to‘lov/narx matnini yuboring.\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('💳 Foydalanuvchiga ko‘rinadigan to‘lov/narx matnini yuboring (karta raqami, summa va h.k.).\n\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('💎 Tariflar sozlash', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'vip_set_plans';
+    return ctx.reply(
+      '💎 Tariflarni yuboring. Har qatorda bitta tarif:\n\nNomi | kun | narx\n\nMisol:\nHaftalik | 7 | 15 000 so‘m\nOylik | 30 | 50 000 so‘m\n3 oylik | 90 | 120 000 so‘m\n\nTozalash uchun: -\n❌ Bekor qilish: /cancel'
+    );
   });
   bot.hears('📋 VIP soʻrovlar', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
-    const list = await VipRequest.find({ bot_key: config.key }).sort({ createdAt: -1 }).limit(15);
-    if (!list.length) return ctx.reply('📭 VIP so‘rovlar yo‘q.');
+    const list = await VipRequest.find({ bot_key: config.key, status: 'pending' }).sort({ createdAt: -1 }).limit(15);
+    if (!list.length) return ctx.reply('📭 Kutilayotgan VIP so‘rovlar yo‘q.');
     for (const r of list) {
-      await ctx.reply(`💎 VIP SOʻROV\n\n👤 ${r.first_name || ''} ${r.username ? '@' + r.username : ''}\n🆔 ${r.user_id}\n🔐 Shifr: ${r.secret_code}\n📌 Holat: ${r.status}\n🕒 ${formatDate(r.createdAt)}`,
-        Markup.inlineKeyboard([[Markup.button.callback('✅ Link berish', `vip:approve:${String(r._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(r._id)}`)]]));
+      const caption = `💎 VIP SOʻROV${r.is_renewal ? ' (uzaytirish)' : ''}\n\n👤 ${r.first_name || ''} ${r.username ? '@' + r.username : ''}\n🆔 ${r.user_id}\n💎 ${r.plan_title || 'VIP'} — ${r.plan_days || '?'} kun ${r.plan_price || ''}\n🔐 Shifr: ${r.secret_code}\n🧾 Chek: ${r.receipt_file_id ? 'bor' : 'yo‘q'}\n🕒 ${formatDate(r.createdAt)}`;
+      const kb = Markup.inlineKeyboard([[Markup.button.callback('✅ Tasdiqlash', `vip:approve:${String(r._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(r._id)}`)]]);
+      if (r.receipt_file_id && r.receipt_type === 'photo') await ctx.replyWithPhoto(r.receipt_file_id, { caption, ...kb }).catch(() => ctx.reply(caption, kb));
+      else if (r.receipt_file_id) await ctx.replyWithDocument(r.receipt_file_id, { caption, ...kb }).catch(() => ctx.reply(caption, kb));
+      else await ctx.reply(caption, kb);
     }
   });
   bot.hears('👥 VIP aʼzolar', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
-    const list = await VipMember.find({ bot_key: config.key, is_active: true }).sort({ access_until: 1 }).limit(30);
+    const [list, total] = await Promise.all([
+      VipMember.find({ bot_key: config.key, is_active: true }).sort({ access_until: 1 }).limit(40),
+      VipMember.countDocuments({ bot_key: config.key, is_active: true })
+    ]);
     if (!list.length) return ctx.reply('📭 Aktiv VIP aʼzolar yo‘q.');
-    return ctx.reply(`👥 VIP AʼZOLAR\n\n${list.map((m, i) => `${i + 1}. ${m.first_name || ''} ${m.username ? '@' + m.username : ''} — ${formatDate(m.access_until)}`).join('\n')}`);
+    return ctx.reply(`👥 VIP AʼZOLAR (${total} ta)\n\n${list.map((m, i) => `${i + 1}. ${m.first_name || ''} ${m.username ? '@' + m.username : ''} (${m.user_id}) — ${daysLeft(m.access_until)} kun`).join('\n')}`);
+  });
+  bot.hears('⏰ Tugayotganlar', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    const list = await VipMember.find({ bot_key: config.key, is_active: true, access_until: { $lte: nowPlusDays(7) } }).sort({ access_until: 1 }).limit(40);
+    if (!list.length) return ctx.reply('✅ Keyingi 7 kunda muddati tugaydigan aʼzo yo‘q.');
+    return ctx.reply(`⏰ 7 KUN ICHIDA TUGAYDI\n\n${list.map((m, i) => `${i + 1}. ${m.first_name || ''} ${m.username ? '@' + m.username : ''} (${m.user_id}) — ${formatDate(m.access_until)}`).join('\n')}`);
+  });
+  bot.hears('➕ Qoʻlda VIP berish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'vip_manual_add';
+    return ctx.reply('➕ Format:\nuser_id | kun\n\nMisol:\n123456789 | 30\n\nFoydalanuvchi avval botga /start bosgan bo‘lishi kerak.\n❌ Bekor qilish: /cancel');
+  });
+  bot.hears('➖ VIPdan chiqarish', async (ctx) => {
+    if (!utils.isAdmin(ctx.from.id)) return;
+    ctx.session.mode = 'vip_manual_remove';
+    return ctx.reply('➖ VIPdan chiqariladigan user ID yuboring.\n❌ Bekor qilish: /cancel');
   });
   bot.hears('📊 Statistika', async (ctx) => {
     if (!utils.isAdmin(ctx.from.id)) return;
-    const [users, active, blocked, reqs, pending, members, subs] = await Promise.all([
-      User.countDocuments({ bot_key: config.key }), User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }), User.countDocuments({ bot_key: config.key, is_blocked: true }),
-      VipRequest.countDocuments({ bot_key: config.key }), VipRequest.countDocuments({ bot_key: config.key, status: 'pending' }), VipMember.countDocuments({ bot_key: config.key, is_active: true }), Subscription.countDocuments({ bot_key: config.key })
+    const [users, active, blocked, reqs, pending, approved, members, expiredMembers, subs] = await Promise.all([
+      User.countDocuments({ bot_key: config.key }),
+      User.countDocuments({ bot_key: config.key, is_blocked: { $ne: true } }),
+      User.countDocuments({ bot_key: config.key, is_blocked: true }),
+      VipRequest.countDocuments({ bot_key: config.key }),
+      VipRequest.countDocuments({ bot_key: config.key, status: 'pending' }),
+      VipRequest.countDocuments({ bot_key: config.key, status: 'approved' }),
+      VipMember.countDocuments({ bot_key: config.key, is_active: true }),
+      VipMember.countDocuments({ bot_key: config.key, is_active: false }),
+      Subscription.countDocuments({ bot_key: config.key })
     ]);
-    return ctx.reply(`📊 VIP BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n📋 So‘rovlar: ${reqs}\n⏳ Kutilayotgan: ${pending}\n💎 Aktiv VIP: ${members}\n🔒 Majburiy obuna: ${subs}`);
+    const conversion = reqs ? Math.round((approved / reqs) * 100) : 0;
+    return ctx.reply(`📊 VIP BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n\n📋 So‘rovlar: ${reqs}\n⏳ Kutilayotgan: ${pending}\n✅ Tasdiqlangan: ${approved} (${conversion}%)\n💎 Aktiv VIP: ${members}\n⛔ Muddati tugagan: ${expiredMembers}\n🔒 Majburiy obuna: ${subs}`);
   });
-  registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
+  registerCommonAdminHandlers(bot, config, utils, adminKeyboard, {
+    onSubscriptionSuccess: (ctx) => sendStart(ctx)
+  });
 
-  bot.action(/^vipset:(chat|pay|days|link|admin)$/, async (ctx) => {
+  bot.action(/^vipset:(chat|pay|days|link|admin|plans)$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!utils.isAdmin(ctx.from.id)) return;
-    const map = { chat: 'vip_set_chat', pay: 'vip_set_pay', days: 'vip_set_days', link: 'vip_set_link', admin: 'vip_set_admin' };
+    const map = { chat: 'vip_set_chat', pay: 'vip_set_pay', days: 'vip_set_days', link: 'vip_set_link', admin: 'vip_set_admin', plans: 'vip_set_plans' };
     ctx.session.mode = map[ctx.match[1]];
     const prompts = {
-      chat: '🔐 Maxfiy kanal/guruh username yoki chat ID yuboring. Masalan: @vipkanal yoki -1001234567890. Bot o‘sha kanal/guruhda invite link yaratishga admin bo‘lishi shart.',
+      chat: '🔐 Maxfiy kanal/guruh username yoki chat ID yuboring. Masalan: @vipkanal yoki -1001234567890. Bot o‘sha kanal/guruhda invite link yaratish va aʼzolarni chiqarish huquqi bilan admin bo‘lishi shart.',
       pay: '💳 Narx/to‘lov matnini yuboring.',
-      days: '⏳ Dostup necha kun bo‘lsin? Masalan: 30',
+      days: '⏳ Standart dostup necha kun bo‘lsin? Masalan: 30',
       link: '🔗 Invite link necha daqiqa ishlasin? Masalan: 30',
-      admin: '👨‍💻 To‘lov uchun admin username yuboring. Masalan: @Qoryogdiyev'
+      admin: '👨‍💻 To‘lov uchun admin username yuboring. Masalan: @Qoryogdiyev',
+      plans: '💎 Har qatorda: Nomi | kun | narx\nMisol:\nOylik | 30 | 50 000 so‘m'
     };
     return ctx.reply(`${prompts[ctx.match[1]]}\n\n❌ Bekor qilish: /cancel`);
   });
 
   bot.action('vip:req', async (ctx) => {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery().catch(() => null);
     await utils.saveUser(ctx);
     const ok = await utils.checkAllSubscriptions(ctx.from.id);
     if (!ok) return utils.sendSubscriptionWarning(ctx);
+    return createRequest(ctx, 0);
+  });
+
+  bot.action(/^vip:plan:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    await utils.saveUser(ctx);
+    const ok = utils.isAdmin(ctx.from.id) || await utils.checkAllSubscriptions(ctx.from.id);
+    if (!ok) return utils.sendSubscriptionWarning(ctx);
+    return createRequest(ctx, Number(ctx.match[1]));
+  });
+
+  bot.action('vip:renew', async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
     const st = await getBotSettings(config.key);
-    const secret = makeSecretCode('VIP');
-    const req = await VipRequest.create({ bot_key: config.key, user_id: ctx.from.id, username: ctx.from.username || null, first_name: ctx.from.first_name || null, secret_code: secret });
-    const adminText = `💎 YANGI VIP SOʻROV\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@' + ctx.from.username : ''}\n🆔 User ID: ${ctx.from.id}\n🔐 Maxfiy shifr: ${secret}\n\nFoydalanuvchi to‘lov qilganda shu shifrni yuboradi.`;
-    for (const id of adminIds) {
-      try { await bot.telegram.sendMessage(id, adminText, Markup.inlineKeyboard([[Markup.button.callback('✅ Link berish', `vip:approve:${String(req._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(req._id)}`)]])); } catch (_) {}
-    }
-    return ctx.reply(
-      `✅ So‘rov yuborildi!\n\n🔐 Sizning maxfiy shifringiz: ${secret}\n\nTo‘lov/admin bilan kelishganda aynan shu shifrni yuboring — admin bu so‘rov sizniki ekanini biladi.`,
-      Markup.inlineKeyboard([[Markup.button.url('💳 Admin bilan toʻlov qilish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@', '')}`)]])
-    );
+    return ctx.reply('🔄 Uzaytirish uchun tarifni tanlang. Qolgan kunlaringiz saqlanib, ustiga qo‘shiladi.', plansKeyboard(st, 'vip:renewplan'));
+  });
+
+  bot.action(/^vip:renewplan:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => null);
+    await utils.saveUser(ctx);
+    return createRequest(ctx, Number(ctx.match[1]), true);
   });
 
   bot.action(/^vip:approve:([a-f0-9]{24})$/, async (ctx) => {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery().catch(() => null);
     if (!utils.isAdmin(ctx.from.id)) return;
     const req = await VipRequest.findOne({ _id: ctx.match[1], bot_key: config.key });
     if (!req) return ctx.reply('❌ So‘rov topilmadi.');
-    const st = await getBotSettings(config.key);
-    const chat = st.vip_chat;
-    if (!chat) return ctx.reply('❌ Avval “⚙️ VIP sozlamalar”dan maxfiy kanal/guruhni kiriting.');
+    if (req.status === 'approved') return ctx.reply(`ℹ️ Bu so‘rov allaqachon tasdiqlangan: ${req.secret_code}`);
     try {
-      const expireDate = Math.floor(nowPlusMinutes(Number(st.link_minutes || 30)).getTime() / 1000);
-      const invite = await bot.telegram.createChatInviteLink(chat, { expire_date: expireDate, member_limit: 1, creates_join_request: false, name: `VIP ${req.user_id} ${req.secret_code}` });
-      const accessUntil = nowPlusDays(Number(st.access_days || 30));
-      req.status = 'approved'; req.approved_by = ctx.from.id; req.invite_link = invite.invite_link; req.expires_at = new Date(expireDate * 1000); req.access_until = accessUntil; await req.save();
-      await VipMember.updateOne({ bot_key: config.key, user_id: req.user_id, channel_chat: chat }, { $set: { username: req.username, first_name: req.first_name, access_until: accessUntil, is_active: true, removed_at: null, last_request_id: req._id } }, { upsert: true });
-      await bot.telegram.sendMessage(req.user_id, `✅ VIP ruxsat tasdiqlandi!\n\n🔗 Vaqtlik maxfiy link: ${invite.invite_link}\n⏳ Link tugashi: ${formatDate(req.expires_at)}\n💎 Dostup muddati: ${formatDate(accessUntil)}`);
-      return ctx.editMessageText(`✅ Link yuborildi.\n\n👤 ${req.first_name || ''} ${req.username ? '@' + req.username : ''}\n🔐 ${req.secret_code}\n⏳ ${formatDate(accessUntil)}`);
+      const { accessUntil } = await grantAccess(req, ctx.from.id);
+      const doneText = `✅ Tasdiqlandi.\n\n👤 ${req.first_name || ''} ${req.username ? '@' + req.username : ''}\n🔐 ${req.secret_code}\n💎 ${formatDate(accessUntil)} gacha`;
+      try { await ctx.editMessageText(doneText); } catch (_) {
+        try { await ctx.editMessageCaption(doneText); } catch (__) { await ctx.reply(doneText); }
+      }
     } catch (error) {
       console.error('VIP approve xatosi:', error);
-      return ctx.reply(`❌ Link yaratishda xatolik: ${error.message}\n\nBot maxfiy kanal/guruhda admin bo‘lishi va invite link yaratish huquqiga ega bo‘lishi kerak.`);
+      return ctx.reply(`❌ Tasdiqlashda xatolik: ${error.message}\n\nBot maxfiy kanal/guruhda admin bo‘lishi va invite link yaratish huquqiga ega bo‘lishi kerak.`);
     }
   });
   bot.action(/^vip:reject:([a-f0-9]{24})$/, async (ctx) => {
-    await ctx.answerCbQuery();
+    await ctx.answerCbQuery().catch(() => null);
     if (!utils.isAdmin(ctx.from.id)) return;
     const req = await VipRequest.findOne({ _id: ctx.match[1], bot_key: config.key });
     if (!req) return ctx.reply('❌ So‘rov topilmadi.');
     req.status = 'rejected'; await req.save();
-    try { await bot.telegram.sendMessage(req.user_id, '❌ VIP so‘rovingiz rad etildi. Admin bilan bog‘laning.'); } catch (_) {}
-    return ctx.editMessageText(`❌ So‘rov rad etildi: ${req.secret_code}`);
+    try { await bot.telegram.sendMessage(req.user_id, `❌ VIP so‘rovingiz (${req.secret_code}) rad etildi. Savollar bo‘lsa admin bilan bog‘laning.`); } catch (_) {}
+    const t = `❌ So‘rov rad etildi: ${req.secret_code}`;
+    try { await ctx.editMessageText(t); } catch (_) { try { await ctx.editMessageCaption(t); } catch (__) { await ctx.reply(t); } }
   });
 
-  bot.command('cancel', async (ctx) => { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : undefined); });
+  async function handleReceipt(ctx) {
+    const req = ctx.session.vipRequestId
+      ? await VipRequest.findOne({ _id: ctx.session.vipRequestId, bot_key: config.key, user_id: ctx.from.id })
+      : await VipRequest.findOne({ bot_key: config.key, user_id: ctx.from.id, status: 'pending' }).sort({ createdAt: -1 });
+    if (!req || req.status !== 'pending') {
+      ctx.session.mode = null;
+      return ctx.reply('ℹ️ Kutilayotgan so‘rov topilmadi. Avval tarifni tanlang.', userKeyboard());
+    }
+    const photo = getLargestPhoto(ctx.message);
+    const fileId = photo?.file_id || ctx.message.document?.file_id;
+    if (!fileId) return ctx.reply('📸 Iltimos, chekni rasm yoki fayl ko‘rinishida yuboring.');
+    req.receipt_file_id = fileId;
+    req.receipt_type = photo ? 'photo' : 'document';
+    req.receipt_at = new Date();
+    await req.save();
+    const caption = `🧾 TO‘LOV CHEKI\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@' + ctx.from.username : ''}\n🆔 ${ctx.from.id}\n💎 ${req.plan_title || 'VIP'} — ${req.plan_days || '?'} kun ${req.plan_price || ''}\n🔐 ${req.secret_code}`;
+    const kb = Markup.inlineKeyboard([[Markup.button.callback('✅ Tasdiqlash', `vip:approve:${String(req._id)}`), Markup.button.callback('❌ Rad etish', `vip:reject:${String(req._id)}`)]]);
+    for (const id of adminIds) {
+      try {
+        if (photo) await bot.telegram.sendPhoto(id, fileId, { caption, ...kb });
+        else await bot.telegram.sendDocument(id, fileId, { caption, ...kb });
+      } catch (_) {}
+    }
+    ctx.session.mode = null;
+    return ctx.reply('✅ Chek adminga yuborildi! Tasdiqlangach shu yerga xabar keladi.', userKeyboard());
+  }
+
+  bot.command('cancel', async (ctx) => { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()); });
   bot.on('text', async (ctx) => {
     await utils.saveUser(ctx);
     const text = ctx.message.text.trim();
-    if (text === '/cancel') { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : undefined); }
+    if (text === '/cancel') { ctx.session.mode = null; ctx.session.draft = {}; return ctx.reply('❌ Jarayon bekor qilindi.', utils.isAdmin(ctx.from.id) ? adminKeyboard() : userKeyboard()); }
     if (utils.isAdmin(ctx.from.id)) {
       const common = await handleCommonAdminText(ctx, config, utils, adminKeyboard); if (common) return common;
       if (ctx.session.mode === 'broadcasting') { const r = await utils.broadcastMessage(ctx, adminKeyboard); ctx.session.mode = null; return r; }
@@ -3281,13 +4029,61 @@ function createVipBot(config, tokenOverride = null, adminIdsOverride = null) {
       if (ctx.session.mode === 'vip_set_days') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Kun noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { access_days: n }); ctx.session.mode = null; return ctx.reply('✅ Dostup muddati saqlandi.', adminKeyboard()); }
       if (ctx.session.mode === 'vip_set_link') { const n = Number(text); if (!Number.isFinite(n) || n < 1) return ctx.reply('❌ Daqiqa noto‘g‘ri. Masalan: 30'); await updateBotSettings(config.key, { link_minutes: n }); ctx.session.mode = null; return ctx.reply('✅ Link muddati saqlandi.', adminKeyboard()); }
       if (ctx.session.mode === 'vip_set_admin') { await updateBotSettings(config.key, { admin_contact: text.startsWith('@') ? text : `@${text}` }); ctx.session.mode = null; return ctx.reply('✅ Admin username saqlandi.', adminKeyboard()); }
+      if (ctx.session.mode === 'vip_set_plans') {
+        if (text === '-') { await updateBotSettings(config.key, { plans: [] }); ctx.session.mode = null; return ctx.reply('✅ Tariflar tozalandi. Standart kunlik tarif ishlaydi.', adminKeyboard()); }
+        const plans = [];
+        for (const line of text.split('\n').map((x) => x.trim()).filter(Boolean)) {
+          const [title, daysRaw, price] = line.split('|').map((x) => (x || '').trim());
+          const days = Number(String(daysRaw || '').replace(/\D/g, ''));
+          if (!title || !Number.isFinite(days) || days < 1) return ctx.reply(`❌ Qator noto‘g‘ri: “${line}”\nFormat: Nomi | kun | narx`);
+          plans.push({ title: title.slice(0, 40), days, price: (price || '').slice(0, 40) });
+        }
+        if (!plans.length) return ctx.reply('❌ Kamida bitta tarif yuboring.');
+        await updateBotSettings(config.key, { plans: plans.slice(0, 8) });
+        ctx.session.mode = null;
+        return ctx.reply(`✅ ${plans.length} ta tarif saqlandi:\n\n${plans.map((p, i) => `${i + 1}. ${planLabel(p)}`).join('\n')}`, adminKeyboard());
+      }
+      if (ctx.session.mode === 'vip_manual_add') {
+        const [idRaw, daysRaw] = text.split('|').map((x) => x.trim());
+        const userId = Number(idRaw);
+        const days = Number(daysRaw || 30);
+        if (!Number.isFinite(userId) || userId <= 0 || !Number.isFinite(days) || days < 1) return ctx.reply('❌ Format: user_id | kun');
+        const u = await User.findOne({ bot_key: config.key, user_id: userId });
+        const req = await VipRequest.create({
+          bot_key: config.key, user_id: userId, username: u?.username || null, first_name: u?.first_name || null,
+          secret_code: makeSecretCode('VIP'), plan_title: 'Qo‘lda berilgan', plan_days: days
+        });
+        try {
+          const { accessUntil } = await grantAccess(req, ctx.from.id);
+          ctx.session.mode = null;
+          return ctx.reply(`✅ ${userId} ga ${days} kunlik VIP berildi (${formatDate(accessUntil)} gacha).`, adminKeyboard());
+        } catch (error) {
+          return ctx.reply(`❌ Xatolik: ${error.message}`);
+        }
+      }
+      if (ctx.session.mode === 'vip_manual_remove') {
+        const userId = Number(text);
+        if (!Number.isFinite(userId) || userId <= 0) return ctx.reply('❌ User ID raqam bo‘lishi kerak.');
+        const member = await VipMember.findOne({ bot_key: config.key, user_id: userId, is_active: true });
+        if (!member) { ctx.session.mode = null; return ctx.reply('❌ Bu user aktiv VIP emas.', adminKeyboard()); }
+        try { await kickFromVip(member.channel_chat, userId); } catch (error) { await ctx.reply(`⚠️ Kanaldan chiqarishda xato: ${error.message}`); }
+        member.is_active = false; member.removed_at = new Date(); await member.save();
+        await bot.telegram.sendMessage(userId, '⛔ VIP obunangiz admin tomonidan to‘xtatildi.').catch(() => null);
+        ctx.session.mode = null;
+        return ctx.reply(`✅ ${userId} VIPdan chiqarildi.`, adminKeyboard());
+      }
     }
     const ok = await utils.checkAllSubscriptions(ctx.from.id); if (!ok && !utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx);
-    return ctx.reply('💎 VIPga kirish uchun /start bosing va “VIPga kirish” tugmasini tanlang.');
+    if (ctx.session.mode === 'vip_receipt') return ctx.reply('📸 Chekni rasm ko‘rinishida yuboring. Bekor qilish: /cancel');
+    return ctx.reply(`💎 VIP olish uchun “${USER_BTN.join}” tugmasini bosing.`, userKeyboard());
   });
   bot.on('message', async (ctx) => {
     await utils.saveUser(ctx);
     if (utils.isAdmin(ctx.from.id) && ctx.session.mode === 'broadcasting') { const r = await utils.broadcastMessage(ctx, adminKeyboard); ctx.session.mode = null; return r; }
+    if ((ctx.message.photo || ctx.message.document) && !utils.isAdmin(ctx.from.id)) {
+      const hasPending = ctx.session.mode === 'vip_receipt' || await VipRequest.exists({ bot_key: config.key, user_id: ctx.from.id, status: 'pending' });
+      if (hasPending) return handleReceipt(ctx);
+    }
   });
   bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
   return { key: config.key, title: config.title, bot, config };
@@ -5090,9 +5886,34 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     return Markup.keyboard([
       ['/learn_on', '/learn_off'],
       ['/reply_on', '/reply_off'],
-      ['/learnstats', '/forgetall'],
+      ['/learnstats', '/learned'],
       ['/settings', '/help']
     ]).resize();
+  }
+
+  function mediaOf(msg) {
+    if (!msg) return null;
+    if (msg.sticker) return { media: 'sticker', file_id: msg.sticker.file_id };
+    if (msg.animation) return { media: 'animation', file_id: msg.animation.file_id };
+    if (msg.photo?.length) return { media: 'photo', file_id: msg.photo[msg.photo.length - 1].file_id };
+    if (msg.voice) return { media: 'voice', file_id: msg.voice.file_id };
+    if (msg.video_note) return { media: 'video_note', file_id: msg.video_note.file_id };
+    if (msg.video) return { media: 'video', file_id: msg.video.file_id };
+    return null;
+  }
+
+  async function sendLearnedAnswer(ctx, item) {
+    const extra = { reply_to_message_id: ctx.message.message_id, allow_sending_without_reply: true };
+    const caption = item.answer_text ? { caption: item.answer_text } : {};
+    if (item.answer_file_id && item.answer_media) {
+      if (item.answer_media === 'sticker') return ctx.replyWithSticker(item.answer_file_id, extra);
+      if (item.answer_media === 'animation') return ctx.replyWithAnimation(item.answer_file_id, { ...extra, ...caption });
+      if (item.answer_media === 'photo') return ctx.replyWithPhoto(item.answer_file_id, { ...extra, ...caption });
+      if (item.answer_media === 'voice') return ctx.replyWithVoice(item.answer_file_id, extra);
+      if (item.answer_media === 'video_note') return ctx.replyWithVideoNote(item.answer_file_id, extra);
+      if (item.answer_media === 'video') return ctx.replyWithVideo(item.answer_file_id, { ...extra, ...caption });
+    }
+    return ctx.reply(item.answer_text, extra);
   }
 
   function normText(text) {
@@ -5177,7 +5998,11 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     if (!itemTokens.length) return 0;
     let hit = 0;
     const set = new Set(itemTokens);
-    for (const t of queryTokens) if (set.has(t)) hit += 1;
+    for (const t of queryTokens) {
+      if (set.has(t)) { hit += 1; continue; }
+      // So‘z o‘zagi bir xil bo‘lsa (kamida 4 harf), yarim ball beramiz.
+      if (t.length >= 4 && itemTokens.some((w) => w.length >= 4 && (w.startsWith(t) || t.startsWith(w)))) hit += 0.6;
+    }
     let score = hit / Math.max(queryTokens.length, itemTokens.length);
     const q = String(item.question_norm || '').trim();
     if (q && queryNorm.includes(q)) score += 0.28;
@@ -5189,8 +6014,12 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     const msg = ctx.message;
     const question = messageText(msg.reply_to_message);
     const answer = messageText(msg);
-    if (!settings.auto_learn || !question || !answer) return false;
-    if (isCommandText(answer) || answer.length < 2 || question.length < 2) return false;
+    const media = mediaOf(msg);
+    if (!settings.auto_learn || !question || (!answer && !media)) return false;
+    // Botning o‘z xabariga reply qilinsa, o‘rganmaymiz (aylanma o‘rganish bo‘lmasin).
+    if (msg.reply_to_message?.from?.is_bot) return false;
+    if (answer && (isCommandText(answer) || answer.length < 2)) return false;
+    if (question.length < 2 || isCommandText(question)) return false;
     if (answer.length > 1200 || question.length > 500) return false;
 
     const questionNorm = normText(question);
@@ -5208,7 +6037,9 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
           answer_text: answer,
           answer_chat_id: ctx.chat.id,
           answer_message_id: msg.message_id,
-          answer_type: msg.text ? 'text' : 'caption',
+          answer_type: media ? 'media' : (msg.text ? 'text' : 'caption'),
+          answer_file_id: media?.file_id || null,
+          answer_media: media?.media || null,
           learned_from_user_id: ctx.from.id,
           learned_from_username: ctx.from.username || null
         },
@@ -5226,9 +6057,9 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     const text = messageText(ctx.message);
     if (!text || isCommandText(text) || text.length < 2 || text.length > 400) return false;
     if (settings.only_when_mentioned) {
-      const me = await bot.telegram.getMe().catch(() => null);
-      const username = me?.username ? `@${me.username}`.toLowerCase() : '';
-      if (username && !text.toLowerCase().includes(username)) return false;
+      const username = ctx.botInfo?.username ? `@${ctx.botInfo.username}`.toLowerCase() : '';
+      const repliedToBot = ctx.message.reply_to_message?.from?.id && ctx.message.reply_to_message.from.id === ctx.botInfo?.id;
+      if (username && !text.toLowerCase().includes(username) && !repliedToBot) return false;
     }
     const cooldownKey = String(ctx.chat.id);
     const last = lastReplyAt.get(cooldownKey) || 0;
@@ -5249,7 +6080,7 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     if (!best || bestScore < minScore) return false;
     lastReplyAt.set(cooldownKey, Date.now());
     try {
-      await ctx.reply(best.answer_text, { reply_to_message_id: ctx.message.message_id, allow_sending_without_reply: true });
+      await sendLearnedAnswer(ctx, best);
       LearnedReply.updateOne({ _id: best._id }, { $inc: { uses: 1 }, $set: { last_used_at: new Date() } }).catch(() => null);
       ChatLearningSetting.updateOne({ _id: settings._id }, { $inc: { replies_sent: 1 } }).catch(() => null);
       return true;
@@ -5258,10 +6089,90 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
 
   bot.start(async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
-    return ctx.reply(
-      `🧠 ${config.title}\n\nMen guruhda reply qilingan savol-javoblarni o‘rganaman va keyingi o‘xshash gaplarga avtomatik javob beraman.\n\nIshlatish:\n1) Botni guruhga qo‘shing.\n2) Guruhda kimdir savolga reply qilib javob yozsa, men uni o‘rganaman.\n3) Keyingi o‘xshash savolga tez javob qaytaraman.`,
+    await utils.saveUser(ctx, true);
+    const username = ctx.botInfo?.username || '';
+    await ctx.reply(
+      `🧠 ${config.title}\n\nMen guruhda reply qilingan savol-javoblarni o‘rganaman va keyingi o‘xshash gaplarga avtomatik javob beraman (matn, stiker, rasm, gif).\n\nIshlatish:\n1) Botni guruhga admin qilib qo‘shing.\n2) Guruhda kimdir savolga reply qilib javob yozsa, men uni o‘rganaman.\n3) Keyingi o‘xshash savolga tez javob qaytaraman.\n\nAdmin buyruqlari (guruhda):\n/teach savol | javob — qo‘lda o‘rgatish\n/forget — reply qilingan javobni unutish\n/learned — o‘rganilganlar ro‘yxati\n/setscore 0.5 — moslik aniqligi\n/chance 70 — javob berish ehtimoli (%)\n/mention_on, /mention_off — faqat chaqirilganda javob`,
       adminKeyboard()
     );
+    if (username) {
+      return ctx.reply('👇 Botni guruhingizga qo‘shing:', Markup.inlineKeyboard([[Markup.button.url('➕ Guruhga qo‘shish', `https://t.me/${username}?startgroup=true`)]]));
+    }
+  });
+
+  bot.command(['teach', 'forget', 'learned', 'setscore', 'chance', 'mention_on', 'mention_off'], async (ctx) => {
+    if (!GROUP_TYPES.has(ctx.chat?.type)) return ctx.reply('Bu buyruq guruh ichida ishlaydi.');
+    const admin = await isChatAdmin(ctx);
+    if (!admin && ctx.command !== 'learned') return ctx.reply('❌ Bu buyruq faqat guruh adminlari uchun.');
+    const settings = await getGroupSettings(ctx);
+    const payload = String(ctx.message.text || '').replace(/^\/\w+(@\w+)?\s*/, '').trim();
+    const chatId = String(ctx.chat.id);
+
+    if (ctx.command === 'teach') {
+      const [q, ...rest] = payload.split('|');
+      const question = String(q || '').trim();
+      const answer = rest.join('|').trim();
+      if (!question || !answer) return ctx.reply('✍️ Format: /teach savol | javob\nMisol: /teach dars qachon | Darslar har kuni 18:00 da');
+      const questionNorm = normText(question);
+      const keywords = tokensOf(question);
+      if (!questionNorm || !keywords.length) return ctx.reply('❌ Savol juda qisqa yoki faqat to‘xtam so‘zlardan iborat.');
+      await LearnedReply.findOneAndUpdate(
+        { bot_key: config.key, chat_id: chatId, question_norm: questionNorm, is_active: { $ne: false } },
+        {
+          $set: { chat_title: ctx.chat.title || '', question_text: question, question_norm: questionNorm, keywords, answer_text: answer.slice(0, 1200), answer_type: 'text', answer_file_id: null, answer_media: null, learned_from_user_id: ctx.from.id, learned_from_username: ctx.from.username || null },
+          $setOnInsert: { bot_key: config.key, chat_id: chatId, is_active: true }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      await ChatLearningSetting.updateOne({ _id: settings._id }, { $inc: { learned_count: 1 } }).catch(() => null);
+      invalidateGroup(chatId);
+      return ctx.reply(`✅ O‘rgandim!\n❓ ${question}\n💬 ${answer.slice(0, 200)}`);
+    }
+
+    if (ctx.command === 'forget') {
+      const target = ctx.message.reply_to_message;
+      let res = { modifiedCount: 0 };
+      if (target && target.from?.is_bot) {
+        // Botning javobiga reply: shu javob matnini unutamiz.
+        const text = messageText(target);
+        const media = mediaOf(target);
+        const filter = { bot_key: config.key, chat_id: chatId, is_active: { $ne: false } };
+        if (text) filter.answer_text = text;
+        else if (media) filter.answer_media = media.media;
+        res = await LearnedReply.updateMany(filter, { $set: { is_active: false } });
+      } else {
+        const q = normText(payload || messageText(target));
+        if (!q) return ctx.reply('🗑 Botning noto‘g‘ri javobiga reply qilib /forget yozing yoki /forget savol matni');
+        res = await LearnedReply.updateMany({ bot_key: config.key, chat_id: chatId, question_norm: q, is_active: { $ne: false } }, { $set: { is_active: false } });
+      }
+      invalidateGroup(chatId);
+      return ctx.reply(res.modifiedCount ? `🗑 Unutildi: ${res.modifiedCount} ta javob.` : '❌ Mos javob topilmadi.');
+    }
+
+    if (ctx.command === 'learned') {
+      const items = await LearnedReply.find({ bot_key: config.key, chat_id: chatId, is_active: { $ne: false } }).sort({ uses: -1, updatedAt: -1 }).limit(15).lean();
+      if (!items.length) return ctx.reply('📭 Hali hech narsa o‘rganilmagan.');
+      return ctx.reply(`📚 O‘RGANILGANLAR (TOP-15)\n\n${items.map((x, i) => `${i + 1}. ❓ ${shortText(x.question_text, 50)}\n   💬 ${x.answer_media ? `[${x.answer_media}] ` : ''}${shortText(x.answer_text || '', 50)} — ${x.uses || 0} marta`).join('\n')}`);
+    }
+
+    if (ctx.command === 'setscore') {
+      const n = Number(String(payload).replace(',', '.'));
+      if (!Number.isFinite(n) || n < 0.15 || n > 0.9) return ctx.reply('🎯 0.15 dan 0.9 gacha son kiriting. Kichik = ko‘proq javob, katta = aniqroq javob. Misol: /setscore 0.45');
+      settings.min_score = n; await settings.save(); invalidateGroup(chatId);
+      return ctx.reply(`✅ Moslik chegarasi: ${n}`);
+    }
+
+    if (ctx.command === 'chance') {
+      const n = Number(String(payload).replace('%', ''));
+      if (!Number.isFinite(n) || n < 1 || n > 100) return ctx.reply('🎲 1 dan 100 gacha foiz kiriting. Misol: /chance 70');
+      settings.reply_chance = n / 100; await settings.save(); invalidateGroup(chatId);
+      return ctx.reply(`✅ Javob berish ehtimoli: ${n}%`);
+    }
+
+    if (ctx.command === 'mention_on' || ctx.command === 'mention_off') {
+      settings.only_when_mentioned = ctx.command === 'mention_on'; await settings.save(); invalidateGroup(chatId);
+      return ctx.reply(settings.only_when_mentioned ? '✅ Endi faqat meni @username bilan chaqirganda yoki menga reply qilganda javob beraman.' : '✅ Endi barcha mos xabarlarga javob beraman.');
+    }
   });
 
   bot.command(['learn_on', 'learn_off', 'reply_on', 'reply_off', 'forgetall', 'learnstats', 'settings', 'help'], async (ctx) => {
@@ -5280,7 +6191,7 @@ function createChatLearningBot(config, tokenOverride = null, adminIdsOverride = 
     }
     const total = await LearnedReply.countDocuments({ bot_key: config.key, chat_id: String(ctx.chat.id), is_active: { $ne: false } });
     return ctx.reply(
-      `🧠 Suhbatchi holati\n\nGuruh: ${ctx.chat.title || ctx.chat.id}\n📚 O‘rganilgan: ${total}\n✍️ O‘rganish: ${settings.auto_learn ? 'yoqilgan' : 'o‘chiq'}\n💬 Avto-javob: ${settings.auto_reply ? 'yoqilgan' : 'o‘chiq'}\n🎯 Moslik chegarasi: ${settings.min_score || 0.38}\n\nBuyruqlar:\n/learn_on /learn_off\n/reply_on /reply_off\n/forgetall /learnstats`,
+      `🧠 Suhbatchi holati\n\nGuruh: ${ctx.chat.title || ctx.chat.id}\n📚 O‘rganilgan: ${total}\n💬 Yuborilgan javoblar: ${settings.replies_sent || 0}\n✍️ O‘rganish: ${settings.auto_learn ? 'yoqilgan' : 'o‘chiq'}\n💬 Avto-javob: ${settings.auto_reply ? 'yoqilgan' : 'o‘chiq'}\n🎯 Moslik chegarasi: ${settings.min_score || 0.38}\n🎲 Javob ehtimoli: ${Math.round(Number(settings.reply_chance || 1) * 100)}%\n📣 Faqat chaqirilganda: ${settings.only_when_mentioned ? 'ha' : 'yo‘q'}\n\nBuyruqlar:\n/teach savol | javob\n/forget (javobga reply)\n/learned /learnstats\n/learn_on /learn_off\n/reply_on /reply_off\n/setscore 0.45 /chance 70\n/mention_on /mention_off\n/forgetall`,
       adminKeyboard()
     );
   });
@@ -5309,12 +6220,24 @@ function createChannelFormBot(config, tokenOverride = null, adminIdsOverride = n
   const adminIds = adminIdsOverride || parseIds(process.env[`${config.key.toUpperCase()}_ADMIN_IDS`] || process.env.ADMIN_IDS);
   const bot = createBaseBot(token, config, adminIds, { formIndex: 0, formAnswers: [] });
   const utils = createSharedUtils(bot, config, adminIds);
-  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['📝 Forma sozlash', '👁 Forma koʻrish'], ['➕ Input qoʻshish', '✏️ Input tahrirlash'], ['🔀 Input tartibi', '🗑 Input oʻchirish'], ['📨 Soʻrovlar', '💳 Toʻlov/admin matni'], ['📣 Autopost qoʻshish', '📋 Autopostlar'], ['🎯 Autopost kanal', '🗑 Autopost oʻchirish']])).resize().oneTime(false); }
+  function adminKeyboard() { return Markup.keyboard(commonAdminRows([['📝 Forma sozlash', '👁 Forma koʻrish'], ['➕ Input qoʻshish', '✏️ Input tahrirlash'], ['🔀 Input tartibi', '🗑 Input oʻchirish'], ['📨 Soʻrovlar', '🆕 Yangi arizalar'], ['🔎 Shifr boʻyicha qidirish', '💳 Toʻlov/admin matni'], ['📣 Autopost qoʻshish', '📋 Autopostlar'], ['🎯 Autopost kanal', '🗑 Autopost oʻchirish'], ['⚡ Autopost hozir yuborish']])).resize().oneTime(false); }
+  const FORM_STATUS_LABEL = { new: '🆕 Yangi', sent_to_admin: '⏳ Ko‘rib chiqilmoqda', approved: '✅ Tasdiqlangan', rejected: '❌ Rad etilgan', paid: '💰 To‘langan' };
+  function userFormKeyboard() { return Markup.keyboard([['📝 Ariza yuborish', '📂 Mening arizalarim'], ['☎️ Admin bilan aloqa']]).resize().oneTime(false); }
+  function submissionAdminButtons(sub) { return Markup.inlineKeyboard([[Markup.button.callback('✅ Tasdiqlash',`form:ok:${String(sub._id)}`),Markup.button.callback('❌ Rad etish',`form:no:${String(sub._id)}`)],[Markup.button.callback('💰 To‘landi',`form:paid:${String(sub._id)}`),Markup.button.callback('✉️ Javob yozish',`form:reply:${String(sub._id)}`)]]); }
+  function submissionText(sub) { return `📨 ARIZA\n\n👤 ${sub.first_name||''} ${sub.username?'@'+sub.username:''}\n🆔 ${sub.user_id}\n🔐 ${sub.secret_code}\n📌 ${FORM_STATUS_LABEL[sub.status]||sub.status}\n🕒 ${formatDate(sub.createdAt)}${sub.admin_note?`\n📝 Izoh: ${sub.admin_note}`:''}\n\n${(sub.answers||[]).map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n')}`; }
+  async function sendSubmissionMedia(telegram, chatId, sub) { for (const a of (sub.answers||[])) { try { if (a.type==='photo' && a.value?.file_id) await telegram.sendPhoto(chatId, a.value.file_id, { caption: `🖼 ${a.label} — ${sub.secret_code}` }); else if (a.type==='document' && a.value?.file_id) await telegram.sendDocument(chatId, a.value.file_id, { caption: `📄 ${a.label} — ${sub.secret_code}` }); else if (a.type==='location' && a.value?.latitude) await telegram.sendLocation(chatId, a.value.latitude, a.value.longitude); } catch (_) {} } }
   async function askField(ctx) { const fields = await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); const i=ctx.session.formIndex||0; if(i>=fields.length) return finishForm(ctx, fields); const f=fields[i]; const required = f.required ? 'majburiy' : 'ixtiyoriy'; return ctx.reply(`📝 ${i+1}/${fields.length}. ${f.label}\n${f.placeholder || ''}\n\nTur: ${f.type} | ${required}${f.type==='location'?'\n📍 Telegram lokatsiya yuboring.':''}${f.type==='photo'?'\n🖼 Rasm yuboring.':''}${f.type==='document'?'\n📄 Fayl yuboring.':''}`); }
-  async function finishForm(ctx, fields) { const st=await getBotSettings(config.key); const secret=makeSecretCode('REQ'); const answers = ctx.session.formAnswers || []; const sub = await FormSubmission.create({bot_key:config.key,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null,answers,secret_code:secret,secret_hash:secretHash(secret),status:'sent_to_admin'}); const lines=answers.map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n'); const msg=`📨 YANGI ARIZA\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@'+ctx.from.username : ''}\n🆔 ${ctx.from.id}\n🔐 Shifr: ${secret}\n\n${lines}\n\nMijoz to‘lovda aynan shu shifrni yuborsa, ariza shu ekanini isbotlaydi.`; for(const id of adminIds){ try{ await bot.telegram.sendMessage(id,msg,Markup.inlineKeyboard([[Markup.button.callback('✅ Tasdiqlash',`form:ok:${String(sub._id)}`),Markup.button.callback('❌ Rad etish',`form:no:${String(sub._id)}`)]])); }catch(_){} } ctx.session.mode=null; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return ctx.reply(`✅ Arizangiz adminga yuborildi!\n\n🔐 Maxfiy shifr: ${secret}\n\nTo‘lov/admin bilan yozishganda shu shifrni yuboring.`, Markup.inlineKeyboard([[Markup.button.url('💳 Adminga toʻlov/yuborish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@','')}`)]])); }
+  async function finishForm(ctx, fields) { const st=await getBotSettings(config.key); const secret=makeSecretCode('REQ'); const answers = ctx.session.formAnswers || []; const sub = await FormSubmission.create({bot_key:config.key,user_id:ctx.from.id,username:ctx.from.username||null,first_name:ctx.from.first_name||null,answers,secret_code:secret,secret_hash:secretHash(secret),status:'sent_to_admin'}); const lines=answers.map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n'); const msg=`📨 YANGI ARIZA\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.username ? '@'+ctx.from.username : ''}\n🆔 ${ctx.from.id}\n🔐 Shifr: ${secret}\n\n${lines}\n\nMijoz to‘lovda aynan shu shifrni yuborsa, ariza shu ekanini isbotlaydi.`; for(const id of adminIds){ try{ await sendSubmissionMedia(bot.telegram, id, sub); await bot.telegram.sendMessage(id,msg,submissionAdminButtons(sub)); }catch(_){} } ctx.session.mode=null; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return ctx.reply(`✅ Arizangiz adminga yuborildi!\n\n🔐 Maxfiy shifr: ${secret}\n${st.payment_text?`\n💳 ${st.payment_text}\n`:''}\nTo‘lov/admin bilan yozishganda shu shifrni yuboring. Holatini “📂 Mening arizalarim” bo‘limida kuzating.`, Markup.inlineKeyboard([[Markup.button.url('💳 Adminga toʻlov/yuborish', `https://t.me/${String(st.admin_contact || OWNER_USERNAME).replace('@','')}`)]])); }
   async function autoPostTick() { const due = await AutoPost.find({bot_key:config.key,is_active:true,next_send_at:{$lte:new Date()}}).limit(10); for(const p of due){ try{ await sendStoredMessageToChat(bot.telegram,p.target_chat,p); p.last_sent_at=new Date(); p.sent_count+=1; p.next_send_at=nowPlusMinutes(p.interval_minutes); await p.save(); } catch(e){ console.error(`${config.title} autopost xatosi:`, e.message); p.next_send_at=nowPlusMinutes(Math.max(5, p.interval_minutes)); await p.save(); } } }
   const timer=setInterval(()=>autoPostTick().catch(e=>console.error('autopost tick:',e.message)),60*1000); timer.unref?.();
-  bot.start(async(ctx)=>{ await utils.saveUser(ctx,true); if(utils.isAdmin(ctx.from.id)) return ctx.reply('📢 Kanal ariza/autopost admin paneli',adminKeyboard()); const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const st=await getBotSettings(config.key); return ctx.reply(`${st.welcome_text || 'Ariza yuborish uchun tugmani bosing.'}`, Markup.inlineKeyboard([[Markup.button.callback('📝 Ariza yuborish','form:start')],[Markup.button.url('☎️ Admin bilan bogʻlanish',`https://t.me/${String(st.admin_contact||OWNER_USERNAME).replace('@','')}`)]])); });
+  bot.start(async(ctx)=>{ await utils.saveUser(ctx,true); if(utils.isAdmin(ctx.from.id)) return ctx.reply('📢 Kanal ariza/autopost admin paneli',adminKeyboard()); const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const st=await getBotSettings(config.key); await ctx.reply(`${st.welcome_text || 'Ariza yuborish uchun tugmani bosing.'}`, userFormKeyboard()); return ctx.reply('👇 Boshlash:', Markup.inlineKeyboard([[Markup.button.callback('📝 Ariza yuborish','form:start')],[Markup.button.url('☎️ Admin bilan bogʻlanish',`https://t.me/${String(st.admin_contact||OWNER_USERNAME).replace('@','')}`)]])); });
+  bot.hears('📝 Ariza yuborish', async(ctx)=>{ await utils.saveUser(ctx); const ok=utils.isAdmin(ctx.from.id)||await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const fields=await FormField.countDocuments({bot_key:config.key,is_active:true}); if(!fields) return ctx.reply('📭 Forma hali sozlanmagan. Admin bilan bog‘laning.'); ctx.session.mode='form_answer'; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return askField(ctx); });
+  bot.hears('📂 Mening arizalarim', async(ctx)=>{ await utils.saveUser(ctx); const list=await FormSubmission.find({bot_key:config.key,user_id:ctx.from.id}).sort({createdAt:-1}).limit(10); if(!list.length) return ctx.reply('📭 Siz hali ariza yubormagansiz.', userFormKeyboard()); return ctx.reply(`📂 MENING ARIZALARIM\n\n${list.map((x,i)=>`${i+1}. ${x.secret_code} — ${FORM_STATUS_LABEL[x.status]||x.status}\n   🕒 ${formatDate(x.createdAt)}${x.admin_note?`\n   📝 ${x.admin_note}`:''}`).join('\n\n')}`, userFormKeyboard()); });
+  bot.hears('☎️ Admin bilan aloqa', async(ctx)=>{ const st=await getBotSettings(config.key); return ctx.reply(`☎️ Admin: ${st.admin_contact||OWNER_USERNAME}`, Markup.inlineKeyboard([[Markup.button.url('✍️ Yozish',`https://t.me/${String(st.admin_contact||OWNER_USERNAME).replace('@','')}`)]])); });
+  bot.command('myrequests', async(ctx)=>{ const list=await FormSubmission.find({bot_key:config.key,user_id:ctx.from.id}).sort({createdAt:-1}).limit(10); if(!list.length) return ctx.reply('📭 Siz hali ariza yubormagansiz.'); return ctx.reply(list.map((x,i)=>`${i+1}. ${x.secret_code} — ${FORM_STATUS_LABEL[x.status]||x.status}`).join('\n')); });
+  bot.hears('🆕 Yangi arizalar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await FormSubmission.find({bot_key:config.key,status:{$in:['new','sent_to_admin']}}).sort({createdAt:-1}).limit(15); if(!list.length) return ctx.reply('✅ Ko‘rib chiqilmagan ariza yo‘q.'); for(const sub of list){ await ctx.reply(submissionText(sub), submissionAdminButtons(sub)); } });
+  bot.hears('🔎 Shifr boʻyicha qidirish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='form_search'; return ctx.reply('🔎 Ariza shifrini yuboring. Masalan: REQ-AB12CD34\n❌ Bekor qilish: /cancel'); });
+  bot.hears('⚡ Autopost hozir yuborish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='autopost_send_now'; return ctx.reply('⚡ Hozir yuboriladigan autopost nomini yuboring.\n❌ Bekor qilish: /cancel'); });
   bot.hears('📝 Forma sozlash', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; return ctx.reply('📝 Forma sozlash uchun input qo‘shing/tahrirlang.\n\nInput formati:\nLabel | type | required | order | placeholder\n\nType: text, number, phone, url, location, photo, document\nMisol:\nKanal nomi | text | ha | 1 | Kanalingiz nomini yozing', adminKeyboard()); });
   bot.hears('👁 Forma koʻrish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const fields=await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); if(!fields.length) return ctx.reply('📭 Forma inputlari yo‘q.'); return ctx.reply(`👁 FORMADAGI INPUTLAR\n\n${fields.map(f=>`${f.order}. ${f.label}\n   key: ${f.key} | type: ${f.type} | ${f.required?'majburiy':'ixtiyoriy'}`).join('\n\n')}`); });
   bot.hears('➕ Input qoʻshish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_add'; return ctx.reply('➕ Input qo‘shish.\n\nFormat:\nLabel | type | required | order | placeholder\n\nMisol:\nObunachilar soni | number | ha | 2 | Masalan: 15000\n\n❌ Bekor qilish: /cancel'); });
@@ -5322,19 +6245,21 @@ function createChannelFormBot(config, tokenOverride = null, adminIdsOverride = n
   bot.hears('🔀 Input tartibi', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_order'; return ctx.reply('🔀 Tartib o‘zgartirish.\n\nFormat:\nkey | order\n\nMisol:\nlink | 3'); });
   bot.hears('🗑 Input oʻchirish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='field_delete'; return ctx.reply('🗑 O‘chiriladigan input key yoki label yuboring.'); });
   bot.hears('💳 Toʻlov/admin matni', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='set_form_settings'; return ctx.reply('💳 Sozlamalarni yuboring. Har qatorda key: value\n\nadmin: @username\nwelcome: Ariza yuborish uchun tugmani bosing\npayment: To‘lov uchun admin bilan bog‘laning'); });
-  bot.hears('📨 Soʻrovlar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await FormSubmission.find({bot_key:config.key}).sort({createdAt:-1}).limit(15); if(!list.length) return ctx.reply('📭 So‘rovlar yo‘q.'); for(const sub of list){ await ctx.reply(`📨 ARIZA\n\n👤 ${sub.first_name||''} ${sub.username?'@'+sub.username:''}\n🆔 ${sub.user_id}\n🔐 ${sub.secret_code}\n📌 ${sub.status}\n🕒 ${formatDate(sub.createdAt)}\n\n${sub.answers.map((a,i)=>`${i+1}. ${a.label}: ${formAnswerToText(a)}`).join('\n')}`); } });
+  bot.hears('📨 Soʻrovlar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await FormSubmission.find({bot_key:config.key}).sort({createdAt:-1}).limit(15); if(!list.length) return ctx.reply('📭 So‘rovlar yo‘q.'); for(const sub of list){ await ctx.reply(submissionText(sub), submissionAdminButtons(sub)); } });
   bot.hears('🎯 Autopost kanal', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='set_autopost_target'; return ctx.reply('🎯 Autopost yuboriladigan kanal/guruh username yoki chat ID yuboring. Bot u yerda admin bo‘lishi kerak.'); });
   bot.hears('📣 Autopost qoʻshish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='autopost_wait_message'; return ctx.reply('📣 Autopost uchun yuboriladigan postni yuboring yoki forward qiling. Keyin nom va interval so‘raladi.'); });
   bot.hears('📋 Autopostlar', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const list=await AutoPost.find({bot_key:config.key,is_active:true}).sort({createdAt:-1}).limit(20); if(!list.length) return ctx.reply('📭 Autopost yo‘q.'); return ctx.reply(`📋 AUTOPOSTLAR\n\n${list.map((p,i)=>`${i+1}. ${p.title}\n   target: ${p.target_chat} | interval: ${p.interval_minutes} daq | yuborildi: ${p.sent_count} | keyingi: ${formatDate(p.next_send_at)}`).join('\n\n')}`); });
   bot.hears('🗑 Autopost oʻchirish', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; ctx.session.mode='autopost_delete'; return ctx.reply('🗑 O‘chiriladigan autopost nomini yuboring.'); });
-  bot.hears('📊 Statistika', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const [users,active,blocked,fields,subs,forms,autos]=await Promise.all([User.countDocuments({bot_key:config.key}),User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}),User.countDocuments({bot_key:config.key,is_blocked:true}),FormField.countDocuments({bot_key:config.key,is_active:true}),Subscription.countDocuments({bot_key:config.key}),FormSubmission.countDocuments({bot_key:config.key}),AutoPost.countDocuments({bot_key:config.key,is_active:true})]); return ctx.reply(`📊 KANAL BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🧩 Inputlar: ${fields}\n📨 Arizalar: ${forms}\n📣 Autopostlar: ${autos}\n🔒 Majburiy obuna: ${subs}`); });
+  bot.hears('📊 Statistika', async(ctx)=>{ if(!utils.isAdmin(ctx.from.id)) return; const [users,active,blocked,fields,subs,forms,autos]=await Promise.all([User.countDocuments({bot_key:config.key}),User.countDocuments({bot_key:config.key,is_blocked:{$ne:true}}),User.countDocuments({bot_key:config.key,is_blocked:true}),FormField.countDocuments({bot_key:config.key,is_active:true}),Subscription.countDocuments({bot_key:config.key}),FormSubmission.countDocuments({bot_key:config.key}),AutoPost.countDocuments({bot_key:config.key,is_active:true})]); const byStatus=await FormSubmission.aggregate([{$match:{bot_key:config.key}},{$group:{_id:'$status',n:{$sum:1}}}]); const statusLines=byStatus.map(x=>`   ${FORM_STATUS_LABEL[x._id]||x._id}: ${x.n}`).join('\n'); return ctx.reply(`📊 KANAL BOT STATISTIKASI\n\n👥 Userlar: ${users}\n✅ Aktiv: ${active}\n🚫 Blok: ${blocked}\n🧩 Inputlar: ${fields}\n📨 Arizalar: ${forms}${statusLines?`\n${statusLines}`:''}\n📣 Autopostlar: ${autos}\n🔒 Majburiy obuna: ${subs}`); });
   registerCommonAdminHandlers(bot, config, utils, adminKeyboard);
   bot.action('form:start', async(ctx)=>{ await ctx.answerCbQuery(); await utils.saveUser(ctx); const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok) return utils.sendSubscriptionWarning(ctx); const fields=await FormField.countDocuments({bot_key:config.key,is_active:true}); if(!fields) return ctx.reply('📭 Forma hali sozlanmagan. Admin bilan bog‘laning.'); ctx.session.mode='form_answer'; ctx.session.formIndex=0; ctx.session.formAnswers=[]; return askField(ctx); });
-  bot.action(/^form:(ok|no):([a-f0-9]{24})$/, async(ctx)=>{ await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id)) return; const sub=await FormSubmission.findOne({_id:ctx.match[2],bot_key:config.key}); if(!sub) return ctx.reply('Topilmadi.'); sub.status=ctx.match[1]==='ok'?'approved':'rejected'; await sub.save(); try{ await bot.telegram.sendMessage(sub.user_id, ctx.match[1]==='ok'?'✅ Arizangiz tasdiqlandi. Admin bilan aloqada bo‘ling.':'❌ Arizangiz rad etildi.'); }catch(_){} return ctx.editMessageText(`${ctx.match[1]==='ok'?'✅':'❌'} Ariza holati yangilandi: ${sub.secret_code}`); });
+  bot.action(/^form:(ok|no|paid):([a-f0-9]{24})$/, async(ctx)=>{ await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id)) return; const sub=await FormSubmission.findOne({_id:ctx.match[2],bot_key:config.key}); if(!sub) return ctx.reply('Topilmadi.'); const map={ok:'approved',no:'rejected',paid:'paid'}; sub.status=map[ctx.match[1]]; await sub.save(); const userMsg={ok:`✅ Arizangiz (${sub.secret_code}) tasdiqlandi. Admin bilan aloqada bo‘ling.`,no:`❌ Arizangiz (${sub.secret_code}) rad etildi.`,paid:`💰 Arizangiz (${sub.secret_code}) bo‘yicha to‘lov qabul qilindi. Rahmat!`}[ctx.match[1]]; try{ await bot.telegram.sendMessage(sub.user_id, userMsg); }catch(_){} try { return await ctx.editMessageText(submissionText(sub), submissionAdminButtons(sub)); } catch(_) { return ctx.reply(`Ariza holati yangilandi: ${sub.secret_code} — ${FORM_STATUS_LABEL[sub.status]}`); } });
+  bot.action(/^form:reply:([a-f0-9]{24})$/, async(ctx)=>{ await ctx.answerCbQuery(); if(!utils.isAdmin(ctx.from.id)) return; const sub=await FormSubmission.findOne({_id:ctx.match[1],bot_key:config.key}); if(!sub) return ctx.reply('Topilmadi.'); ctx.session.mode='form_reply'; ctx.session.draft={replySubId:String(sub._id)}; return ctx.reply(`✉️ ${sub.secret_code} egasiga yuboriladigan javobni yozing (matn, rasm yoki fayl).\n❌ Bekor qilish: /cancel`); });
   bot.command('cancel',async(ctx)=>{ctx.session.mode=null;ctx.session.draft={};ctx.session.formAnswers=[];ctx.session.formIndex=0;return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);});
   async function handleFormAnswer(ctx) { const fields=await FormField.find({bot_key:config.key,is_active:true}).sort({order:1,createdAt:1}); const i=ctx.session.formIndex||0; const f=fields[i]; if(!f) return finishForm(ctx, fields); let value=null; if(f.type==='location'){ if(!ctx.message.location) return ctx.reply('📍 Iltimos, Telegram lokatsiya yuboring.'); value={latitude:ctx.message.location.latitude,longitude:ctx.message.location.longitude}; } else if(f.type==='photo'){ if(!ctx.message.photo?.length) return ctx.reply('🖼 Iltimos, rasm yuboring.'); const ph=getLargestPhoto(ctx.message); value={file_id:ph.file_id,file_unique_id:ph.file_unique_id}; } else if(f.type==='document'){ if(!ctx.message.document) return ctx.reply('📄 Iltimos, fayl/document yuboring.'); value={file_id:ctx.message.document.file_id,file_name:ctx.message.document.file_name}; } else { const t=ctx.message.text?.trim(); if(f.required && !t) return ctx.reply('❌ Bu maydon majburiy. Javob yuboring.'); if(f.type==='number' && t && !Number.isFinite(Number(t.replace(/\s/g,'')))) return ctx.reply('❌ Raqam kiriting.'); if(f.type==='url' && t && !/^https?:\/\//i.test(t)) return ctx.reply('❌ Link http:// yoki https:// bilan boshlansin.'); value=t || ''; } ctx.session.formAnswers.push({key:f.key,label:f.label,type:f.type,value}); ctx.session.formIndex=i+1; return askField(ctx); }
-  bot.on(['photo','document','video','animation','audio','voice','sticker','location'], async(ctx)=>{ await utils.saveUser(ctx); if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id) && ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(utils.isAdmin(ctx.from.id)&&ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } });
-  bot.on('text', async(ctx)=>{ await utils.saveUser(ctx); const text=ctx.message.text.trim(); if(text==='/cancel'){ctx.session.mode=null;ctx.session.draft={};ctx.session.formAnswers=[];ctx.session.formIndex=0;return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id)){ const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common) return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Text-post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } if(ctx.session.mode==='field_add'){ const f=parseFieldLine(text); if(!f.label) return ctx.reply('❌ Label kiritilmadi.'); if(!['text','number','phone','url','location','photo','document'].includes(f.type)) return ctx.reply('❌ Type noto‘g‘ri.'); if(!f.order) f.order=(await FormField.countDocuments({bot_key:config.key}))+1; await FormField.create({bot_key:config.key,...f}); ctx.session.mode=null; return ctx.reply('✅ Input qo‘shildi.',adminKeyboard()); } if(ctx.session.mode==='field_edit'){ const parts=text.split('|').map(x=>x.trim()); const key=parts[0]; const f=parseFieldLine(parts.slice(1).join('|')); const doc=await FormField.findOne({bot_key:config.key,key,is_active:true}); if(!doc) return ctx.reply('❌ Input topilmadi.'); Object.assign(doc,{label:f.label||doc.label,type:f.type||doc.type,required:f.required,order:f.order||doc.order,placeholder:f.placeholder}); await doc.save(); ctx.session.mode=null; return ctx.reply('✅ Input tahrirlandi.',adminKeyboard()); } if(ctx.session.mode==='field_order'){ const [key,ordRaw]=text.split('|').map(x=>x.trim()); const ord=Number(ordRaw); if(!key||!Number.isFinite(ord)) return ctx.reply('❌ Format: key | order'); await FormField.updateOne({bot_key:config.key,key,is_active:true},{$set:{order:ord}}); ctx.session.mode=null; return ctx.reply('✅ Tartib yangilandi.',adminKeyboard()); } if(ctx.session.mode==='field_delete'){ const q=normalizeTitle(text); const res=await FormField.updateOne({bot_key:config.key,is_active:true,$or:[{key:text},{label:new RegExp(escapeRegex(text),'i')},{label:new RegExp(escapeRegex(q),'i')}]},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Input o‘chirildi.':'❌ Input topilmadi.',adminKeyboard()); } if(ctx.session.mode==='set_form_settings'){ const kv=parseKeyValueLines(text); const patch={}; if(kv.admin) patch.admin_contact=kv.admin.startsWith('@')?kv.admin:`@${kv.admin}`; if(kv.welcome) patch.welcome_text=kv.welcome; if(kv.payment) patch.payment_text=kv.payment; await updateBotSettings(config.key,patch); ctx.session.mode=null; return ctx.reply('✅ Sozlamalar saqlandi.',adminKeyboard()); } if(ctx.session.mode==='set_autopost_target'){ const v=normalizeUsername(text); if(!v) return ctx.reply('❌ Chat noto‘g‘ri. @kanal yoki -100... yuboring.'); await updateBotSettings(config.key,{autopost_target:v}); ctx.session.mode=null; return ctx.reply('✅ Autopost target saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_wait_meta'){ const [title,intervalRaw,targetRaw]=text.split('|').map(x=>x.trim()); const interval=Number(intervalRaw); const st=await getBotSettings(config.key); const target=normalizeUsername(targetRaw||st.autopost_target); if(!title||!Number.isFinite(interval)||interval<1||!target) return ctx.reply('❌ Format noto‘g‘ri yoki target yo‘q. Misol: Kunlik post | 1440 | @kanal'); await AutoPost.create({...ctx.session.draft.stored,bot_key:config.key,title,target_chat:target,interval_minutes:interval,next_send_at:nowPlusMinutes(interval),added_by:ctx.from.id,is_active:true}); ctx.session.mode=null; ctx.session.draft={}; return ctx.reply('✅ Autopost saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_delete'){ const res=await AutoPost.updateOne({bot_key:config.key,is_active:true,title:new RegExp(escapeRegex(text),'i')},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Autopost o‘chirildi.':'❌ Topilmadi.',adminKeyboard()); } } const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok&&!utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx); return ctx.reply('📝 Ariza yuborish uchun /start bosing.'); });
+  async function deliverAdminReply(ctx) { const sub=await FormSubmission.findOne({_id:ctx.session.draft?.replySubId,bot_key:config.key}); ctx.session.mode=null; ctx.session.draft={}; if(!sub) return ctx.reply('❌ Ariza topilmadi.', adminKeyboard()); try { await bot.telegram.sendMessage(sub.user_id, `✉️ Admin javobi (${sub.secret_code}):`); await bot.telegram.copyMessage(sub.user_id, ctx.chat.id, ctx.message.message_id); const note=String(ctx.message.text||ctx.message.caption||'').slice(0,300); if(note){ sub.admin_note=note; await sub.save(); } return ctx.reply('✅ Javob foydalanuvchiga yuborildi.', adminKeyboard()); } catch(e) { return ctx.reply(`❌ Yuborilmadi: ${e.message}`, adminKeyboard()); } }
+  bot.on(['photo','document','video','animation','audio','voice','sticker','location'], async(ctx)=>{ await utils.saveUser(ctx); if(utils.isAdmin(ctx.from.id) && ctx.session.mode==='form_reply') return deliverAdminReply(ctx); if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id) && ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(utils.isAdmin(ctx.from.id)&&ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } });
+  bot.on('text', async(ctx)=>{ await utils.saveUser(ctx); const text=ctx.message.text.trim(); if(text==='/cancel'){ctx.session.mode=null;ctx.session.draft={};ctx.session.formAnswers=[];ctx.session.formIndex=0;return ctx.reply('❌ Jarayon bekor qilindi.',utils.isAdmin(ctx.from.id)?adminKeyboard():undefined);} if(ctx.session.mode==='form_answer') return handleFormAnswer(ctx); if(utils.isAdmin(ctx.from.id)){ if(ctx.session.mode==='form_reply') return deliverAdminReply(ctx); if(ctx.session.mode==='form_search'){ ctx.session.mode=null; const sub=await FormSubmission.findOne({bot_key:config.key,secret_code:text.toUpperCase()}); if(!sub) return ctx.reply('❌ Bu shifr bilan ariza topilmadi.', adminKeyboard()); await sendSubmissionMedia(bot.telegram, ctx.chat.id, sub); return ctx.reply(submissionText(sub), submissionAdminButtons(sub)); } if(ctx.session.mode==='autopost_send_now'){ ctx.session.mode=null; const post=await AutoPost.findOne({bot_key:config.key,is_active:true,title:new RegExp(escapeRegex(text),'i')}); if(!post) return ctx.reply('❌ Autopost topilmadi.', adminKeyboard()); try { await sendStoredMessageToChat(bot.telegram, post.target_chat, post); post.last_sent_at=new Date(); post.sent_count+=1; post.next_send_at=nowPlusMinutes(post.interval_minutes); await post.save(); return ctx.reply(`✅ “${post.title}” ${post.target_chat} ga yuborildi.`, adminKeyboard()); } catch(e) { return ctx.reply(`❌ Yuborilmadi: ${e.message}\nBot ${post.target_chat} da admin ekanini tekshiring.`, adminKeyboard()); } } const common=await handleCommonAdminText(ctx,config,utils,adminKeyboard); if(common) return common; if(ctx.session.mode==='broadcasting'){const r=await utils.broadcastMessage(ctx,adminKeyboard);ctx.session.mode=null;return r;} if(ctx.session.mode==='autopost_wait_message'){ const stored=extractStoredMessage(ctx,config.key); ctx.session.draft={stored}; ctx.session.mode='autopost_wait_meta'; return ctx.reply('✅ Text-post qabul qilindi.\n\nEndi format yuboring:\nNomi | interval_daqiqa | target_chat ixtiyoriy\n\nMisol:\nKunlik reklama | 1440 | @kanal'); } if(ctx.session.mode==='field_add'){ const f=parseFieldLine(text); if(!f.label) return ctx.reply('❌ Label kiritilmadi.'); if(!['text','number','phone','url','location','photo','document'].includes(f.type)) return ctx.reply('❌ Type noto‘g‘ri.'); if(!f.order) f.order=(await FormField.countDocuments({bot_key:config.key}))+1; await FormField.create({bot_key:config.key,...f}); ctx.session.mode=null; return ctx.reply('✅ Input qo‘shildi.',adminKeyboard()); } if(ctx.session.mode==='field_edit'){ const parts=text.split('|').map(x=>x.trim()); const key=parts[0]; const f=parseFieldLine(parts.slice(1).join('|')); const doc=await FormField.findOne({bot_key:config.key,key,is_active:true}); if(!doc) return ctx.reply('❌ Input topilmadi.'); Object.assign(doc,{label:f.label||doc.label,type:f.type||doc.type,required:f.required,order:f.order||doc.order,placeholder:f.placeholder}); await doc.save(); ctx.session.mode=null; return ctx.reply('✅ Input tahrirlandi.',adminKeyboard()); } if(ctx.session.mode==='field_order'){ const [key,ordRaw]=text.split('|').map(x=>x.trim()); const ord=Number(ordRaw); if(!key||!Number.isFinite(ord)) return ctx.reply('❌ Format: key | order'); await FormField.updateOne({bot_key:config.key,key,is_active:true},{$set:{order:ord}}); ctx.session.mode=null; return ctx.reply('✅ Tartib yangilandi.',adminKeyboard()); } if(ctx.session.mode==='field_delete'){ const q=normalizeTitle(text); const res=await FormField.updateOne({bot_key:config.key,is_active:true,$or:[{key:text},{label:new RegExp(escapeRegex(text),'i')},{label:new RegExp(escapeRegex(q),'i')}]},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Input o‘chirildi.':'❌ Input topilmadi.',adminKeyboard()); } if(ctx.session.mode==='set_form_settings'){ const kv=parseKeyValueLines(text); const patch={}; if(kv.admin) patch.admin_contact=kv.admin.startsWith('@')?kv.admin:`@${kv.admin}`; if(kv.welcome) patch.welcome_text=kv.welcome; if(kv.payment) patch.payment_text=kv.payment; await updateBotSettings(config.key,patch); ctx.session.mode=null; return ctx.reply('✅ Sozlamalar saqlandi.',adminKeyboard()); } if(ctx.session.mode==='set_autopost_target'){ const v=normalizeUsername(text); if(!v) return ctx.reply('❌ Chat noto‘g‘ri. @kanal yoki -100... yuboring.'); await updateBotSettings(config.key,{autopost_target:v}); ctx.session.mode=null; return ctx.reply('✅ Autopost target saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_wait_meta'){ const [title,intervalRaw,targetRaw]=text.split('|').map(x=>x.trim()); const interval=Number(intervalRaw); const st=await getBotSettings(config.key); const target=normalizeUsername(targetRaw||st.autopost_target); if(!title||!Number.isFinite(interval)||interval<1||!target) return ctx.reply('❌ Format noto‘g‘ri yoki target yo‘q. Misol: Kunlik post | 1440 | @kanal'); await AutoPost.create({...ctx.session.draft.stored,bot_key:config.key,title,target_chat:target,interval_minutes:interval,next_send_at:nowPlusMinutes(interval),added_by:ctx.from.id,is_active:true}); ctx.session.mode=null; ctx.session.draft={}; return ctx.reply('✅ Autopost saqlandi.',adminKeyboard()); } if(ctx.session.mode==='autopost_delete'){ const res=await AutoPost.updateOne({bot_key:config.key,is_active:true,title:new RegExp(escapeRegex(text),'i')},{$set:{is_active:false}}); ctx.session.mode=null; return ctx.reply(res.modifiedCount?'✅ Autopost o‘chirildi.':'❌ Topilmadi.',adminKeyboard()); } } const ok=await utils.checkAllSubscriptions(ctx.from.id); if(!ok&&!utils.isAdmin(ctx.from.id)) return utils.sendSubscriptionWarning(ctx); return ctx.reply('📝 Ariza yuborish uchun “📝 Ariza yuborish” tugmasini bosing.', userFormKeyboard()); });
   bot.catch((err, ctx) => console.error(`❌ ${config.title} xatosi update ${ctx.update?.update_id}:`, err));
   return { key: config.key, title: config.title, bot, config };
 }
@@ -5376,8 +6301,32 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
     dirty_mute_enabled: false,
     dirty_mute_minutes: 30,
     delete_commands: false,
-    admin_log: true
+    admin_log: true,
+    // Yangi a’zo uchun “Men odamman” tekshiruvi
+    captcha_enabled: false,
+    captcha_timeout_sec: 120,
+    // Admin bo‘lmaganlar qo‘shgan botlarni chiqarish
+    anti_bot: true,
+    // Kanal nomidan yozilgan (sender_chat) xabarlarni o‘chirish
+    anti_channel: false,
+    // Tungi rejim (Toshkent vaqti bo‘yicha)
+    night_mode: false,
+    night_from: 23,
+    night_to: 7
   });
+
+  function tashkentHour() {
+    return (new Date().getUTCHours() + 5) % 24;
+  }
+
+  function isNightNow(settings) {
+    if (!settings.night_mode) return false;
+    const from = Number(settings.night_from ?? 23);
+    const to = Number(settings.night_to ?? 7);
+    const h = tashkentHour();
+    if (from === to) return false;
+    return from < to ? h >= from && h < to : h >= from || h < to;
+  }
 
   const settingsCache = new Map();
   const adminCache = new Map();
@@ -5544,8 +6493,14 @@ function createGroupToolsBot(config, tokenOverride = null, adminIdsOverride = nu
         last_message_at: new Date(),
         ...patch
       },
-      $setOnInsert: { status: 'active', joined_at: new Date() }
+      $setOnInsert: {}
     };
+    // $set va $setOnInsert bir maydonni birga yozsa MongoDB "conflict" xatosi beradi
+    // (oldin shu sabab kirgan/qo‘shgan a’zolar hisobi saqlanmay qolardi).
+    const insertDefaults = { status: 'active', joined_at: new Date() };
+    for (const [k, v] of Object.entries(insertDefaults)) {
+      if (!(k in update.$set)) update.$setOnInsert[k] = v;
+    }
     if (Object.keys(increments).length) update.$inc = increments;
     GroupMember.updateOne(
       { bot_key: config.key, chat_id: String(ctx.chat.id), user_id: Number(user.id) },
@@ -5801,7 +6756,11 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
       `✅ Ruxsatli domenlar: <b>${(settings.allow_domains || []).length}</b>`,
       `📢 Majburiy kanal: <b>${(settings.required_channels || []).length}</b>`,
       `👥 Majburiy odam qo‘shish: <b>${Number(settings.force_add_required || 0) > 0 ? Number(settings.force_add_required) + ' ta' : 'OFF'}</b>`,
-      `🤬 Haqorat cheklovi: <b>${settings.dirty_mute_enabled ? 'ON' : 'OFF'}</b>`
+      `🤬 Haqorat cheklovi: <b>${settings.dirty_mute_enabled ? 'ON' : 'OFF'}</b>`,
+      `🤖 Captcha (yangi a’zo): <b>${settings.captcha_enabled ? `ON (${settings.captcha_timeout_sec || 120}s)` : 'OFF'}</b>`,
+      `🚷 Begona botlarni chiqarish: <b>${settings.anti_bot !== false ? 'ON' : 'OFF'}</b>`,
+      `📢 Kanal nomidan yozish: <b>${settings.anti_channel ? 'taqiqlangan' : 'ruxsat'}</b>`,
+      `🌙 Tungi rejim: <b>${settings.night_mode ? `${settings.night_from}:00–${settings.night_to}:00` : 'OFF'}</b>`
     ].join('\n');
   }
 
@@ -5811,7 +6770,9 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
       [Markup.button.callback('🧹 Kirdi', 'gm:t:clean_join'), Markup.button.callback('🚪 Chiqdi', 'gm:t:clean_leave')],
       [Markup.button.callback('📨 Forward', 'gm:t:anti_forward'), Markup.button.callback('⚡ Flood', 'gm:t:anti_flood')],
       [Markup.button.callback('👋 Salomlashuv', 'gm:t:welcome_enabled'), Markup.button.callback('👥 Majburiy odam', 'gm:t:force_add_toggle')],
-      [Markup.button.callback('🤬 Dirty', 'gm:t:dirty_mute_enabled'), Markup.button.callback('🔄 Yangilash', 'gm:settings')]
+      [Markup.button.callback('🤬 Dirty', 'gm:t:dirty_mute_enabled'), Markup.button.callback('🤖 Captcha', 'gm:t:captcha_enabled')],
+      [Markup.button.callback('🚷 Anti-bot', 'gm:t:anti_bot'), Markup.button.callback('📢 Anti-kanal', 'gm:t:anti_channel')],
+      [Markup.button.callback('🌙 Tungi rejim', 'gm:t:night_mode'), Markup.button.callback('🔄 Yangilash', 'gm:settings')]
     ]);
   }
 
@@ -5858,6 +6819,11 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
       '• /clean — reply qilingan user hisobini 0 qilish',
       '• /delson — guruhdagi hamma aʼzo qo‘shish hisobini tozalash',
       '• /deforce, /priv, /plus — imtiyoz va balans boshqaruvi',
+      '',
+      '<b>Qo‘shimcha himoya:</b>',
+      '• /captcha on|off yoki /captcha 120 — yangi a’zo “Men odamman” tugmasini bosishi shart',
+      '• /night 23-7 | /night off — tungi rejim (faqat adminlar yozadi)',
+      '• /settings ichida: 🚷 Anti-bot (begona botlar), 📢 Anti-kanal (kanal nomidan yozish)',
       '',
       '<b>Foydali:</b>',
       '• /rules, /admins, /id, /groupstats, /report (reply), /commands',
@@ -6028,17 +6994,67 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
     await ctx.answerCbQuery();
     return showSettings(ctx, true);
   });
-  bot.action(/^gm:t:(anti_link|warn_on_link|clean_join|clean_leave|anti_forward|anti_flood|welcome_enabled|dirty_mute_enabled|force_add_toggle)$/, async (ctx) => {
+  bot.action(/^gm:t:(anti_link|warn_on_link|clean_join|clean_leave|anti_forward|anti_flood|welcome_enabled|dirty_mute_enabled|force_add_toggle|captcha_enabled|anti_bot|anti_channel|night_mode)$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!(await requireGroupAdmin(ctx))) return;
     const key = ctx.match[1];
     const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
     if (key === 'force_add_toggle') {
       await patchGroupSettings(ctx.chat.id, { force_add_required: Number(settings.force_add_required || 0) > 0 ? 0 : 3 });
+    } else if (key === 'anti_bot') {
+      await patchGroupSettings(ctx.chat.id, { anti_bot: settings.anti_bot === false });
     } else {
       await patchGroupSettings(ctx.chat.id, { [key]: !Boolean(settings[key]) });
     }
     return showSettings(ctx, true);
+  });
+
+  // Captcha tugmasi: holat xotirada saqlanmaydi, callback ichida user ID bor — restartdan keyin ham ishlaydi.
+  const captchaTimers = new Map();
+  bot.action(/^gm:cap:(\d+)$/, async (ctx) => {
+    const targetId = Number(ctx.match[1]);
+    if (Number(ctx.from.id) !== targetId) return ctx.answerCbQuery('Bu tugma siz uchun emas.', { show_alert: true }).catch(() => null);
+    try {
+      await bot.telegram.restrictChatMember(ctx.chat.id, targetId, { permissions: mutePermissions(true) });
+    } catch (error) {
+      return ctx.answerCbQuery(`Xatolik: ${error.description || error.message}`, { show_alert: true }).catch(() => null);
+    }
+    const key = `${ctx.chat.id}:${targetId}`;
+    const timer = captchaTimers.get(key);
+    if (timer) clearTimeout(timer);
+    captchaTimers.delete(key);
+    await ctx.answerCbQuery('✅ Rahmat! Endi yozishingiz mumkin.').catch(() => null);
+    await ctx.deleteMessage().catch(() => null);
+    logAction(ctx, 'captcha_pass', targetId).catch(() => null);
+  });
+
+  bot.command('captcha', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const arg = commandPayload(ctx).toLowerCase();
+    const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+    if (/^\d+$/.test(arg)) {
+      const sec = Math.min(900, Math.max(30, Number(arg)));
+      await patchGroupSettings(ctx.chat.id, { captcha_enabled: true, captcha_timeout_sec: sec });
+      return ctx.reply(`✅ Captcha yoqildi. Yangi a’zo ${sec} soniya ichida tugmani bosmasa, guruhdan chiqariladi.`);
+    }
+    const next = arg === 'on' ? true : arg === 'off' ? false : !settings.captcha_enabled;
+    await patchGroupSettings(ctx.chat.id, { captcha_enabled: next });
+    return ctx.reply(next ? '✅ Captcha yoqildi. Yangi a’zolar “Men odamman” tugmasini bosgunicha yoza olmaydi.' : '⏸ Captcha o‘chirildi.');
+  });
+
+  bot.command('night', async (ctx) => {
+    if (!(await requireGroupAdmin(ctx))) return;
+    const arg = commandPayload(ctx).toLowerCase();
+    if (arg === 'off') {
+      await patchGroupSettings(ctx.chat.id, { night_mode: false });
+      return ctx.reply('☀️ Tungi rejim o‘chirildi.');
+    }
+    const m = arg.match(/^(\d{1,2})\s*[- ]\s*(\d{1,2})$/);
+    if (!m) return ctx.reply('🌙 Format: /night 23-7 (Toshkent vaqti) yoki /night off\nShu vaqt oralig‘ida adminlardan boshqalarning xabarlari o‘chiriladi.');
+    const from = Number(m[1]) % 24;
+    const to = Number(m[2]) % 24;
+    await patchGroupSettings(ctx.chat.id, { night_mode: true, night_from: from, night_to: to });
+    return ctx.reply(`🌙 Tungi rejim: ${from}:00 dan ${to}:00 gacha guruhda faqat adminlar yoza oladi.`);
   });
 
   bot.command('warn', async (ctx) => {
@@ -6393,6 +7409,52 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
       saveGroupMember(ctx, inviter, { status: 'active' }, { invited_count: joinedUsers.length, invited_valid_count: joinedUsers.length }).catch(() => null);
     }
     if (settings.clean_join !== false) await safeDelete(ctx);
+
+    // 🚷 Admin bo‘lmagan user qo‘shgan botlarni chiqaramiz (o‘zimizdan tashqari).
+    if (settings.anti_bot !== false && inviter) {
+      const addedBots = (ctx.message.new_chat_members || []).filter((u) => u.is_bot && Number(u.id) !== Number(ctx.botInfo?.id || botMeCache.id || 0));
+      if (addedBots.length && !(await isChatAdmin(ctx.chat.id, inviter.id))) {
+        for (const b of addedBots) {
+          try {
+            await bot.telegram.banChatMember(ctx.chat.id, b.id);
+            await logAction(ctx, 'anti_bot_kick', b.id, `Qo‘shgan: ${inviter.id}`);
+          } catch (_) {}
+        }
+        await tempReply(ctx, `🚷 ${inviter.first_name || 'Foydalanuvchi'}, guruhga bot qo‘shish faqat adminlarga ruxsat etilgan.`, settings);
+      }
+    }
+
+    // 🤖 Captcha: yangi a’zo tugmani bosmaguncha yoza olmaydi.
+    if (settings.captcha_enabled) {
+      const timeoutSec = Math.min(900, Math.max(30, Number(settings.captcha_timeout_sec || 120)));
+      for (const member of joinedUsers) {
+        if (await isChatAdmin(ctx.chat.id, member.id)) continue;
+        try {
+          await bot.telegram.restrictChatMember(ctx.chat.id, member.id, { permissions: mutePermissions(false) });
+        } catch (_) { continue; }
+        const sent = await ctx.reply(
+          `👋 ${mentionHtml(member.id, member.first_name || 'Do‘st')}, xush kelibsiz!\n\nGuruhda yozish uchun ${timeoutSec} soniya ichida pastdagi tugmani bosing.`,
+          { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('✅ Men odamman', `gm:cap:${member.id}`)]]) }
+        ).catch(() => null);
+        const key = `${ctx.chat.id}:${member.id}`;
+        const chatId = ctx.chat.id;
+        const timer = setTimeout(async () => {
+          captchaTimers.delete(key);
+          try {
+            const cm = await bot.telegram.getChatMember(chatId, member.id);
+            // Hali ham cheklangan bo‘lsa (tugmani bosmagan) — chiqaramiz.
+            if (cm.status === 'restricted' && cm.can_send_messages === false) {
+              await bot.telegram.banChatMember(chatId, member.id, { until_date: Math.floor(Date.now() / 1000) + 60 });
+              await bot.telegram.unbanChatMember(chatId, member.id).catch(() => null);
+            }
+          } catch (_) {}
+          if (sent) bot.telegram.deleteMessage(chatId, sent.message_id).catch(() => null);
+        }, timeoutSec * 1000);
+        timer.unref?.();
+        captchaTimers.set(key, timer);
+      }
+    }
+
     if (settings.welcome_enabled) {
       for (const member of ctx.message.new_chat_members || []) {
         if (member.is_bot) continue;
@@ -6414,16 +7476,42 @@ Siz qo‘shganlar: ${count}/${required}.${extra}`;
   });
 
   bot.on('message', async (ctx) => {
-    if (!isGroupChat(ctx) || !ctx.message || !ctx.from || ctx.from.is_bot) return;
-    utils.saveUser(ctx).catch(() => null);
+    // Kanal nomidan yozilgan xabarda from = @Channel_Bot (is_bot), shuning uchun sender_chat bo‘lsa davom etamiz.
+    if (!isGroupChat(ctx) || !ctx.message || !ctx.from || (ctx.from.is_bot && !ctx.message.sender_chat)) return;
+    if (!ctx.from.is_bot) utils.saveUser(ctx).catch(() => null);
     saveGroupMember(ctx, ctx.from, {}, { messages_count: 1 }).catch(() => null);
     GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { messages_seen: 1 }, $set: { last_active_at: new Date(), title: ctx.chat.title || null } }, { upsert: true }).catch(() => null);
 
     const text = extractTextAndCaption(ctx.message);
     if (text.startsWith('/')) return;
     const settings = await getGroupSettings(ctx.chat.id, ctx.chat);
+
+    // 📢 Kanal nomidan yozilgan xabarlar (anonim admin — sender_chat guruhning o‘zi — bundan mustasno).
+    const senderChat = ctx.message.sender_chat;
+    if (settings.anti_channel && senderChat && Number(senderChat.id) !== Number(ctx.chat.id) && !ctx.message.is_automatic_forward) {
+      await safeDelete(ctx);
+      GroupChat.updateOne({ bot_key: config.key, chat_id: String(ctx.chat.id) }, { $inc: { deleted_messages: 1 } }).catch(() => null);
+      try { await bot.telegram.callApi('banChatSenderChat', { chat_id: ctx.chat.id, sender_chat_id: senderChat.id }); } catch (_) {}
+      await tempReply(ctx, '📢 Bu guruhda kanal nomidan yozish taqiqlangan.', settings);
+      return;
+    }
+    // Anonim admin yoki ruxsat etilgan kanal xabari — boshqa filtrlar odam uchun, ularga tegmaymiz.
+    if (senderChat) return;
+
     const isAdmin = await isChatAdmin(ctx.chat.id, ctx.from.id);
     if (isAdmin) return;
+
+    // 🌙 Tungi rejim
+    if (isNightNow(settings)) {
+      await safeDelete(ctx);
+      const nightKey = `night:${ctx.chat.id}`;
+      const last = floodCache.get(nightKey)?.[0] || 0;
+      if (Date.now() - last > 10 * 60 * 1000) {
+        floodCache.set(nightKey, [Date.now()]);
+        await tempReply(ctx, `🌙 Tungi rejim: ${settings.night_from}:00–${settings.night_to}:00 oralig‘ida faqat adminlar yozadi.`, settings);
+      }
+      return;
+    }
 
     const channelCheck = await checkRequiredChannels(ctx.from.id, settings);
     if (!channelCheck.ok) {
@@ -6592,11 +7680,13 @@ function commandListForConfig(config = {}) {
       { command: 'set', description: 'Majburiy kanal/guruh qo‘shish' },
       { command: 'unlink', description: 'Majburiy kanallarni tozalash' },
       { command: 'filter', description: 'Avtojavob qo‘shish' },
+      { command: 'captcha', description: 'Yangi a’zo tekshiruvi on/off' },
+      { command: 'night', description: 'Tungi rejim: /night 23-7' },
       { command: 'report', description: 'Adminlarga shikoyat' }
     ];
   }
   if (engine === 'chat_learning') {
-    return [...base, { command: 'learn_on', description: 'O‘rganishni yoqish' }, { command: 'learn_off', description: 'O‘rganishni o‘chirish' }, { command: 'reply_on', description: 'Avto-javobni yoqish' }, { command: 'reply_off', description: 'Avto-javobni o‘chirish' }, { command: 'learnstats', description: 'O‘rganish statistikasi' }];
+    return [...base, { command: 'teach', description: 'Qo‘lda o‘rgatish: savol | javob' }, { command: 'forget', description: 'Noto‘g‘ri javobni unutish (reply)' }, { command: 'learned', description: 'O‘rganilganlar ro‘yxati' }, { command: 'learn_on', description: 'O‘rganishni yoqish' }, { command: 'learn_off', description: 'O‘rganishni o‘chirish' }, { command: 'reply_on', description: 'Avto-javobni yoqish' }, { command: 'reply_off', description: 'Avto-javobni o‘chirish' }, { command: 'setscore', description: 'Moslik aniqligi (0.15–0.9)' }, { command: 'chance', description: 'Javob berish ehtimoli (%)' }, { command: 'mention_on', description: 'Faqat chaqirilganda javob' }, { command: 'mention_off', description: 'Hammaga javob' }, { command: 'learnstats', description: 'O‘rganish statistikasi' }];
   }
   if (engine === 'giveaway') return [...base, { command: 'konkurs', description: 'Konkurs e’loni' }, { command: 'contest', description: 'Konkurs e’loni' }, { command: 'reyting', description: 'Konkurs reytingi' }, { command: 'top', description: 'TOP qatnashchilar' }, { command: 'statistika', description: 'Konkurs statistikasi' }];
   if (engine === 'video_downloader') return [...base, { command: 'cancel', description: 'Yuklash jarayonini bekor qilish' }];
@@ -6640,7 +7730,7 @@ async function syncActiveBotWebhook(active, source = 'manual') {
     await active.bot.telegram.setWebhook(fullUrl, {
       secret_token: WEBHOOK_SECRET,
       drop_pending_updates: false,
-      allowed_updates: ['message', 'channel_post', 'callback_query', 'chat_member', 'my_chat_member', 'chat_join_request']
+      allowed_updates: ['message', 'channel_post', 'callback_query', 'inline_query', 'chat_member', 'my_chat_member', 'chat_join_request']
     });
     console.log(`🌐 ${active.title} webhook o'rnatildi (${source}): ${fullUrl}`);
   } else {
@@ -8047,6 +9137,7 @@ function createFactoryBot() {
       `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}
 
 ` +
+        (preset.description ? `📋 Imkoniyatlar: ${preset.description}\n\n` : '') +
         `Endi tarifni tanlang:
 
 ` +
