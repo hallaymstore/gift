@@ -13,6 +13,7 @@ const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
+const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -2247,7 +2248,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const progressMessage = await ctx.reply('🎬 Shorts tayyorlanmoqda...\n\n' +
       '🔎 Kod: ' + content.code + '\n' +
       '🤖 @' + username + '\n' +
-      '📱 Tezkor format: 9:16 | 540×960 | 30 soniyagacha');
+      '📱 Tezkor format: 9:16 | 360×640 | 30 soniyagacha');
     async function updateProgress(text) {
       try {
         await ctx.telegram.editMessageText(ctx.chat.id, progressMessage.message_id, undefined, text);
@@ -2276,11 +2277,18 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
           }
           if (stage === 'ready') {
             await updateProgress('📤 Montaj tayyor! Telegramga yuborilmoqda...\n🔎 Kod: ' + content.code);
-            // Video file must remain present until upload finishes.
-            await ctx.telegram.sendVideo(ctx.chat.id, { source: data.output, filename: 'shorts-' + content.code + '.mp4' }, {
+            // Upload inside the callback: the temporary file must still exist.
+            // Generated MP4 is bitrate-capped; retry only transient socket errors.
+            await sendShortsVideo({
+              telegram: ctx.telegram,
+              chatId: ctx.chat.id,
+              output: data.output,
+              filename: 'shorts-' + content.code + '.mp4',
               caption: '🎬 ' + content.title + '\n🔎 Kod: ' + content.code +
                 '\n🤖 @' + username + '\n🔗 https://t.me/' + username + '?start=c_' + content.code,
-              supports_streaming: true
+              onRetry: async () => {
+                await updateProgress('🔄 Telegram ulanishi uzildi. Video qayta yuborilmoqda…\n🔎 Kod: ' + content.code);
+              }
             });
           }
         }
@@ -2289,9 +2297,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       return ctx.reply('✅ Tayyor! ' + rendered.seconds +
         ' soniyagacha.\n➡️ Keyingi videoni yuborishingiz mumkin.', shortsKeyboard());
     } catch (err) {
-      console.error('Shorts Studio xatosi:', err.message);
+      console.error('Shorts Studio xatosi:', publicUploadError(err));
       await updateProgress('❌ Shorts montaji yakunlanmadi. Xatolik tafsiloti quyida.');
-      return ctx.reply('❌ Shorts tayyorlanmadi: ' + err.message +
+      return ctx.reply('❌ Shorts tayyorlanmadi: ' + publicUploadError(err) +
         '\n\n💡 Qisqaroq va 19 MB dan kichik MP4 video yuboring.', shortsKeyboard());
     } finally {
       ctx.session.shortsVideo = null;
@@ -2320,10 +2328,10 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     if (detectedCode) {
       ctx.session.mode = 'shorts_processing';
       void renderAdminShorts(ctx, detectedCode).catch(err => {
-        console.error('[Shorts Studio] Async error:', err.message);
+        console.error('[Shorts Studio] Async error:', publicUploadError(err));
         ctx.session.mode = 'shorts_wait_video';
         ctx.session.shortsVideo = null;
-        return ctx.telegram.sendMessage(ctx.chat.id, '❌ Shorts montaji xatosi: ' + err.message).catch(() => {});
+        return ctx.telegram.sendMessage(ctx.chat.id, '❌ Shorts montaji xatosi: ' + publicUploadError(err)).catch(() => {});
       });
       return;
     }
