@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const https = require('https');
 const { spawn } = require('child_process');
+const { createOverlayPng } = require('./shorts-overlay');
 
 const INPUT_LIMIT = 19 * 1024 * 1024; // Telegram cloud Bot API download limit: approx. 20 MB.
 const OUTPUT_LIMIT = 48 * 1024 * 1024; // Cloud Bot API sendVideo limit: approx. 50 MB.
@@ -45,47 +46,26 @@ function safeUsername(username) {
   return /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/.test(value) ? value : '';
 }
 
-function fontFile() {
-  const candidates = [
-    process.env.SHORTS_FONT_PATH,
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
-    '/usr/share/fonts/truetype/lato/Lato-Bold.ttf'
-  ];
-  return candidates.find(f => f && fs.existsSync(f)) || '';
-}
-
-function filterFilePath(value) {
-  return String(value).replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
-}
-
-function filterGraph(directory, options = {}) {
-  const f = fontFile();
-  const baseFont = f ? 'fontfile=' + filterFilePath(f) : "font=DejaVu Sans";
-  const topFile = filterFilePath(path.join(directory, 'top.txt'));
-  const lowerFile = filterFilePath(path.join(directory, 'bottom.txt'));
-  const titleFont = String(options?.titleFont || 51);
-  const codeFont = String(options?.codeFont || 71);
+function filterGraph() {
+  // No drawtext: overlay is a transparent PNG created by sharp.
   return [
-    'scale=720:760:force_original_aspect_ratio=decrease',
+    '[0:v:0]scale=720:760:force_original_aspect_ratio=decrease',
     'pad=720:1280:(ow-iw)/2:(oh-ih)/2:black',
     'setsar=1',
-    'drawtext=' + baseFont + ':textfile=' + topFile + ':fontsize=' + titleFont +
-      ':fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=110',
-    'drawtext=' + baseFont + ':textfile=' + lowerFile + ':fontsize=' + codeFont +
-      ':fontcolor=yellow:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-205',
-    'format=yuv420p'
+    'format=yuv420p[base];[base][1:v:0]overlay=0:0:shortest=1',
+    'format=yuv420p[v]'
   ].join(',');
 }
 
-function ffmpegArgs({ input, output, directory, start = 0, seconds = EDIT_SECONDS }) {
+function ffmpegArgs({ input, overlay, output, start = 0, seconds = EDIT_SECONDS }) {
   return [
     '-hide_banner', '-loglevel', 'error', '-y',
     '-ss', String(Math.max(0, Number(start) || 0)),
     '-i', input,
+    '-loop', '1', '-framerate', '24', '-i', overlay,
     '-t', String(Math.max(1, Math.min(60, Number(seconds) || EDIT_SECONDS))),
-    '-map', '0:v:0', '-map', '0:a:0?',
-    '-vf', filterGraph(directory),
+    '-filter_complex', filterGraph(),
+    '-map', '[v]', '-map', '0:a:0?',
     '-r', '24', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27',
     '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
     '-max_muxing_queue_size', '1024', '-movflags', '+faststart', output
@@ -171,13 +151,14 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, la
     directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'factory-shorts-'));
     const input = path.join(directory, 'input.mp4');
     const output = path.join(directory, 'shorts.mp4');
-    await fs.promises.writeFile(path.join(directory, 'top.txt'), 'TELEGRAM  @' + actualUsername);
-    await fs.promises.writeFile(path.join(directory, 'bottom.txt'), safeVideoLabel(label) + ' KODI: ' + actualCode);
+    const overlay = await createOverlayPng({
+      directory, username: actualUsername, code: actualCode, label: safeVideoLabel(label)
+    });
     const link = await telegram.getFileLink(fileId);
     await downloadTelegramMedia(link, input);
     const segment = chooseSegment(duration, EDIT_SECONDS);
     if (typeof work === 'function') await work('editing', segment);
-    await runFfmpeg(ffmpegArgs({ input, output, directory, start: segment.start, seconds: segment.seconds }));
+    await runFfmpeg(ffmpegArgs({ input, overlay, output, start: segment.start, seconds: segment.seconds }));
     const stat = await fs.promises.stat(output);
     if (stat.size < 1024 || stat.size > OUTPUT_LIMIT) {
       throw new Error('Tayyor video hajmi Telegram limitiga mos emas.');
