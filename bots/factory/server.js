@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
+const { importedMeta } = require('./bulk-import');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -1571,7 +1572,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   bot.use(
     session({
-      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null })
+      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null })
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
@@ -1617,6 +1618,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.mode = null;
     ctx.session.tempMessage = null;
     ctx.session.tempPart = null;
+    ctx.session.bulkStats = null;
   }
 
   function addButton() {
@@ -1646,8 +1648,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   function adminKeyboard() {
     return Markup.keyboard([
       [addButton(), partButton()],
-      [listButton(), '📊 Statistika'],
-      ['✏️ Tahrirlash', '🔒 Kontent himoyasi'],
+      ['⚡ Ommaviy qo‘shish', listButton()],
+      ['📊 Statistika', '✏️ Tahrirlash'],
+      ['🔒 Kontent himoyasi'],
       [deleteButton(), '🧹 Qism oʻchirish'],
       ['📢 Broadcast', USER_BTN.top],
       ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
@@ -2192,6 +2195,90 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     );
   });
 
+  const bulkKeyboard = () => Markup.keyboard([['✅ Yuklashni yakunlash'], ['🏠 Bosh menyu']]).resize();
+
+  function startBulkImport(ctx) {
+    if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Faqat bot administratori uchun.');
+    if (ctx.chat?.type !== 'private') return ctx.reply('⚠️ Ommaviy import faqat bot bilan shaxsiy chatda ishlaydi.');
+    resetSession(ctx);
+    ctx.session.mode = 'bulk_import';
+    ctx.session.bulkStats = { added: 0, duplicated: 0, skipped: 0 };
+    return ctx.reply(
+      '⚡ OMMAVIY KONTENT QO‘SHISH\n\n' +
+      'Endi boshqa chat/kanaldan bir nechta video, rasm, hujjat yoki matnli postlarni tanlab, shu botga forward qiling.\n\n' +
+      'Bot har bir xabardan “Kino kodi: 101”, “Kod: 101”, “KODI - 101”, “Code 101” kabi kodni va “Nomi: ...” satridan nomini oladi.\n' +
+      'Nom bo‘lmasa fayl nomi yoki koddan foydalanadi. Kod bo‘lmasa nomdan kod yasaydi.\n' +
+      'Boshqa bot reklamasi o‘rniga har botning o‘z username’i va yangi tavsifi ko‘rsatiladi.\n\n' +
+      '✅ Tugagach “Yuklashni yakunlash” tugmasini bosing.\n❌ /cancel — bekor qilish.',
+      bulkKeyboard()
+    );
+  }
+
+  bot.hears('⚡ Ommaviy qo‘shish', startBulkImport);
+  bot.command('bulk', startBulkImport);
+  bot.hears('✅ Yuklashni yakunlash', (ctx) => {
+    if (!isAdmin(ctx.from?.id) || ctx.session?.mode !== 'bulk_import') return;
+    const stats = ctx.session.bulkStats || { added: 0, duplicated: 0, skipped: 0 };
+    resetSession(ctx);
+    return ctx.reply(
+      '✅ OMMAVIY YUKLASH YAKUNLANDI\n\n' +
+      '📥 Qo‘shildi: ' + stats.added +
+      '\n♻️ Takroriy kod: ' + stats.duplicated +
+      '\n⚠️ O‘tkazib yuborildi: ' + stats.skipped +
+      '\n\nYangi postlar nom yoki kod bo‘yicha qidiriladi.',
+      adminKeyboard()
+    );
+  });
+
+  async function handleBulkImport(ctx) {
+    if (!isAdmin(ctx.from?.id) || ctx.session?.mode !== 'bulk_import') return;
+    const stats = ctx.session.bulkStats || (ctx.session.bulkStats = { added: 0, duplicated: 0, skipped: 0 });
+    const stored = extractStoredMessage(ctx, config.key);
+    if (!stored || !['text', 'video', 'photo', 'document', 'animation', 'audio', 'voice'].includes(stored.message_type)) {
+      stats.skipped++;
+      return ctx.reply('⚠️ Bunday postni ommaviy qo‘shib bo‘lmaydi. Matn/video/rasm/fayl yuboring.', bulkKeyboard());
+    }
+    const meta = importedMeta(ctx.message, config.itemTitle, slugifyCode, isValidCode);
+    if (!meta.ok) {
+      stats.skipped++;
+      return ctx.reply('⚠️ Post o‘tkazib yuborildi: ' + meta.reason, bulkKeyboard());
+    }
+    const codeNorm = normalizeCode(meta.code);
+    if (await Content.exists({ bot_key: config.key, code_norm: codeNorm, is_active: true })) {
+      stats.duplicated++;
+      return ctx.reply('♻️ ' + meta.code + ' kodi allaqachon mavjud. Takroriy post qo‘shilmadi.', bulkKeyboard());
+    }
+    try {
+      await Content.create({
+        ...stored,
+        title: meta.title,
+        title_norm: normalizeTitle(meta.title),
+        code: meta.code,
+        code_norm: codeNorm,
+        description: meta.description,
+        has_parts: false,
+        added_by: ctx.from.id
+      });
+      stats.added++;
+      if (stats.added <= 3 || stats.added % 10 === 0) {
+        return ctx.reply(
+          '✅ ' + meta.title + '\n🔎 Kod: ' + meta.code +
+          '\n📥 Jami qo‘shildi: ' + stats.added +
+          '\n\n➡️ Keyingi postlarni ham forward qilavering.',
+          bulkKeyboard()
+        );
+      }
+    } catch (error) {
+      if (error.code === 11000) {
+        stats.duplicated++;
+        return ctx.reply('♻️ ' + meta.code + ' kodi takrorlandi, o‘tkazib yuborildi.', bulkKeyboard());
+      }
+      stats.skipped++;
+      console.error('Ommaviy import xatosi:', error.message);
+      return ctx.reply('⚠️ ' + meta.code + ' kodli post saqlanmadi. Qayta yuboring.', bulkKeyboard());
+    }
+  }
+
   bot.hears(deleteButton(), async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'delete_content';
@@ -2264,6 +2351,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (isAdmin(userId)) {
+      if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
       if (ctx.session.mode === 'add_channel') return addChannelOrGroup(ctx, text, 'channel');
       if (ctx.session.mode === 'add_group') return addChannelOrGroup(ctx, text, 'group');
 
@@ -2475,6 +2563,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       resetSession(ctx);
       return result;
     }
+
+    if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
 
     if (ctx.session.mode === 'single_wait_message') {
       const stored = extractStoredMessage(ctx, config.key);
