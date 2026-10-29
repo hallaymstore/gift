@@ -21,8 +21,8 @@ test('Sharp creates a PNG with valid 9:16 transparent canvas', async () => {
   try {
     const output = await createOverlayPng({ directory: dir, username: 'y808bot', code: '769', label: 'KINO' });
     const m = await sharp(output).metadata();
-    assert.equal(m.width, 720);
-    assert.equal(m.height, 1280);
+    assert.equal(m.width, 540);
+    assert.equal(m.height, 960);
     assert.equal(m.format, 'png');
     assert.equal(m.hasAlpha, true);
   } finally {
