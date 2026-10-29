@@ -11,7 +11,8 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
-const { importedMeta } = require('./bulk-import');
+const { importedMeta, extractPostCode } = require('./bulk-import');
+const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -1572,7 +1573,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   bot.use(
     session({
-      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null })
+      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null, shortsVideo: null })
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
@@ -1619,6 +1620,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.tempMessage = null;
     ctx.session.tempPart = null;
     ctx.session.bulkStats = null;
+    ctx.session.shortsVideo = null;
   }
 
   function addButton() {
@@ -1648,7 +1650,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   function adminKeyboard() {
     return Markup.keyboard([
       [addButton(), partButton()],
-      ['⚡ Ommaviy qo‘shish', listButton()],
+      ['🎬 Shorts Studio', '⚡ Ommaviy qo‘shish'],
+      [listButton()],
       ['📊 Statistika', '✏️ Tahrirlash'],
       ['🔒 Kontent himoyasi'],
       [deleteButton(), '🧹 Qism oʻchirish'],
@@ -2195,6 +2198,110 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     );
   });
 
+  // 🎬 Shorts Studio — admin's own short video -> automatic 9:16 MP4 with username + code.
+  // Factory's other bot types and all regular content delivery are unaffected.
+  const shortsKeyboard = () => Markup.keyboard([['🎬 Shorts Studio'], ['🏠 Bosh menyu']]).resize();
+
+  function startShortsStudio(ctx) {
+    if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Shorts Studio faqat bot admini uchun.');
+    if (ctx.chat?.type !== 'private') return ctx.reply('⚠️ Shorts Studio faqat shaxsiy chatda ishlaydi.');
+    resetSession(ctx);
+    ctx.session.mode = 'shorts_wait_video';
+    return ctx.reply(
+      '🎬 SHORTS STUDIO\n\n' +
+      '📹 19 MB gacha qisqa video yuboring yoki forward qiling.\n' +
+      '🔎 Videoning captionida “Kod: 509” bo‘lsa avtomatik olinadi; bo‘lmasa keyin kino kodini yuborasiz.\n\n' +
+      '✅ 9:16 format | yuqorida TELEGRAM @' + botUsername(ctx) +
+      ' | pastda katta KINO KODI.\n' +
+      '✂️ Uzunroq videoning ko‘pi bilan 30 soniyasi olinadi, qisqa video esa o‘z uzunligicha qoladi.\n' +
+      '🎞 Video o‘rtada asl nisbatida, qolgan qismi qora fon.\n' +
+      '⚠️ Video/kod sizning botingiz katalogida mavjud bo‘lishi kerak.\n\n' +
+      '❌ /cancel — chiqish.',
+      shortsKeyboard()
+    );
+  }
+
+  bot.hears('🎬 Shorts Studio', startShortsStudio);
+  bot.command('shorts', startShortsStudio);
+
+  async function renderAdminShorts(ctx, code) {
+    const normalized = normalizeCode(code);
+    if (!isValidCode(normalized)) {
+      ctx.session.mode = 'shorts_wait_code';
+      return ctx.reply('❌ Kod noto‘g‘ri. Masalan: 509', shortsKeyboard());
+    }
+    const content = await Content.findOne({
+      bot_key: config.key, code_norm: normalized, is_active: true
+    }).select('title code').lean();
+    if (!content) {
+      ctx.session.mode = 'shorts_wait_code';
+      return ctx.reply('❌ ' + code + ' kodi katalogingizdan topilmadi. Mavjud kino kodini yuboring.', shortsKeyboard());
+    }
+    const video = ctx.session.shortsVideo;
+    if (!video?.file_id) {
+      ctx.session.mode = 'shorts_wait_video';
+      return ctx.reply('❌ Avval qisqa videoni yuboring.', shortsKeyboard());
+    }
+    const username = botUsername(ctx);
+    ctx.session.mode = 'shorts_processing';
+    await ctx.reply('🎬 Video montaj qilinmoqda...\n\n' +
+      'Kino kodi: ' + content.code + '\n' +
+      '🤖 @' + username + '\n' +
+      '📱 Format: 9:16 | 720×1280 | 30 soniyagacha');
+
+    try {
+      const rendered = await makeShorts({
+        telegram: ctx.telegram,
+        fileId: video.file_id,
+        size: video.file_size,
+        duration: video.duration,
+        username,
+        code: content.code,
+        work: async (stage, data) => {
+          if (stage !== 'ready') return;
+          // Telegram uploads the generated file while temp output still exists.
+          await ctx.telegram.sendVideo(ctx.chat.id, { source: data.output, filename: 'shorts-' + content.code + '.mp4' }, {
+            caption: '🎬 ' + content.title + '\n🔎 Kod: ' + content.code +
+              '\n🤖 @' + username + '\n🔗 https://t.me/' + username + '?start=c_' + content.code,
+            supports_streaming: true
+          });
+        }
+      });
+      return ctx.reply('✅ Shorts tayyor! ' + rendered.seconds + ' soniyagacha, boshlanish: ' +
+        rendered.start + '-soniya.\n\n➡️ Keyingi qisqa videoni ham yuborishingiz mumkin.', shortsKeyboard());
+    } catch (err) {
+      console.error('Shorts Studio xatosi:', err.message);
+      return ctx.reply('❌ Shorts tayyorlanmadi: ' + err.message +
+        '\n\n💡 Qisqaroq va 19 MB dan kichik MP4 video yuboring.', shortsKeyboard());
+    } finally {
+      ctx.session.shortsVideo = null;
+      ctx.session.mode = 'shorts_wait_video';
+    }
+  }
+
+  async function receiveShortsVideo(ctx) {
+    const video = ctx.message?.video || (ctx.message?.document &&
+      (/^video\//i.test(ctx.message.document.mime_type || '') ||
+        /\.(mp4|mov|mkv|webm)$/i.test(ctx.message.document.file_name || ''))
+      ? ctx.message.document : null);
+    if (!video?.file_id) {
+      return ctx.reply('📹 MP4 yoki video fayl yuboring. Oddiy matn emas.', shortsKeyboard());
+    }
+    if (video.file_size && video.file_size > SHORTS_INPUT_LIMIT) {
+      return ctx.reply('⚠️ Bu video 19 MB dan katta. Telegram Bot API limitidan oshadi.\n' +
+        'Videoni qisqartiring yoki hajmini kichraytirib, qayta yuboring.', shortsKeyboard());
+    }
+    ctx.session.shortsVideo = {
+      file_id: video.file_id,
+      file_size: video.file_size || 0,
+      duration: video.duration || 0
+    };
+    const detectedCode = extractPostCode(ctx.message.caption || '');
+    if (detectedCode) return renderAdminShorts(ctx, detectedCode);
+    ctx.session.mode = 'shorts_wait_code';
+    return ctx.reply('✅ Video qabul qilindi!\n\n🔎 Endi katalogdagi kino kodini yuboring. Masalan: 509', shortsKeyboard());
+  }
+
   const bulkKeyboard = () => Markup.keyboard([['✅ Yuklashni yakunlash'], ['🏠 Bosh menyu']]).resize();
 
   function startBulkImport(ctx) {
@@ -2357,6 +2464,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (isAdmin(userId)) {
+      if (ctx.session.mode === 'shorts_wait_code') return renderAdminShorts(ctx, text);
+      if (ctx.session.mode === 'shorts_wait_video') return ctx.reply('📹 Qisqa videoni yuboring yoki /cancel bosing.', shortsKeyboard());
+      if (ctx.session.mode === 'shorts_processing') return ctx.reply('⏳ Oldingi video hali tayyorlanmoqda.');
       if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
       if (ctx.session.mode === 'add_channel') return addChannelOrGroup(ctx, text, 'channel');
       if (ctx.session.mode === 'add_group') return addChannelOrGroup(ctx, text, 'group');
@@ -2571,6 +2681,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
+
+    if (['shorts_wait_video', 'shorts_wait_code'].includes(ctx.session.mode)) return receiveShortsVideo(ctx);
+    if (ctx.session.mode === 'shorts_processing') return ctx.reply('⏳ Video montaj qilinmoqda.');
 
     if (ctx.session.mode === 'single_wait_message') {
       const stored = extractStoredMessage(ctx, config.key);
