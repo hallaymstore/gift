@@ -49,8 +49,8 @@ function safeUsername(username) {
 function filterGraph() {
   // No drawtext: overlay is a transparent PNG created by sharp.
   return [
-    '[0:v:0]scale=720:760:force_original_aspect_ratio=decrease',
-    'pad=720:1280:(ow-iw)/2:(oh-ih)/2:black',
+    '[0:v:0]scale=540:570:force_original_aspect_ratio=decrease:flags=fast_bilinear',
+    'pad=540:960:(ow-iw)/2:(oh-ih)/2:black',
     'setsar=1',
     'format=yuv420p[base];[base][1:v:0]overlay=0:0:shortest=1',
     'format=yuv420p[v]'
@@ -64,10 +64,10 @@ function ffmpegArgs({ input, overlay, output, start = 0, seconds = EDIT_SECONDS 
     '-i', input,
     '-loop', '1', '-framerate', '24', '-i', overlay,
     '-t', String(Math.max(1, Math.min(60, Number(seconds) || EDIT_SECONDS))),
-    '-filter_complex', filterGraph(),
+    '-filter_complex_threads', '1', '-filter_complex', filterGraph(),
     '-map', '[v]', '-map', '0:a:0?',
-    '-r', '24', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27',
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
+    '-r', '18', '-threads', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '29',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '64k',
     '-max_muxing_queue_size', '1024', '-movflags', '+faststart', output
   ];
 }
@@ -111,7 +111,7 @@ function downloadTelegramMedia(fileUrl, outputFile, maxBytes = INPUT_LIMIT) {
   });
 }
 
-function runFfmpeg(args, timeoutMs = 180000) {
+function runFfmpeg(args, timeoutMs = 100000) {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegBinary(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
@@ -146,6 +146,8 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, la
   if (renderInProgress) throw new Error('Hozir boshqa video montaj qilinyapti. Keyin qayta urinib ko‘ring.');
 
   renderInProgress = true;
+  const startedAt = Date.now();
+  console.info('[Shorts Studio] Job started', { inputBytes: Number(size) || 0, seconds: Number(duration) || 0 });
   let directory = '';
   try {
     directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'factory-shorts-'));
@@ -154,17 +156,21 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, la
     const overlay = await createOverlayPng({
       directory, username: actualUsername, code: actualCode, label: safeVideoLabel(label)
     });
+    if (typeof work === 'function') await work('downloading');
     const link = await telegram.getFileLink(fileId);
     await downloadTelegramMedia(link, input);
+    console.info('[Shorts Studio] Download done', { elapsedSec: Math.round((Date.now() - startedAt)/1000) });
     const segment = chooseSegment(duration, EDIT_SECONDS);
     if (typeof work === 'function') await work('editing', segment);
     await runFfmpeg(ffmpegArgs({ input, overlay, output, start: segment.start, seconds: segment.seconds }));
+    console.info('[Shorts Studio] Encode done', { elapsedSec: Math.round((Date.now() - startedAt)/1000) });
     const stat = await fs.promises.stat(output);
     if (stat.size < 1024 || stat.size > OUTPUT_LIMIT) {
       throw new Error('Tayyor video hajmi Telegram limitiga mos emas.');
     }
     // Send before deleting our temporary source. No user files kept on server.
     if (typeof work === 'function') await work('ready', { output, size: stat.size, segment });
+    console.info('[Shorts Studio] Delivery done', { elapsedSec: Math.round((Date.now() - startedAt)/1000), outputBytes: stat.size });
     return { seconds: segment.seconds, start: segment.start, bytes: stat.size };
   } finally {
     renderInProgress = false;

@@ -36,8 +36,9 @@ function overlaySvg(username, code, label = 'KINO') {
 async function createOverlayPng({ directory, username, code, label }) {
   if (!directory) throw new Error('Vaqtinchalik video papkasi topilmadi.');
   const target = path.join(directory, 'overlay.png');
-  await sharp(Buffer.from(overlaySvg(username, code, label)), { density: 96 })
-    .png({ compressionLevel: 6 })
+  await sharp(Buffer.from(overlaySvg(username, code, label)), { density: 72 })
+    .resize(540, 960, { kernel: 'lanczos2' })
+    .png({ compressionLevel: 4 })
     .toFile(target);
   const { size } = await fs.promises.stat(target);
   if (size < 1024) throw new Error('Shorts overlay rasmini yaratib bo‘lmadi.');
