@@ -10,6 +10,8 @@ const https = require('https');
 const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
+const { guessTitle, brandedDelivery } = require('./auto-branding');
+const { importedMeta } = require('./bulk-import');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -1234,6 +1236,7 @@ function extractStoredMessage(ctx, botKey) {
       message_type: 'video',
       file_id: msg.video.file_id,
       file_unique_id: msg.video.file_unique_id,
+      file_name: msg.video.file_name || null,
       file_size: msg.video.file_size || null,
       duration: msg.video.duration || null,
       width: msg.video.width || null,
@@ -1368,12 +1371,23 @@ async function sendStoredMessageToChat(telegram, chatId, stored) {
 }
 
 async function copyStoredMessage(ctx, stored, extra = {}) {
-  // extra: { reply_markup, protect_content } — tugmalar va nusxa olishdan himoya.
+  // Original Telegram media Telegram serverida qoladi: yuklash/konvertatsiya YO‘Q.
   const sendExtra = {};
   if (extra.reply_markup) sendExtra.reply_markup = extra.reply_markup;
   if (extra.protect_content) sendExtra.protect_content = true;
+
+  const branded = extra.botConfig?.engine === 'content'
+    ? brandedDelivery(stored, ctx.botInfo?.username || extra.botConfig.telegramUsername, extra.botConfig)
+    : null;
+
+  // copyMessage text replacementni qo‘llamaydi: matnli post uchun sendMessage.
+  if (branded?.type === 'text') return ctx.reply(branded.text, sendExtra);
+
+  const copyExtra = branded?.type === 'caption'
+    ? { ...sendExtra, caption: branded.caption }
+    : sendExtra;
   try {
-    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id, sendExtra);
+    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id, copyExtra);
     return;
   } catch (copyError) {
     console.error('copyMessage xatosi, fallback ishlaydi:', copyError.message);
@@ -1381,8 +1395,8 @@ async function copyStoredMessage(ctx, stored, extra = {}) {
 
   const captionExtra = {
     ...sendExtra,
-    caption: stored.caption || undefined,
-    caption_entities: stored.caption_entities || undefined
+    caption: branded?.type === 'caption' ? branded.caption : (stored.caption || undefined),
+    caption_entities: branded ? undefined : (stored.caption_entities || undefined)
   };
 
   if (stored.message_type === 'text') {
@@ -1487,10 +1501,18 @@ function createSharedUtils(bot, config, adminIds) {
     let failed = 0;
 
     await ctx.reply(`📢 Broadcast boshlandi. Jami foydalanuvchi: ${users.length} ta`);
-
+    const broadcastSource = config.engine === 'content' ? extractStoredMessage(ctx, config.key) : null;
+    const branded = broadcastSource
+      ? brandedDelivery(broadcastSource, ctx.botInfo?.username || config.telegramUsername, config)
+      : null;
     for (const user of users) {
       try {
-        await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id);
+        if (branded?.type === 'text') {
+          await ctx.telegram.sendMessage(user.user_id, branded.text);
+        } else {
+          await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id,
+            branded?.type === 'caption' ? { caption: branded.caption } : {});
+        }
         success += 1;
         await sleep(45);
       } catch (error) {
@@ -1550,7 +1572,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   bot.use(
     session({
-      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null })
+      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null })
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
@@ -1596,6 +1618,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.mode = null;
     ctx.session.tempMessage = null;
     ctx.session.tempPart = null;
+    ctx.session.bulkStats = null;
   }
 
   function addButton() {
@@ -1625,8 +1648,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   function adminKeyboard() {
     return Markup.keyboard([
       [addButton(), partButton()],
-      [listButton(), '📊 Statistika'],
-      ['✏️ Tahrirlash', '🔒 Kontent himoyasi'],
+      ['⚡ Ommaviy qo‘shish', listButton()],
+      ['📊 Statistika', '✏️ Tahrirlash'],
+      ['🔒 Kontent himoyasi'],
       [deleteButton(), '🧹 Qism oʻchirish'],
       ['📢 Broadcast', USER_BTN.top],
       ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
@@ -1791,7 +1815,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         } catch (_) {}
       }
       const keyboard = await contentActionsKeyboard(ctx, content);
-      await copyStoredMessage(ctx, content, { reply_markup: keyboard.reply_markup, protect_content: await isProtectEnabled() });
+      await copyStoredMessage(ctx, content, { reply_markup: keyboard.reply_markup, protect_content: await isProtectEnabled(), botConfig: config });
       await Content.updateOne({ _id: content._id }, { $inc: { views: 1, search_count: 1 }, $set: { last_view_at: new Date() } });
       return;
     }
@@ -2053,7 +2077,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
     const content = await Content.findOne({ _id: part.content_id, bot_key: config.key, is_active: true });
     const keyboard = content ? await contentActionsKeyboard(ctx, content, part) : null;
-    await copyStoredMessage(ctx, part, { reply_markup: keyboard?.reply_markup, protect_content: await isProtectEnabled() });
+    await copyStoredMessage(ctx, part, { reply_markup: keyboard?.reply_markup, protect_content: await isProtectEnabled(), botConfig: config });
     await ContentPart.updateOne({ _id: part._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
     if (content) await Content.updateOne({ _id: content._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
   });
@@ -2171,6 +2195,96 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     );
   });
 
+  const bulkKeyboard = () => Markup.keyboard([['✅ Yuklashni yakunlash'], ['🏠 Bosh menyu']]).resize();
+
+  function startBulkImport(ctx) {
+    if (!isAdmin(ctx.from?.id)) return ctx.reply('⛔ Faqat bot administratori uchun.');
+    if (ctx.chat?.type !== 'private') return ctx.reply('⚠️ Ommaviy import faqat bot bilan shaxsiy chatda ishlaydi.');
+    resetSession(ctx);
+    ctx.session.mode = 'bulk_import';
+    ctx.session.bulkStats = { added: 0, duplicated: 0, skipped: 0 };
+    return ctx.reply(
+      '⚡ OMMAVIY KONTENT QO‘SHISH\n\n' +
+      'Endi boshqa chat/kanaldan bir nechta video, rasm, hujjat yoki matnli postlarni tanlab, shu botga forward qiling.\n\n' +
+      'Bot har bir xabardan “Kino kodi: 101”, “Kod: 101”, “KODI - 101”, “Code 101” kabi kodni va “Nomi: ...” satridan nomini oladi.\n' +
+      'Nom bo‘lmasa fayl nomi yoki koddan foydalanadi. Kod bo‘lmasa nomdan kod yasaydi.\n' +
+      'Boshqa bot reklamasi o‘rniga har botning o‘z username’i va yangi tavsifi ko‘rsatiladi.\n\n' +
+      '✅ Tugagach “Yuklashni yakunlash” tugmasini bosing.\n❌ /cancel — bekor qilish.',
+      bulkKeyboard()
+    );
+  }
+
+  bot.hears('⚡ Ommaviy qo‘shish', startBulkImport);
+  bot.command('bulk', startBulkImport);
+  bot.hears('✅ Yuklashni yakunlash', (ctx) => {
+    if (!isAdmin(ctx.from?.id) || ctx.session?.mode !== 'bulk_import') return;
+    const stats = ctx.session.bulkStats || { added: 0, duplicated: 0, skipped: 0 };
+    resetSession(ctx);
+    return ctx.reply(
+      '✅ OMMAVIY YUKLASH YAKUNLANDI\n\n' +
+      '📥 Qo‘shildi: ' + stats.added +
+      '\n♻️ Takroriy kod: ' + stats.duplicated +
+      '\n⚠️ O‘tkazib yuborildi: ' + stats.skipped +
+      '\n\nYangi postlar nom yoki kod bo‘yicha qidiriladi.',
+      adminKeyboard()
+    );
+  });
+
+  async function handleBulkImport(ctx) {
+    if (!isAdmin(ctx.from?.id) || ctx.session?.mode !== 'bulk_import') return;
+    const stats = ctx.session.bulkStats || (ctx.session.bulkStats = { added: 0, duplicated: 0, skipped: 0 });
+    const stored = extractStoredMessage(ctx, config.key);
+    if (!stored || !['text', 'video', 'photo', 'document', 'animation', 'audio', 'voice'].includes(stored.message_type)) {
+      stats.skipped++;
+      return ctx.reply('⚠️ Bunday postni ommaviy qo‘shib bo‘lmaydi. Matn/video/rasm/fayl yuboring.', bulkKeyboard());
+    }
+    const meta = importedMeta(ctx.message, config.itemTitle, slugifyCode, isValidCode);
+    if (!meta.ok) {
+      stats.skipped++;
+      return ctx.reply('⚠️ Post o‘tkazib yuborildi: ' + meta.reason, bulkKeyboard());
+    }
+    const codeNorm = normalizeCode(meta.code);
+    if (await Content.exists({ bot_key: config.key, code_norm: codeNorm, is_active: true })) {
+      stats.duplicated++;
+      if (stats.duplicated === 1 || stats.duplicated % 10 === 0) {
+        return ctx.reply('♻️ ' + meta.code + ' kodi allaqachon mavjud. Takroriylar: ' + stats.duplicated, bulkKeyboard());
+      }
+      return;
+    }
+    try {
+      await Content.create({
+        ...stored,
+        title: meta.title,
+        title_norm: normalizeTitle(meta.title),
+        code: meta.code,
+        code_norm: codeNorm,
+        description: meta.description,
+        has_parts: false,
+        added_by: ctx.from.id
+      });
+    } catch (error) {
+      if (error.code === 11000) {
+        stats.duplicated++;
+        if (stats.duplicated === 1 || stats.duplicated % 10 === 0) {
+          return ctx.reply('♻️ ' + meta.code + ' kodi takrorlandi. Takroriylar: ' + stats.duplicated, bulkKeyboard());
+        }
+        return;
+      }
+      stats.skipped++;
+      console.error('Ommaviy import xatosi:', error.message);
+      return ctx.reply('⚠️ ' + meta.code + ' kodli post saqlanmadi. Qayta yuboring.', bulkKeyboard());
+    }
+    stats.added++;
+    if (stats.added === 1 || stats.added % 10 === 0) {
+      return ctx.reply(
+        '✅ ' + meta.title + '\n🔎 Kod: ' + meta.code +
+        '\n📥 Jami qo‘shildi: ' + stats.added +
+        '\n\n➡️ Keyingi postlarni ham forward qilavering.',
+        bulkKeyboard()
+      );
+    }
+  }
+
   bot.hears(deleteButton(), async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     ctx.session.mode = 'delete_content';
@@ -2243,6 +2357,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (isAdmin(userId)) {
+      if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
       if (ctx.session.mode === 'add_channel') return addChannelOrGroup(ctx, text, 'channel');
       if (ctx.session.mode === 'add_group') return addChannelOrGroup(ctx, text, 'group');
 
@@ -2455,15 +2570,22 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       return result;
     }
 
+    if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
+
     if (ctx.session.mode === 'single_wait_message') {
       const stored = extractStoredMessage(ctx, config.key);
       if (!stored) return ctx.reply('❌ Postni qabul qilib bo‘lmadi. Qayta yuboring yoki /cancel bosing.');
 
       ctx.session.tempMessage = stored;
       ctx.session.mode = 'single_wait_meta';
+      const suggestion = guessTitle(stored.caption || stored.text, stored.file_name);
+      const suggestedCode = suggestion ? slugifyCode(suggestion) : '';
+      const suggestionHint = suggestion && suggestedCode && isValidCode(suggestedCode)
+        ? `\n💡 Avtomatik aniqlangan nom/kod: ${suggestion} | ${suggestedCode}\nShuni nusxalab yuborsangiz bo‘ladi.\n`
+        : '';
 
       return ctx.reply(
-        `${storedInfoText(stored)}\n\nEndi ${config.item} nomi va kodini yuboring.\n\nFormat:\nNomi | kodi | ixtiyoriy tavsif\n\nMisol:\nAvatar | avatar | Full HD\n\nKod yozmasangiz, nomdan avtomatik kod yasaladi.\n❌ Bekor qilish: /cancel`
+        `${storedInfoText(stored)}${suggestionHint}\n\nEndi ${config.item} nomi va kodini yuboring.\n\nFormat:\nNomi | kodi | ixtiyoriy tavsif\n\nMisol:\nAvatar | avatar | Full HD\n\nKod yozmasangiz, nomdan avtomatik kod yasaladi.\n❌ Bekor qilish: /cancel`
       );
     }
 
