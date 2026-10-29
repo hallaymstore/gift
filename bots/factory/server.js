@@ -2257,6 +2257,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         duration: video.duration,
         username,
         code: content.code,
+        label: String(config.itemTitle || 'Kino').replace(/\s+/g, ' '),
         work: async (stage, data) => {
           if (stage !== 'ready') return;
           // Telegram uploads the generated file while temp output still exists.
