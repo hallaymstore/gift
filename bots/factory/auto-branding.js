@@ -26,6 +26,15 @@ function guessTitle(source, fileName = '') {
     const match = line.match(/(?:kino\s*nomi|multfilm\s*nomi|serial\s*nomi|dorama\s*nomi|anime\s*nomi|film\s*nomi|nomi|title|name)\s*[:：\-–]\s*(.{2,})/i);
     if (match) return match[1].replace(/(?:https?:\/\/|t\.me\/|@\w+).*$/i, '').trim().slice(0, 120);
   }
+  // Many forwarded posts have a plain title in their first line without "Nomi:".
+  const candidate = lines.find((line) => {
+    const normalized = line.replace(/^[^\p{L}\p{N}]+/u, '').trim();
+    if (!normalized || normalized.length < 3 || normalized.length > 120) return false;
+    if (/(?:https?:\/\/|t\.me\/|@\w{5,})/i.test(normalized)) return false;
+    if (/^(?:kod(?:i)?|code|код(?:и)?|janr|genre|til|yil|sifat|quality|format|davomiyligi|views?|ko.rishlar|qism|season|mavsum|musiqa kodi|muallif|botimiz|kanal)/i.test(normalized)) return false;
+    return true;
+  });
+  if (candidate) return candidate.replace(/^[^\p{L}\p{N}]+/u, '').trim().slice(0, 120);
   const filenameTitle = cleanText(fileName).replace(/\.[A-Za-z0-9]{2,5}$/, '').replace(/[_-]+/g, ' ');
   if (filenameTitle.length > 2) return filenameTitle.slice(0, 120);
   return '';
@@ -64,6 +73,7 @@ const HOOKS = {
 
 function getBotKind(config) {
   const key = String(config?.type_key || config?.typeKey || config?.item || config?.key || 'kino').toLowerCase();
+  if (key.includes('musiqa')) return 'music';
   if (key.includes('mult')) return 'multfilm';
   if (key.includes('turk')) return 'turkserial';
   if (key.includes('serial')) return 'serial';
