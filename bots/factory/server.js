@@ -2246,7 +2246,10 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const codeNorm = normalizeCode(meta.code);
     if (await Content.exists({ bot_key: config.key, code_norm: codeNorm, is_active: true })) {
       stats.duplicated++;
-      return ctx.reply('♻️ ' + meta.code + ' kodi allaqachon mavjud. Takroriy post qo‘shilmadi.', bulkKeyboard());
+      if (stats.duplicated === 1 || stats.duplicated % 10 === 0) {
+        return ctx.reply('♻️ ' + meta.code + ' kodi allaqachon mavjud. Takroriylar: ' + stats.duplicated, bulkKeyboard());
+      }
+      return;
     }
     try {
       await Content.create({
@@ -2259,23 +2262,26 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         has_parts: false,
         added_by: ctx.from.id
       });
-      stats.added++;
-      if (stats.added <= 3 || stats.added % 10 === 0) {
-        return ctx.reply(
-          '✅ ' + meta.title + '\n🔎 Kod: ' + meta.code +
-          '\n📥 Jami qo‘shildi: ' + stats.added +
-          '\n\n➡️ Keyingi postlarni ham forward qilavering.',
-          bulkKeyboard()
-        );
-      }
     } catch (error) {
       if (error.code === 11000) {
         stats.duplicated++;
-        return ctx.reply('♻️ ' + meta.code + ' kodi takrorlandi, o‘tkazib yuborildi.', bulkKeyboard());
+        if (stats.duplicated === 1 || stats.duplicated % 10 === 0) {
+          return ctx.reply('♻️ ' + meta.code + ' kodi takrorlandi. Takroriylar: ' + stats.duplicated, bulkKeyboard());
+        }
+        return;
       }
       stats.skipped++;
       console.error('Ommaviy import xatosi:', error.message);
       return ctx.reply('⚠️ ' + meta.code + ' kodli post saqlanmadi. Qayta yuboring.', bulkKeyboard());
+    }
+    stats.added++;
+    if (stats.added === 1 || stats.added % 10 === 0) {
+      return ctx.reply(
+        '✅ ' + meta.title + '\n🔎 Kod: ' + meta.code +
+        '\n📥 Jami qo‘shildi: ' + stats.added +
+        '\n\n➡️ Keyingi postlarni ham forward qilavering.',
+        bulkKeyboard()
+      );
     }
   }
 
