@@ -2244,10 +2244,17 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
     const username = botUsername(ctx);
     ctx.session.mode = 'shorts_processing';
-    await ctx.reply('🎬 Video montaj qilinmoqda...\n\n' +
-      'Kino kodi: ' + content.code + '\n' +
+    const progressMessage = await ctx.reply('🎬 Shorts tayyorlanmoqda...\n\n' +
+      '🔎 Kod: ' + content.code + '\n' +
       '🤖 @' + username + '\n' +
-      '📱 Format: 9:16 | 720×1280 | 30 soniyagacha');
+      '📱 Tezkor format: 9:16 | 540×960 | 30 soniyagacha');
+    async function updateProgress(text) {
+      try {
+        await ctx.telegram.editMessageText(ctx.chat.id, progressMessage.message_id, undefined, text);
+      } catch (error) {
+        console.warn('[Shorts Studio] Status edit:', error.message);
+      }
+    }
 
     try {
       const rendered = await makeShorts({
@@ -2259,19 +2266,31 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         code: content.code,
         label: String(config.itemTitle || 'Kino').replace(/\s+/g, ' '),
         work: async (stage, data) => {
-          if (stage !== 'ready') return;
-          // Telegram uploads the generated file while temp output still exists.
-          await ctx.telegram.sendVideo(ctx.chat.id, { source: data.output, filename: 'shorts-' + content.code + '.mp4' }, {
-            caption: '🎬 ' + content.title + '\n🔎 Kod: ' + content.code +
-              '\n🤖 @' + username + '\n🔗 https://t.me/' + username + '?start=c_' + content.code,
-            supports_streaming: true
-          });
+          if (stage === 'downloading') {
+            await updateProgress('⏬ Qisqa video olinmoqda...\n🔎 Kod: ' + content.code);
+            return;
+          }
+          if (stage === 'editing') {
+            await updateProgress('⚡ Video ustiga yozuv qo‘yilmoqda (tezkor rejim)...\n🔎 Kod: ' + content.code);
+            return;
+          }
+          if (stage === 'ready') {
+            await updateProgress('📤 Montaj tayyor! Telegramga yuborilmoqda...\n🔎 Kod: ' + content.code);
+            // Video file must remain present until upload finishes.
+            await ctx.telegram.sendVideo(ctx.chat.id, { source: data.output, filename: 'shorts-' + content.code + '.mp4' }, {
+              caption: '🎬 ' + content.title + '\n🔎 Kod: ' + content.code +
+                '\n🤖 @' + username + '\n🔗 https://t.me/' + username + '?start=c_' + content.code,
+              supports_streaming: true
+            });
+          }
         }
       });
-      return ctx.reply('✅ Shorts tayyor! ' + rendered.seconds + ' soniyagacha, boshlanish: ' +
-        rendered.start + '-soniya.\n\n➡️ Keyingi qisqa videoni ham yuborishingiz mumkin.', shortsKeyboard());
+      await updateProgress('✅ Shorts tayyor va yuborildi! Kod: ' + content.code);
+      return ctx.reply('✅ Tayyor! ' + rendered.seconds +
+        ' soniyagacha.\n➡️ Keyingi videoni yuborishingiz mumkin.', shortsKeyboard());
     } catch (err) {
       console.error('Shorts Studio xatosi:', err.message);
+      await updateProgress('❌ Shorts montaji yakunlanmadi. Xatolik tafsiloti quyida.');
       return ctx.reply('❌ Shorts tayyorlanmadi: ' + err.message +
         '\n\n💡 Qisqaroq va 19 MB dan kichik MP4 video yuboring.', shortsKeyboard());
     } finally {
@@ -2298,7 +2317,16 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       duration: video.duration || 0
     };
     const detectedCode = extractPostCode(ctx.message.caption || '');
-    if (detectedCode) return renderAdminShorts(ctx, detectedCode);
+    if (detectedCode) {
+      ctx.session.mode = 'shorts_processing';
+      void renderAdminShorts(ctx, detectedCode).catch(err => {
+        console.error('[Shorts Studio] Async error:', err.message);
+        ctx.session.mode = 'shorts_wait_video';
+        ctx.session.shortsVideo = null;
+        return ctx.telegram.sendMessage(ctx.chat.id, '❌ Shorts montaji xatosi: ' + err.message).catch(() => {});
+      });
+      return;
+    }
     ctx.session.mode = 'shorts_wait_code';
     return ctx.reply('✅ Video qabul qilindi!\n\n🔎 Endi katalogdagi kino kodini yuboring. Masalan: 509', shortsKeyboard());
   }
@@ -2465,7 +2493,16 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (isAdmin(userId)) {
-      if (ctx.session.mode === 'shorts_wait_code') return renderAdminShorts(ctx, text);
+      if (ctx.session.mode === 'shorts_wait_code') {
+        ctx.session.mode = 'shorts_processing';
+        void renderAdminShorts(ctx, text).catch(err => {
+          console.error('[Shorts Studio] Async error:', err.message);
+          ctx.session.mode = 'shorts_wait_video';
+          ctx.session.shortsVideo = null;
+          return ctx.telegram.sendMessage(ctx.chat.id, '❌ Shorts montaji xatosi: ' + err.message).catch(() => {});
+        });
+        return;
+      }
       if (ctx.session.mode === 'shorts_wait_video') return ctx.reply('📹 Qisqa videoni yuboring yoki /cancel bosing.', shortsKeyboard());
       if (ctx.session.mode === 'shorts_processing') return ctx.reply('⏳ Oldingi video hali tayyorlanmoqda.');
       if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
