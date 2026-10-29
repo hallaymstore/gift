@@ -49,8 +49,8 @@ function safeUsername(username) {
 function filterGraph() {
   // No drawtext: overlay is a transparent PNG created by sharp.
   return [
-    '[0:v:0]scale=540:570:force_original_aspect_ratio=decrease:flags=fast_bilinear',
-    'pad=540:960:(ow-iw)/2:(oh-ih)/2:black',
+    '[0:v:0]fps=15,scale=360:380:force_original_aspect_ratio=decrease:flags=fast_bilinear',
+    'pad=360:640:(ow-iw)/2:(oh-ih)/2:black',
     'setsar=1',
     'format=yuv420p[base];[base][1:v:0]overlay=0:0:shortest=1',
     'format=yuv420p[v]'
@@ -62,12 +62,13 @@ function ffmpegArgs({ input, overlay, output, start = 0, seconds = EDIT_SECONDS 
     '-hide_banner', '-loglevel', 'error', '-y',
     '-ss', String(Math.max(0, Number(start) || 0)),
     '-i', input,
-    '-loop', '1', '-framerate', '24', '-i', overlay,
+    '-loop', '1', '-framerate', '15', '-i', overlay,
     '-t', String(Math.max(1, Math.min(60, Number(seconds) || EDIT_SECONDS))),
     '-filter_complex_threads', '1', '-filter_complex', filterGraph(),
     '-map', '[v]', '-map', '0:a:0?',
-    '-r', '18', '-threads', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '29',
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '64k',
+    '-r', '15', '-threads', '1', '-c:v', 'libx264', '-preset', 'ultrafast',
+    '-b:v', '650k', '-maxrate', '850k', '-bufsize', '1700k',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '48k',
     '-max_muxing_queue_size', '1024', '-movflags', '+faststart', output
   ];
 }
@@ -111,7 +112,7 @@ function downloadTelegramMedia(fileUrl, outputFile, maxBytes = INPUT_LIMIT) {
   });
 }
 
-function runFfmpeg(args, timeoutMs = 100000) {
+function runFfmpeg(args, timeoutMs = 85000) {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegBinary(), args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
@@ -165,6 +166,7 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, la
     await runFfmpeg(ffmpegArgs({ input, overlay, output, start: segment.start, seconds: segment.seconds }));
     console.info('[Shorts Studio] Encode done', { elapsedSec: Math.round((Date.now() - startedAt)/1000) });
     const stat = await fs.promises.stat(output);
+    console.info('[Shorts Studio] Output ready', { sizeMB: Math.round(stat.size / (1024*1024)*100)/100, elapsedSec: Math.round((Date.now()-startedAt)/1000) });
     if (stat.size < 1024 || stat.size > OUTPUT_LIMIT) {
       throw new Error('Tayyor video hajmi Telegram limitiga mos emas.');
     }
