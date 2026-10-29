@@ -34,6 +34,12 @@ function safeCode(code) {
   return /^[a-zA-Z0-9_-]{1,32}$/.test(value) ? value : '';
 }
 
+function safeVideoLabel(label) {
+  const allowed = new Set(['KINO', 'MULTFILM', 'SERIAL', 'DORAMA', 'ANIME', 'TURK SERIAL', 'KURS', 'KITOB', 'FAYL', 'MUSIQA']);
+  const value = String(label || 'KINO').trim().toUpperCase();
+  return allowed.has(value) ? value : 'KINO';
+}
+
 function safeUsername(username) {
   const value = String(username || '').trim().replace(/^@/, '');
   return /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/.test(value) ? value : '';
@@ -150,7 +156,7 @@ function runFfmpeg(args, timeoutMs = 180000) {
   });
 }
 
-async function makeShorts({ telegram, fileId, size, duration, username, code, work }) {
+async function makeShorts({ telegram, fileId, size, duration, username, code, label, work }) {
   const actualCode = safeCode(code);
   const actualUsername = safeUsername(username);
   if (!actualCode) throw new Error('Kino kodi yaroqsiz.');
@@ -166,7 +172,7 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, wo
     const input = path.join(directory, 'input.mp4');
     const output = path.join(directory, 'shorts.mp4');
     await fs.promises.writeFile(path.join(directory, 'top.txt'), 'TELEGRAM  @' + actualUsername);
-    await fs.promises.writeFile(path.join(directory, 'bottom.txt'), 'KINO KODI: ' + actualCode);
+    await fs.promises.writeFile(path.join(directory, 'bottom.txt'), safeVideoLabel(label) + ' KODI: ' + actualCode);
     const link = await telegram.getFileLink(fileId);
     await downloadTelegramMedia(link, input);
     const segment = chooseSegment(duration, EDIT_SECONDS);
@@ -186,6 +192,6 @@ async function makeShorts({ telegram, fileId, size, duration, username, code, wo
 }
 
 module.exports = {
-  INPUT_LIMIT, EDIT_SECONDS, chooseSegment, safeCode, safeUsername,
+  INPUT_LIMIT, EDIT_SECONDS, chooseSegment, safeCode, safeUsername, safeVideoLabel,
   filterGraph, ffmpegArgs, downloadTelegramMedia, makeShorts
 };
