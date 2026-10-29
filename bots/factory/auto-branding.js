@@ -31,7 +31,7 @@ function guessTitle(source, fileName = '') {
     const normalized = line.replace(/^[^\p{L}\p{N}]+/u, '').trim();
     if (!normalized || normalized.length < 3 || normalized.length > 120) return false;
     if (/(?:https?:\/\/|t\.me\/|@\w{5,})/i.test(normalized)) return false;
-    if (/^(?:kod(?:i)?|code|код(?:и)?|janr|genre|til|yil|sifat|quality|format|davomiyligi|views?|ko.rishlar|qism|season|mavsum|musiqa kodi|muallif|botimiz|kanal)/i.test(normalized)) return false;
+    if (/^(?:(?:kino|film|multfilm|serial|dorama|anime|kitob|fayl|musiqa|video)\s+)?(?:kod(?:i)?|code|код(?:и)?)\b|^(?:janr|genre|til|yil|sifat|quality|format|davomiyligi|views?|ko.rishlar|qism|season|mavsum|muallif|botimiz|kanal)\b/i.test(normalized)) return false;
     return true;
   });
   if (candidate) return candidate.replace(/^[^\p{L}\p{N}]+/u, '').trim().slice(0, 120);
