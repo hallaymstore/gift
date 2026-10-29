@@ -23,8 +23,8 @@ test('only valid codes and telegram usernames are used in overlays', () => {
 
 test('vertical 9:16 output uses PNG overlay rather than drawtext', () => {
   const filter = filterGraph();
-  assert.match(filter, /scale=540:570:force_original_aspect_ratio=decrease/);
-  assert.match(filter, /pad=540:960/);
+  assert.match(filter, /scale=360:380:force_original_aspect_ratio=decrease/);
+  assert.match(filter, /pad=360:640/);
   assert.match(filter, /overlay=0:0:shortest=1/);
   assert.doesNotMatch(filter, /drawtext/);
 });
@@ -34,7 +34,8 @@ test('FFmpeg uses independent overlay image and original soundtrack', () => {
   assert.equal(a[a.indexOf('-ss') + 1], '7');
   assert.equal(a[a.indexOf('-t') + 1], '30');
   assert.equal(a[a.indexOf('-preset') + 1], 'ultrafast');
-  assert.equal(a[a.indexOf('-r') + 1], '18');
+  assert.equal(a[a.indexOf('-r') + 1], '15');
+  assert.equal(a[a.indexOf('-b:v') + 1], '650k');
   assert.equal(a[a.indexOf('-threads') + 1], '1');
   assert.equal(a[a.indexOf('-filter_complex') + 1], filterGraph());
   assert.ok(a.includes('/tmp/overlay.png'));
