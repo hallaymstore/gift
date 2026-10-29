@@ -10,6 +10,7 @@ const https = require('https');
 const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
+const { guessTitle, brandedDelivery } = require('./auto-branding');
 const BOT_CONFIGS_RAW = require('./bots.config');
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -1234,6 +1235,7 @@ function extractStoredMessage(ctx, botKey) {
       message_type: 'video',
       file_id: msg.video.file_id,
       file_unique_id: msg.video.file_unique_id,
+      file_name: msg.video.file_name || null,
       file_size: msg.video.file_size || null,
       duration: msg.video.duration || null,
       width: msg.video.width || null,
@@ -1368,12 +1370,23 @@ async function sendStoredMessageToChat(telegram, chatId, stored) {
 }
 
 async function copyStoredMessage(ctx, stored, extra = {}) {
-  // extra: { reply_markup, protect_content } — tugmalar va nusxa olishdan himoya.
+  // Original Telegram media Telegram serverida qoladi: yuklash/konvertatsiya YO‘Q.
   const sendExtra = {};
   if (extra.reply_markup) sendExtra.reply_markup = extra.reply_markup;
   if (extra.protect_content) sendExtra.protect_content = true;
+
+  const branded = extra.botConfig?.engine === 'content'
+    ? brandedDelivery(stored, ctx.botInfo?.username || extra.botConfig.telegramUsername, extra.botConfig)
+    : null;
+
+  // copyMessage text replacementni qo‘llamaydi: matnli post uchun sendMessage.
+  if (branded?.type === 'text') return ctx.reply(branded.text, sendExtra);
+
+  const copyExtra = branded?.type === 'caption'
+    ? { ...sendExtra, caption: branded.caption }
+    : sendExtra;
   try {
-    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id, sendExtra);
+    await ctx.telegram.copyMessage(ctx.chat.id, stored.source_chat_id, stored.source_message_id, copyExtra);
     return;
   } catch (copyError) {
     console.error('copyMessage xatosi, fallback ishlaydi:', copyError.message);
@@ -1381,8 +1394,8 @@ async function copyStoredMessage(ctx, stored, extra = {}) {
 
   const captionExtra = {
     ...sendExtra,
-    caption: stored.caption || undefined,
-    caption_entities: stored.caption_entities || undefined
+    caption: branded?.type === 'caption' ? branded.caption : (stored.caption || undefined),
+    caption_entities: branded ? undefined : (stored.caption_entities || undefined)
   };
 
   if (stored.message_type === 'text') {
@@ -1487,10 +1500,18 @@ function createSharedUtils(bot, config, adminIds) {
     let failed = 0;
 
     await ctx.reply(`📢 Broadcast boshlandi. Jami foydalanuvchi: ${users.length} ta`);
-
+    const broadcastSource = config.engine === 'content' ? extractStoredMessage(ctx, config.key) : null;
+    const branded = broadcastSource
+      ? brandedDelivery(broadcastSource, ctx.botInfo?.username || config.telegramUsername, config)
+      : null;
     for (const user of users) {
       try {
-        await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id);
+        if (branded?.type === 'text') {
+          await ctx.telegram.sendMessage(user.user_id, branded.text);
+        } else {
+          await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id,
+            branded?.type === 'caption' ? { caption: branded.caption } : {});
+        }
         success += 1;
         await sleep(45);
       } catch (error) {
@@ -1791,7 +1812,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         } catch (_) {}
       }
       const keyboard = await contentActionsKeyboard(ctx, content);
-      await copyStoredMessage(ctx, content, { reply_markup: keyboard.reply_markup, protect_content: await isProtectEnabled() });
+      await copyStoredMessage(ctx, content, { reply_markup: keyboard.reply_markup, protect_content: await isProtectEnabled(), botConfig: config });
       await Content.updateOne({ _id: content._id }, { $inc: { views: 1, search_count: 1 }, $set: { last_view_at: new Date() } });
       return;
     }
@@ -2053,7 +2074,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
     const content = await Content.findOne({ _id: part.content_id, bot_key: config.key, is_active: true });
     const keyboard = content ? await contentActionsKeyboard(ctx, content, part) : null;
-    await copyStoredMessage(ctx, part, { reply_markup: keyboard?.reply_markup, protect_content: await isProtectEnabled() });
+    await copyStoredMessage(ctx, part, { reply_markup: keyboard?.reply_markup, protect_content: await isProtectEnabled(), botConfig: config });
     await ContentPart.updateOne({ _id: part._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
     if (content) await Content.updateOne({ _id: content._id }, { $inc: { views: 1 }, $set: { last_view_at: new Date() } });
   });
@@ -2461,9 +2482,14 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
       ctx.session.tempMessage = stored;
       ctx.session.mode = 'single_wait_meta';
+      const suggestion = guessTitle(stored.caption || stored.text, stored.file_name);
+      const suggestedCode = suggestion ? slugifyCode(suggestion) : '';
+      const suggestionHint = suggestion && suggestedCode && isValidCode(suggestedCode)
+        ? `\n💡 Avtomatik aniqlangan nom/kod: ${suggestion} | ${suggestedCode}\nShuni nusxalab yuborsangiz bo‘ladi.\n`
+        : '';
 
       return ctx.reply(
-        `${storedInfoText(stored)}\n\nEndi ${config.item} nomi va kodini yuboring.\n\nFormat:\nNomi | kodi | ixtiyoriy tavsif\n\nMisol:\nAvatar | avatar | Full HD\n\nKod yozmasangiz, nomdan avtomatik kod yasaladi.\n❌ Bekor qilish: /cancel`
+        `${storedInfoText(stored)}${suggestionHint}\n\nEndi ${config.item} nomi va kodini yuboring.\n\nFormat:\nNomi | kodi | ixtiyoriy tavsif\n\nMisol:\nAvatar | avatar | Full HD\n\nKod yozmasangiz, nomdan avtomatik kod yasaladi.\n❌ Bekor qilish: /cancel`
       );
     }
 
