@@ -40,3 +40,9 @@ test('rejects empty posts instead of inserting fake placeholder', () => {
   const result = importedMeta({video:{file_id:'file'}},'Kino', s=>s,s=>true);
   assert.equal(result.ok, false);
 });
+
+test('a caption containing only a code uses safe generic item title', () => {
+  const result = importedMeta({ caption: '🔎 Kino kodi: 887' }, 'Kino', s => s, s => true);
+  assert.equal(result.title, 'Kino 887');
+  assert.equal(result.code, '887');
+});
