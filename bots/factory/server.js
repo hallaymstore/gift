@@ -1025,7 +1025,11 @@ function subscriptionCheckRef(sub) {
 }
 
 async function recordJoinRequestForBot(botKey, req) {
-  if (!(mongoReady && mongoose.connection.readyState === 1) || !botKey || !req?.from || !req?.chat) return null;
+  if (!botKey || !req?.from || !req?.chat) return null;
+  if (!(mongoReady && mongoose.connection.readyState === 1) && !(await waitForMongoConnection(5000))) {
+    console.warn('chat_join_request: MongoDB hali tayyor emas, hodisani yozib bo‘lmadi');
+    return null;
+  }
   const invite = req.invite_link?.invite_link || req.invite_link?.name || '';
   const chatId = String(req.chat.id || '');
   const chatUsername = req.chat.username ? `@${req.chat.username}` : '';
@@ -1467,8 +1471,8 @@ function createSharedUtils(bot, config, adminIds) {
     }
   }
 
-  async function checkAllSubscriptions(userId) {
-    const globalResult = await checkGlobalSubscriptionsForUser(userId, bot.telegram);
+  async function checkAllSubscriptions(userId, options = {}) {
+    const globalResult = await checkGlobalSubscriptionsForUser(userId, bot.telegram, options);
     if (!globalResult.ok) return false;
 
     // Global obuna hamma yaratilgan botlarda majburiy ishlaydi.
@@ -1555,7 +1559,7 @@ function createSharedUtils(bot, config, adminIds) {
     await ctx.answerCbQuery();
     await saveUser(ctx);
 
-    const ok = await checkAllSubscriptions(ctx.from.id);
+    const ok = await checkAllSubscriptions(ctx.from.id, { forceRefresh: true });
     if (!ok && !isAdmin(ctx.from.id)) {
       const keyboard = await getSubscriptionKeyboard();
       return ctx.editMessageText('❌ Hali barcha kanal/guruhlarga obuna boʻlmagansiz.', keyboard);
@@ -2884,7 +2888,7 @@ async function getGlobalSubscriptionsForGate() {
   return { ready: true, subs };
 }
 
-async function checkGlobalSubscriptionsForUser(userId, fallbackTelegram = null) {
+async function checkGlobalSubscriptionsForUser(userId, fallbackTelegram = null, options = {}) {
   const { ready, subs } = await getGlobalSubscriptionsForGate();
   if (!ready) return { ok: false, reason: 'db_not_ready', subs: subs || [] };
   if (!subs.length) return { ok: true, reason: 'no_global_subscriptions', subs: [] };
@@ -2896,7 +2900,7 @@ async function checkGlobalSubscriptionsForUser(userId, fallbackTelegram = null) 
   const checks = await Promise.all(subs.map(async (sub) => {
     const cacheKey = `${userId}:${String(sub._id || sub.chat_id || sub.chat_username)}`;
     const cached = globalMembershipCache.get(cacheKey);
-    if (cached && now - cached.at < GLOBAL_MEMBER_CACHE_TTL_MS) return cached.value;
+    if (!options.forceRefresh && cached && now - cached.at < GLOBAL_MEMBER_CACHE_TTL_MS) return cached.value;
     const value = await checkOneSubscription(sub, telegram, userId);
     globalMembershipCache.set(cacheKey, { at: now, value });
     return value;
