@@ -17,6 +17,7 @@ function publicRef(value) {
   if (/^tg:\/\/resolve\?domain=/i.test(v)) v = v.replace(/^tg:\/\/resolve\?domain=/i, '');
   v = v.replace(/^@/, '').replace(/\/$/, '').trim();
   if (isChatId(v)) return v;
+  if (/^(?:zayavka|request|tasdiq|approval|yes|true|ha)$/i.test(v)) return '';
   if (/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(v)) return '@' + v;
   return '';
 }
@@ -29,8 +30,9 @@ function parseSubInput(rawInput, type = 'channel') {
   const input = String(rawInput || '').trim();
   if (!input) return null;
   const fields = input.split('|').map(s => s.trim()).filter(Boolean);
-  const candidates = fields.length > 1 ? fields.slice(1) : fields;
-  const title = fields.length > 1 ? fields[0] : '';
+  const hasTitle = fields.length > 1 && !publicRef(fields[0]) && !normalizeInvite(fields[0]);
+  const candidates = hasTitle ? fields.slice(1) : fields;
+  const title = hasTitle ? fields[0] : '';
   const ref = candidates.map(publicRef).find(Boolean) || '';
   const invite = candidates.map(normalizeInvite).find(Boolean) || '';
   const ask = candidates.some(needsRequest);
