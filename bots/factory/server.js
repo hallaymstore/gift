@@ -12,6 +12,7 @@ const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
+const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
 const BOT_CONFIGS_RAW = require('./bots.config');
@@ -934,52 +935,67 @@ function parseRequestFlag(value) {
 }
 
 function parseSubscriptionInput(text, type = 'channel') {
-  const raw = String(text || '').trim();
-  if (!raw) return null;
-  const parts = raw.split('|').map((x) => x.trim()).filter(Boolean);
-  let title = '';
-  let target = raw;
-  let flag = '';
-  if (parts.length >= 2) {
-    title = parts[0];
-    target = parts[1];
-    flag = parts.slice(2).join(' ');
+  return parseSubInput(text, type);
+}
+
+// Resolve Telegram chat identity and permissions at configuration time.
+async function prepareSubscriptionForBot(ctx, data) {
+  const sub = { ...data };
+  const warnings = [];
+  const ref = subscriptionChatRef(sub);
+  if (!ref) {
+    warnings.push('Maxfiy chat uchun -100... chat ID ni ham kiriting. Faqat invite havolasi bilan getChatMember tekshiruvi ishonchli bo‘lmaydi.');
+    return { sub, warnings, ready: false };
   }
 
-  const normalizedPublic = normalizeUsername(target);
-  const isPrivate = looksLikePrivateInviteLink(target);
-  const url = normalizeTelegramUrl(target);
-  const requiresRequest = parseRequestFlag(flag) || isPrivate;
+  try {
+    const chat = await ctx.telegram.getChat(ref);
+    if (!chat || !chat.id) throw new Error('getChat maʼlumot bermadi');
+    sub.chat_id = String(chat.id);
+    sub.chat_ref = sub.chat_id;
+    sub.title = String(chat.title || sub.title || sub.chat_username);
+    if (chat.username && !sub.invite_link) {
+      sub.join_url = 'https://t.me/' + chat.username;
+    }
 
-  if (normalizedPublic) {
-    return {
-      chat_username: normalizedPublic,
-      chat_ref: normalizedPublic,
-      chat_id: /^-?\d{6,}$/.test(normalizedPublic) ? normalizedPublic : undefined,
-      title: title || normalizedPublic,
-      type,
-      join_url: normalizedPublic.startsWith('@') ? `https://t.me/${normalizedPublic.replace('@', '')}` : undefined,
-      is_private_link: false,
-      requires_request: requiresRequest,
-      allow_join_request: true
-    };
-  }
+    const me = ctx.botInfo?.id || (await ctx.telegram.getMe()).id;
+    const ownStatus = await ctx.telegram.getChatMember(chat.id, me);
+    if (!['administrator', 'creator'].includes(ownStatus?.status)) {
+      warnings.push('Shu botning o‘zini (' + (ctx.botInfo?.username ? '@' + ctx.botInfo.username : 'ushbu botni') + ') kanal/guruhga ADMIN qiling.');
+      return { sub, warnings, ready: false };
+    }
 
-  if (isPrivate) {
-    const fallbackTitle = title || (type === 'group' ? 'Maxfiy guruh' : 'Maxfiy kanal');
-    return {
-      chat_username: fallbackTitle,
-      title: fallbackTitle,
-      type,
-      join_url: url,
-      invite_link: url,
-      is_private_link: true,
-      requires_request: true,
-      allow_join_request: true,
-      note: 'Private invite/zayavka link. Tekshiruv chat_join_request orqali yoziladi.'
-    };
+    if (sub.requires_request) {
+      if (!ownStatus.can_invite_users && ownStatus.status !== 'creator') {
+        warnings.push('Bot adminida “Invite Users / Foydalanuvchi qo‘shish” huquqini yoqing; zayavka hodisalari bu huquqsiz kelmaydi.');
+        return { sub, warnings, ready: false };
+      }
+      // Create our own approval-required link to guarantee that the presented
+      // button actually triggers chat_join_request; don't rely on other admins' links.
+      try {
+        const link = await ctx.telegram.createChatInviteLink(chat.id, {
+          name: 'Factory zayavka',
+          creates_join_request: true
+        });
+        if (link?.invite_link) {
+          sub.join_url = link.invite_link;
+          sub.invite_link = link.invite_link;
+          sub.is_private_link = true;
+        }
+      } catch (error) {
+        warnings.push('Zayavka havolasini yaratib bo‘lmadi: ' + String(error.description || error.message || '').slice(0, 130));
+      }
+    } else if (!sub.join_url && chat.invite_link) {
+      sub.join_url = chat.invite_link;
+      sub.invite_link = chat.invite_link;
+      sub.is_private_link = true;
+    }
+    if (!sub.join_url) warnings.push('Obuna tugmasi uchun havola yo‘q: kanal username yoki invite havolasi kerak.');
+    return { sub, warnings, ready: !warnings.length };
+  } catch (error) {
+    warnings.push('Telegram chat tekshiruvi ishlamadi: ' + String(error.description || error.message || '').slice(0, 145) + '. Botni admin qilib, to‘g‘ri @username yoki -100... ID kiriting.');
+    return { sub, warnings, ready: false };
   }
-  return null;
 }
 
 function subJoinUrl(subOrRef) {
@@ -1005,10 +1021,7 @@ function subLabel(sub) {
 }
 
 function subscriptionCheckRef(sub) {
-  const ref = String(sub?.chat_ref || sub?.chat_id || sub?.chat_username || '').trim();
-  if (/^-?\d{6,}$/.test(ref)) return ref;
-  if (ref.startsWith('@')) return ref;
-  return null;
+  return subscriptionChatRef(sub) || null;
 }
 
 async function recordJoinRequestForBot(botKey, req) {
@@ -1035,7 +1048,7 @@ async function recordJoinRequestForBot(botKey, req) {
     { $set: payload },
     { upsert: true, new: true }
   );
-  const ors = [];
+  const ors = [{ chat_id: chatId }, { chat_ref: chatId }];
   if (invite) ors.push({ invite_link: invite }, { join_url: invite });
   if (chatUsername) ors.push({ chat_username: chatUsername }, { chat_ref: chatUsername });
   if (ors.length) {
@@ -1063,20 +1076,30 @@ async function hasRecordedJoinRequest(sub, userId) {
 
 async function checkOneSubscription(sub, telegram, userId) {
   const ref = subscriptionCheckRef(sub);
+  let membershipError = false;
   if (ref && telegram) {
     try {
       const member = await telegram.getChatMember(ref, userId);
-      if (!['left', 'kicked'].includes(member.status)) return { ok: true, reason: 'member' };
+      if (membershipAccepted(member)) return { ok: true, reason: 'member' };
+      // If a user was approved and then left, 'approved' must no longer pass
+      // without a fresh join request; a pending 'requested' entry may still pass.
+      if (member.status === 'left' || member.status === 'kicked' || (member.status === 'restricted' && !member.is_member)) {
+        await JoinRequest.updateMany(
+          { bot_key: sub.bot_key, user_id: Number(userId), chat_id: String(sub.chat_id || ref), status: 'approved' },
+          { $set: { status: 'declined' } }
+        ).catch(() => null);
+      }
     } catch (error) {
-      console.error(`❌ Obuna getChatMember xatosi ${subLabel(sub)}:`, error.message);
+      membershipError = true;
+      console.warn('Obuna getChatMember tekshiruvi:', sub.bot_key, String(error.description || error.message || '').slice(0, 160));
     }
   }
-  if (sub.requires_request || sub.is_private_link) {
+  if (sub.requires_request) {
     const requested = await hasRecordedJoinRequest(sub, userId);
     if (requested) return { ok: true, reason: 'join_request_recorded' };
-    return { ok: false, reason: 'join_request_missing' };
+    return { ok: false, reason: membershipError ? 'member_query_failed_and_no_request' : 'join_request_missing' };
   }
-  return { ok: false, reason: ref ? 'not_joined' : 'not_checkable' };
+  return { ok: false, reason: !ref ? 'chat_id_missing' : (membershipError ? 'member_query_failed' : 'not_joined') };
 }
 
 function escapeRegex(text) {
