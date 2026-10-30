@@ -37,7 +37,10 @@ test('rejects invalid/outside-range guesses without charging attempt', () => {
 test('math round answer matches its expression', () => {
   for(let i=0;i<100;i++){
     const m=makeMathRound();
-    const answer=eval(m.question.replace('×','*'));
+    const terms=m.question.split(' ');
+    const x=Number(terms[0]);
+    const y=Number(terms[2]);
+    const answer=terms[1]==='+'?x+y:terms[1]==='-'?x-y:x*y;
     assert.equal(m.answer,answer);
     assert.equal(resolveGuess(m,String(m.answer)).type,'won');
   }
