@@ -9592,6 +9592,13 @@ function createFactoryBot() {
     ctx.session.draft.type_key = typeKey;
     ctx.session.draft.base_monthly_price = Number(plan.monthly_price || 0);
     ctx.session.draft.currency = plan.currency || 'UZS';
+    if (typeKey === 'mini_games') {
+      ctx.session.draft.tariff_key = 'plus';
+      ctx.session.draft.monthly_price = 0;
+      ctx.session.draft.currency = 'UZS';
+      ctx.session.mode = 'wait_title';
+      return ctx.editMessageText('🎮 Shaxsiy Mini Games bot tanlandi.\n\n🔒 Faqat Factory asosiy egasi uchun.\n💰 Factory oylik tarifi yo‘q.\n🪙 O‘yinlar bepul, ball pulga almashtirilmaydi.\n\nBot nomini yuboring: Mini Games UZ');
+    }
     ctx.session.mode = 'wait_tariff';
     return ctx.editMessageText(
       `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}
@@ -10027,8 +10034,9 @@ Qayta token yuboring yoki /cancel bosing.`);
       const plan = await getOrCreatePlan(draft.type_key);
       const tariffKey = normalizeTariffKey(draft.tariff_key || 'standard');
       const now = new Date();
-      const trialEnd = addDaysSafe(now, TRIAL_DAYS);
-      const monthlyPrice = Number(draft.monthly_price ?? tariffPrice(plan.monthly_price, tariffKey) ?? 0);
+      const ownerOnlyGame = draft.type_key === 'mini_games';
+      const trialEnd = ownerOnlyGame ? new Date('2099-12-31T23:59:59Z') : addDaysSafe(now, TRIAL_DAYS);
+      const monthlyPrice = ownerOnlyGame ? 0 : Number(draft.monthly_price ?? tariffPrice(plan.monthly_price, tariffKey) ?? 0);
 
       const rec = await ManagedBot.create({
         owner_user_id: ctx.from.id,
@@ -10053,12 +10061,12 @@ Qayta token yuboring yoki /cancel bosing.`);
         next_payment_due_at: trialEnd,
         monthly_price: monthlyPrice,
         currency: draft.currency || plan.currency || 'UZS',
-        payment_status: 'trial',
+        payment_status: ownerOnlyGame ? 'paid' : 'trial',
         status: 'approved',
         is_enabled: true,
         approved_at: now,
         approved_by: 0,
-        price_note: `${TRIAL_DAYS} kunlik bepul sinov`
+        price_note: ownerOnlyGame ? 'Shaxsiy bot — Factory tarifisiz' : `${TRIAL_DAYS} kunlik bepul sinov`
       });
       rec.bot_key = `m_${String(rec._id)}`;
       await rec.save();
@@ -10067,7 +10075,7 @@ Qayta token yuboring yoki /cancel bosing.`);
 
       const preset = getPreset(rec.type_key);
       await ctx.reply(
-        `✅ Bot yaratildi va ${TRIAL_DAYS} kunlik bepul sinov boshlandi!
+        `✅ ${ownerOnlyGame ? 'Shaxsiy o‘yin botingiz yaratildi — Factory oylik tarifisiz!' : 'Bot yaratildi va ' + TRIAL_DAYS + ' kunlik bepul sinov boshlandi!'}
 
 ` +
           `🤖 Bot: @${rec.telegram_username}
