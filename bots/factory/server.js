@@ -1681,7 +1681,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       [deleteButton(), '🧹 Qism oʻchirish'],
       ['📢 Broadcast', USER_BTN.top],
       ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
-      ['📋 Obunalar', '➖ Obuna oʻchirish'],
+      ['📋 Obunalar', '🧪 Obunani sinash'],
+      ['➖ Obuna oʻchirish'],
       ['🏠 Bosh menyu']
     ])
       .resize()
@@ -1854,18 +1855,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   }
 
   async function addChannelOrGroup(ctx, text, type) {
-    const username = normalizeUsername(text);
-    if (!username) return ctx.reply('❌ Username notoʻgʻri. Qayta yuboring:');
-
-    try {
-      await Subscription.create({ bot_key: config.key, chat_username: username, type, added_by: ctx.from.id });
-      resetSession(ctx);
-      return ctx.reply(`✅ ${username} muvaffaqiyatli qoʻshildi.\n\n⚠️ Eslatma: bot o‘sha kanal/guruhda admin boʻlishi kerak.`, adminKeyboard());
-    } catch (error) {
-      if (error.code === 11000) return ctx.reply(`❌ ${username} allaqachon roʻyxatda bor.`);
-      console.error(error);
-      return ctx.reply('❌ Saqlashda xatolik. Qayta urinib koʻring.');
-    }
+    return addSubscriptionForBot(ctx, config.key, text, type, adminKeyboard);
   }
 
   bot.start(async (ctx) => {
@@ -2483,7 +2473,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.mode = 'add_channel';
     ctx.session.tempMessage = null;
     ctx.session.tempPart = null;
-    return ctx.reply('➕ Kanal username yuboring. Masalan: @kanal_nomi yoki kanal_nomi\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('➕ Majburiy kanal qo‘shish:\n\nPublic: @kanal_nomi\nMaxfiy: Kanal nomi | -1001234567890 | https://t.me/+INVITE | zayavka\nZayavka linkini avtomatik yaratish: Kanal nomi | -1001234567890 | zayavka\n\nBot kanalga ADMIN bo‘lsin va “Foydalanuvchi qo‘shish” huquqi bo‘lsin.\n❌ /cancel');
   });
 
   bot.hears('➕ Guruh qoʻshish', async (ctx) => {
@@ -2491,7 +2481,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.mode = 'add_group';
     ctx.session.tempMessage = null;
     ctx.session.tempPart = null;
-    return ctx.reply('➕ Guruh username yuboring. Masalan: @guruh_nomi yoki guruh_nomi\n\n❌ Bekor qilish: /cancel');
+    return ctx.reply('➕ Majburiy guruh qo‘shish:\n\nPublic: @guruh_nomi\nMaxfiy: Guruh nomi | -1001234567890 | https://t.me/+INVITE | zayavka\n\nBot guruhda ADMIN bo‘lsin va “Foydalanuvchi qo‘shish” huquqi bo‘lsin.\n❌ /cancel');
   });
 
   bot.hears('📋 Obunalar', async (ctx) => {
@@ -3033,30 +3023,54 @@ async function addSubscriptionForBot(ctx, botKey, text, type, adminKeyboard) {
   const parsed = parseSubscriptionInput(text, type);
   if (!parsed) {
     return ctx.reply(
-      '❌ Kanal/guruh notoʻgʻri. Qayta yuboring:\n\n' +
-        'Public: @kanal yoki https://t.me/kanal\n' +
-        'Private/zayavka: Kanal nomi | https://t.me/+invite | zayavka\n' +
-        'Aniq tekshiruv uchun: Kanal nomi | -1001234567890 | zayavka'
+      '❌ Kanal/guruh formati noto‘g‘ri.\n\n' +
+      'Public: @kanal\n' +
+      'Private: Kanal nomi | -1001234567890 | https://t.me/+INVITE | zayavka\n' +
+      'Zayavka havolasini yaratish: Kanal nomi | -1001234567890 | zayavka\n' +
+      'Yoki: Kanal nomi | https://t.me/+INVITE | zayavka (ID qo‘shish tavsiya etiladi).'
     );
   }
+
+  const prepared = await prepareSubscriptionForBot(ctx, parsed);
+  const sub = prepared.sub;
   try {
-    await Subscription.updateOne(
-      { bot_key: botKey, chat_username: parsed.chat_username },
-      { $set: { ...parsed, added_by: ctx.from.id } },
-      { upsert: true }
-    );
+    // Update existing subscription rather than silently duplicating it.
+    const existing = await Subscription.findOne({
+      bot_key: botKey,
+      $or: [
+        { chat_username: sub.chat_username },
+        ...(sub.chat_id ? [{ chat_id: sub.chat_id }] : []),
+        ...(sub.invite_link ? [{ invite_link: sub.invite_link }] : [])
+      ]
+    });
+    if (existing) {
+      await Subscription.updateOne({ _id: existing._id }, { $set: { ...sub, added_by: ctx.from.id } });
+    } else {
+      await Subscription.create({ ...sub, bot_key: botKey, added_by: ctx.from.id });
+    }
+    globalSubscriptionsCache.at = 0;
+    globalMembershipCache.clear();
     ctx.session.mode = null;
     ctx.session.draft = {};
-    const hint = parsed.requires_request
-      ? '\n\n⚠️ Zayavka/private obuna tekshiruvi ishlashi uchun shu bot kanal/guruhda admin bo‘lsin va chat_join_request update olsin. User zayavka yuborsa, bot DB’da yozib qo‘yadi va ruxsat beradi.'
-      : '\n\n⚠️ Tekshiruv uchun bot o‘sha kanal/guruhda admin bo‘lgani yaxshi.';
-    return ctx.reply(`✅ ${subLabel(parsed)} majburiy obunaga qo‘shildi.${hint}`, adminKeyboard());
+    const status = prepared.ready ? '✅ Tekshiruv sozlandi.' : '⚠️ Kanal saqlandi, ammo tekshiruvni sozlash tugallanmagan.';
+    const details = prepared.warnings.length
+      ? '\n\n' + prepared.warnings.map(w => '⚠️ ' + w).join('\n')
+      : '';
+    const url = sub.join_url ? '\n🔗 ' + sub.join_url : '';
+    return ctx.reply(
+      '📢 ' + subLabel(sub) + '\n' + status +
+        (sub.chat_id ? '\n🆔 Chat ID: ' + sub.chat_id : '') +
+        url + details +
+        '\n\n🧪 “Obunani sinash” orqali bot admin ruxsatini tekshiring. Adminning o‘zi lokal obunadan ozod; oddiy foydalanuvchi bilan sinang.',
+      adminKeyboard()
+    );
   } catch (error) {
-    if (error.code === 11000) return ctx.reply(`❌ ${parsed.chat_username} allaqachon roʻyxatda bor.`);
-    console.error(error);
-    return ctx.reply('❌ Saqlashda xatolik. Qayta urinib koʻring.');
+    if (error.code === 11000) return ctx.reply('❌ Bu kanal boshqa yozuvda mavjud. Eski obunani o‘chirib qayta qo‘shing.');
+    console.error('Obuna saqlash xatosi:', String(error.message || error).slice(0, 160));
+    return ctx.reply('❌ Kanalni saqlab bo‘lmadi. Qayta urinib ko‘ring.');
   }
 }
+
 
 async function deleteSubscriptionForBot(ctx, botKey, text, adminKeyboard) {
   const q = String(text || '').trim();
@@ -8969,33 +8983,10 @@ function createFactoryBot() {
 
   async function addGlobalSubscription(ctx, text, type) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
-    const parsed = parseSubscriptionInput(text, type);
-    if (!parsed) {
-      return ctx.reply(
-        '❌ Kanal/guruh noto‘g‘ri. Qayta yuboring:\n\n' +
-          'Public: @kanal yoki https://t.me/kanal\n' +
-          'Private/zayavka: Kanal nomi | https://t.me/+invite | zayavka\n' +
-          'Aniq tekshiruv: Kanal nomi | -1001234567890 | zayavka'
-      );
-    }
-
-    try {
-      await Subscription.updateOne(
-        { bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY, chat_username: parsed.chat_username },
-        { $set: { ...parsed, added_by: ctx.from.id } },
-        { upsert: true }
-      );
-      reset(ctx);
-      const testHint = parsed.requires_request
-        ? '\n\n⚠️ Zayavka/private link ishlashi uchun FactoryBot shu kanal/guruhda admin bo‘lsin. User zayavka yuborsa, FactoryBot buni DB’da yozadi va tekshiruvda ruxsat beradi.'
-        : '\n\n⚠️ Tekshiruv uchun FactoryBot o‘sha kanal/guruhda admin bo‘lishi kerak.';
-      return ctx.reply(`✅ Global majburiy obuna qo‘shildi: ${subLabel(parsed)}\n\nEndi bu obuna BotFactory va barcha yaratilgan botlarda tekshiriladi.${testHint}`, userKeyboard(ctx));
-    } catch (error) {
-      console.error('Global obuna saqlash xatosi:', error);
-      reset(ctx);
-      return ctx.reply('❌ Global obunani saqlashda xatolik. Qayta urinib ko‘ring.', userKeyboard(ctx));
-    }
+    const result = await addSubscriptionForBot(ctx, GLOBAL_SUBSCRIPTION_BOT_KEY, text, type, () => userKeyboard(ctx));
+    return result;
   }
+
 
   async function showGlobalSubscriptions(ctx) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
