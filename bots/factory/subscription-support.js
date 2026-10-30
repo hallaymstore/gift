@@ -30,7 +30,10 @@ function parseSubInput(rawInput, type = 'channel') {
   const input = String(rawInput || '').trim();
   if (!input) return null;
   const fields = input.split('|').map(s => s.trim()).filter(Boolean);
-  const hasTitle = fields.length > 1 && !publicRef(fields[0]) && !normalizeInvite(fields[0]);
+  const firstIsExplicitRef = /^@|^-?\d{6,}$|^(?:https?:\/\/)?t\.me\//i.test(fields[0]);
+  const otherTarget = fields.slice(1).some(x => Boolean(publicRef(x) || normalizeInvite(x)));
+  const hasTitle = fields.length > 1 && !firstIsExplicitRef &&
+    (otherTarget || /\s/.test(fields[0]));
   const candidates = hasTitle ? fields.slice(1) : fields;
   const title = hasTitle ? fields[0] : '';
   const ref = candidates.map(publicRef).find(Boolean) || '';
