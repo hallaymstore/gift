@@ -12,6 +12,7 @@ const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
+const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
@@ -207,6 +208,21 @@ const joinRequestSchema = new mongoose.Schema(
 );
 joinRequestSchema.index({ bot_key: 1, user_id: 1, chat_id: 1 }, { unique: true });
 const JoinRequest = mongoose.model('MultiBotJoinRequest', joinRequestSchema);
+const miniGamesPlayerSchema = new mongoose.Schema({
+  bot_key: { type: String, required: true, index: true },
+  user_id: { type: Number, required: true },
+  username: String,
+  first_name: String,
+  score: { type: Number, default: 0 },
+  wins: { type: Number, default: 0 },
+  games_completed: { type: Number, default: 0 },
+  daily_day: String,
+  daily_rounds: { type: Number, default: 0 },
+  last_bonus_day: String,
+  active_round: { type: mongoose.Schema.Types.Mixed, default: null }
+}, { timestamps: true, collection: 'multibot_mini_games_players' });
+miniGamesPlayerSchema.index({ bot_key: 1, user_id: 1 }, { unique: true });
+const MiniGamesPlayer = mongoose.model('MultiBotMiniGamesPlayer', miniGamesPlayerSchema);
 
 const Content = mongoose.model('MultiBotContent', contentSchema);
 const ContentPart = mongoose.model('MultiBotContentPart', partSchema);
@@ -8764,7 +8780,8 @@ async function startManagedRecord(record, source = 'db') {
   const preset = getPreset(record.type_key);
   const engine = preset.engine || 'content';
   let active = null;
-  if (engine === 'vip') active = createVipBot(config, token, adminIds);
+  if (engine === 'mini_games') active = createMiniGamesBot(config, token, adminIds);
+  else if (engine === 'vip') active = createVipBot(config, token, adminIds);
   else if (engine === 'giveaway') active = createGiveawayBot(config, token, adminIds);
   else if (engine === 'channel_form') active = createChannelFormBot(config, token, adminIds);
   else if (engine === 'group_tools') active = createGroupToolsBot(config, token, adminIds);
@@ -8776,11 +8793,19 @@ async function startManagedRecord(record, source = 'db') {
   return active;
 }
 
-function typeRows(prefix = 'factory:type') {
-  const entries = Object.entries(TYPE_PRESETS).filter(([, preset]) => preset && preset.title);
+// Exclusive game bot template: unlike normal Factory types, only primary owner
+// can create it. Explicit env value takes precedence over the first admin ID.
+function canCreatePrivateGameBot(userId) {
+  const creators = parseIds(process.env.MINI_GAMES_CREATOR_IDS || String(GLOBAL_ADMIN_IDS[0] || ''));
+  return creators.includes(Number(userId));
+}
+
+function typeRows(prefix = 'factory:type', requestingUserId = 0) {
+  const entries = Object.entries(TYPE_PRESETS).filter(([typeKey, preset]) =>
+    preset && preset.title && (typeKey !== 'mini_games' || canCreatePrivateGameBot(requestingUserId)));
   const rows = [];
   for (const [key, preset] of entries) {
-    const engineLabel = preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
+    const engineLabel = preset.engine === 'mini_games' ? 'O‘yin' : preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
     rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
   }
   return rows;
@@ -9532,6 +9557,8 @@ function createFactoryBot() {
   bot.action(/^factory:type:([a-z0-9_-]+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const typeKey = ctx.match[1];
+    if (typeKey === 'mini_games' && !canCreatePrivateGameBot(ctx.from?.id))
+      return ctx.reply('⛔ O‘yin botini yaratish faqat Factory asosiy egasiga ruxsat etilgan.');
     if (!ctx.session.draft?.token_enc) return ctx.reply('❌ Sessiya tugagan. Qaytadan “🤖 Bot tayyorlash” bosing.');
     const preset = getPreset(typeKey);
     const plan = await getOrCreatePlan(typeKey);
@@ -9936,7 +9963,7 @@ Qayta token yuboring yoki /cancel bosing.`);
           telegram_first_name: me.first_name
         };
         ctx.session.mode = 'wait_type';
-        return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard(typeRows()));
+        return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard(typeRows('factory:type', ctx.from?.id)));
       } catch (error) {
         console.error('Factory token tekshirish xatosi:', error.message);
         return ctx.reply('❌ Tokenni tekshirib bo‘lmadi. Token xato, bot o‘chirilgan yoki internet/API javob bermayapti. Qayta yuboring:');
