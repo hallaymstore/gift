@@ -8082,6 +8082,15 @@ function commandListForConfig(config = {}) {
       { command: 'cancel', description: 'Jarayonni bekor qilish' }
     ];
   }
+  if (engine === 'mini_games') {
+    return [
+      ...base,
+      { command: 'games', description: 'Bepul o‘yinlar menyusi' },
+      { command: 'number', description: '1–50 sonini topish' },
+      { command: 'math', description: 'Matematik test' },
+      { command: 'admin', description: 'Faqat bot admini uchun statistika' }
+    ];
+  }
   if (engine === 'group_tools' || ['group_manager', 'group_cleaner', 'faq_support', 'qoriqchi'].includes(key)) {
     return [
       ...base,
