@@ -13,6 +13,7 @@ const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
+const { attachMiniGames } = require('./mini-games-engine');
 const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
@@ -1598,6 +1599,19 @@ function createSharedUtils(bot, config, adminIds) {
     broadcastMessage,
     handleSubscriptionCallback
   };
+}
+
+function createMiniGamesBot(config, tokenOverride = null, adminIdsOverride = null) {
+  const token = String(tokenOverride || process.env[config.tokenEnv] || '').trim();
+  if (!hasUsableToken(token)) return null;
+  const admins = adminIdsOverride || parseIds(process.env.ADMIN_IDS);
+  const bot = createBaseBot(token, config, admins);
+  const utils = createSharedUtils(bot, config, admins);
+  attachMiniGames({
+    bot, config, adminIds: admins, Player: MiniGamesPlayer, Markup, utils,
+    core: { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS }
+  });
+  return { key: config.key, title: config.title, bot, config };
 }
 
 // =========================
@@ -8778,6 +8792,10 @@ async function startManagedRecord(record, source = 'db') {
   const config = buildManagedConfig(record);
   const adminIds = Array.from(new Set([...GLOBAL_ADMIN_IDS, ...record.admin_ids.map(Number).filter(Boolean)]));
   const preset = getPreset(record.type_key);
+  if (record.type_key === 'mini_games' && !canCreatePrivateGameBot(record.owner_user_id)) {
+    console.warn('Private Mini Games owner mismatch: bot skipped', String(record._id));
+    return null;
+  }
   const engine = preset.engine || 'content';
   let active = null;
   if (engine === 'mini_games') active = createMiniGamesBot(config, token, adminIds);
@@ -9992,6 +10010,10 @@ Qayta token yuboring yoki /cancel bosing.`);
 
       const draft = ctx.session.draft || {};
       if (!draft.telegram_bot_id || !draft.type_key || !draft.title) return ctx.reply('❌ Sessiya tugagan. Qaytadan boshlang.');
+      if (draft.type_key === 'mini_games' && !canCreatePrivateGameBot(ctx.from.id)) {
+        reset(ctx);
+        return ctx.reply('⛔ Bu bot turini yaratishga ruxsat yo‘q.', userKeyboard(ctx));
+      }
       const adminIds = Array.from(new Set([ctx.from.id, ...ids]));
       const plan = await getOrCreatePlan(draft.type_key);
       const tariffKey = normalizeTariffKey(draft.tariff_key || 'standard');
