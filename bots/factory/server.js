@@ -1606,10 +1606,29 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
       const doc = await recordJoinRequestForBot(config.key, req);
       if (doc?.user_id) {
-        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} uchun zayavkangiz qabul qilindi. Endi botga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+        await bot.telegram.sendMessage(req?.user_chat_id || doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} zayavkangiz qayd etildi. Botga qaytib “✅ Obunani tekshirish”ni bosing.`).catch(() => null);
       }
     } catch (error) {
       console.error(`${config.title} chat_join_request saqlash xatosi:`, error.message);
+    }
+  });
+
+  bot.on('chat_member', async (ctx) => {
+    const update = ctx.update?.chat_member;
+    const current = update?.new_chat_member;
+    const chatId = update?.chat?.id;
+    const userId = current?.user?.id;
+    if (!chatId || !userId || !current) return;
+    const status = membershipAccepted(current) ? 'approved' : 'declined';
+    try {
+      // A fresh request can unlock only while pending/approved; after a real
+      // member leaves, never let an old approved request unlock content again.
+      await JoinRequest.updateOne(
+        { bot_key: config.key, chat_id: String(chatId), user_id: Number(userId) },
+        { $set: { status } }
+      );
+    } catch (error) {
+      console.warn('chat_member obuna statusi:', String(error.message).slice(0, 100));
     }
   });
 
@@ -2371,6 +2390,15 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     );
   }
 
+  bot.hears('🧪 Obunani sinash', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    return showSubscriptionDiagnostics(ctx, config.key);
+  });
+  bot.command('obunatest', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    return showSubscriptionDiagnostics(ctx, config.key);
+  });
+
   bot.hears('⚡ Ommaviy qo‘shish', startBulkImport);
   bot.command('bulk', startBulkImport);
   bot.hears('✅ Yuklashni yakunlash', (ctx) => {
@@ -2490,8 +2518,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const subs = await Subscription.find({ bot_key: config.key }).sort({ createdAt: 1 });
     if (!subs.length) return ctx.reply('📭 Hozircha majburiy obuna yoʻq.');
 
-    const list = subs.map((s, i) => `${i + 1}. ${s.type === 'channel' ? '📢' : '👥'} ${s.chat_username}`).join('\n');
-    return ctx.reply(`📋 Majburiy obunalar:\n\n${list}\n\nJami: ${subs.length} ta`);
+    const list = subs.map((s, i) => `${i + 1}. ${subLabel(s)}${s.chat_id ? '\n🆔 ' + s.chat_id : ''}${subJoinUrl(s) ? '\n🔗 ' + subJoinUrl(s) : ''}`).join('\n\n');
+    return ctx.reply(`📋 Majburiy obunalar:\n\n${list}\n\nJami: ${subs.length} ta\n\n🧪 Obunani sinash — admin huquqlarini tekshirish.`.slice(0, 3900));
   });
 
   bot.hears('➖ Obuna oʻchirish', async (ctx) => {
@@ -2990,7 +3018,7 @@ function createBaseBot(token, config, adminIds, sessionDefault = {}) {
       const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
       const doc = await recordJoinRequestForBot(config.key, req);
       if (doc?.user_id) {
-        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} uchun zayavkangiz qabul qilindi. Endi botga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+        await bot.telegram.sendMessage(req?.user_chat_id || doc.user_id, `✅ ${doc.chat_title || 'kanal/guruh'} zayavkangiz qayd etildi. Botga qaytib “✅ Obunani tekshirish”ni bosing.`).catch(() => null);
       }
     } catch (error) {
       console.error(`${config.title} chat_join_request saqlash xatosi:`, error.message);
@@ -3017,6 +3045,41 @@ async function handleCommonAdminText(ctx, config, utils, adminKeyboard) {
     return deleteSubscriptionForBot(ctx, config.key, text, adminKeyboard);
   }
   return null;
+}
+
+async function showSubscriptionDiagnostics(ctx, botKey) {
+  const me = ctx.botInfo || await ctx.telegram.getMe();
+  const subs = await Subscription.find({ bot_key: botKey }).sort({ createdAt: 1 }).limit(15);
+  if (!subs.length) return ctx.reply('📭 Majburiy obunalar ro‘yxati bo‘sh. Avval kanal yoki guruh qo‘shing.');
+  const lines = ['🧪 OBUNA TEKSHIRUVI', '🤖 Tekshiruvchi bot: @' + me.username, ''];
+  for (const sub of subs) {
+    const ref = subscriptionChatRef(sub);
+    if (!ref) {
+      lines.push('❌ ' + subLabel(sub) + ': Chat ID nomaʼlum.\n   Kanal nomi | -100... | invite link | zayavka formatida qayta qo‘shing.');
+      continue;
+    }
+    try {
+      const status = await ctx.telegram.getChatMember(ref, me.id);
+      if (!['administrator', 'creator'].includes(status.status)) {
+        lines.push('❌ ' + subLabel(sub) + ': @' + me.username + ' kanal/guruh ADMINi emas.');
+      } else if (sub.requires_request && status.status !== 'creator' && !status.can_invite_users) {
+        lines.push('❌ ' + subLabel(sub) + ': can_invite_users huquqi o‘chirilgan!');
+      } else if (!subJoinUrl(sub)) {
+        lines.push('⚠️ ' + subLabel(sub) + ': Kirish havolasi topilmadi.');
+      } else {
+        const count = await JoinRequest.countDocuments({
+          bot_key: botKey, chat_id: String(sub.chat_id || ref), status: { $in: ['requested', 'approved'] }
+        });
+        lines.push('✅ ' + subLabel(sub) + ': admin huquqi bor' +
+          (sub.requires_request ? ', zayavka so‘rovlari: ' + count : '') + '.');
+      }
+    } catch (error) {
+      lines.push('❌ ' + subLabel(sub) + ': Telegram chatni tekshirolmadi. @' + me.username +
+        ' adminligini, chat IDni tekshiring.');
+    }
+  }
+  lines.push('', 'ℹ️ Bot administratori majburiy lokal obunadan ozod. Haqiqiy bloklashni boshqa oddiy Telegram akkaunti bilan sinang.');
+  return ctx.reply(lines.join('\n').slice(0, 3900));
 }
 
 async function addSubscriptionForBot(ctx, botKey, text, type, adminKeyboard) {
@@ -8988,6 +9051,11 @@ function createFactoryBot() {
   }
 
 
+  bot.command('obunatest', async (ctx) => {
+    if (!isOwner(ctx.from.id)) return;
+    return showSubscriptionDiagnostics(ctx, GLOBAL_SUBSCRIPTION_BOT_KEY);
+  });
+
   async function showGlobalSubscriptions(ctx) {
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uchun.');
     const subs = await Subscription.find({ bot_key: GLOBAL_SUBSCRIPTION_BOT_KEY }).sort({ createdAt: 1 });
@@ -9986,7 +10054,7 @@ Qayta token yuboring yoki /cancel bosing.`);
       const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
       const doc = await recordJoinRequestForBot(GLOBAL_SUBSCRIPTION_BOT_KEY, req);
       if (doc?.user_id) {
-        await bot.telegram.sendMessage(doc.user_id, `✅ ${doc.chat_title || 'global kanal/guruh'} uchun zayavkangiz yozib olindi. Endi BotFactoryga qaytib “✅ Obunani tekshirish” tugmasini bosing.`).catch(() => null);
+        await bot.telegram.sendMessage(req?.user_chat_id || doc.user_id, `✅ ${doc.chat_title || 'global kanal/guruh'} zayavkangiz qayd etildi. BotFactoryda “✅ Obunani tekshirish”ni bosing.`).catch(() => null);
       }
     } catch (error) {
       console.error('FactoryBot chat_join_request saqlash xatosi:', error.message);
