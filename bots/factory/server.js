@@ -10614,8 +10614,17 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       target_chat_id:cfg.target_chat_id,status:'pending'});
     created = true;
   } catch(error) {
-    if (error.code === 11000) return {status:'duplicate'};
-    throw error;
+    if (error.code !== 11000) throw error;
+    const prior = await ChannelRelayLog.findOne({bot_key:cfg.bot_key,source_key:sourceKey}).lean();
+    if (prior?.status === 'sent') return {status:'duplicate'};
+    // Do not hide previous failures as successful duplicates.
+    if (prior?.status === 'failed') {
+      const claim = await ChannelRelayLog.updateOne(
+        {bot_key:cfg.bot_key,source_key:sourceKey,status:'failed',target_message_id:{$in:[null,undefined]}},
+        {$set:{status:'pending',error:''}});
+      if (claim.modifiedCount) created = true;
+    }
+    if (!created) return {status:'failed',error:'Relay post pending or previously sent'};
   }
   try {
     const caption = publicMessageData(message,sourceUsername);
@@ -10637,10 +10646,27 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     } else {
       // Telegram server-side copy: no file download, size cap or local storage.
       // copyMessage supports replacing media captions while keeping original media.
-      sent = await botTelegram.copyMessage(
-        cfg.target_chat_id, '@' + sourceUsername, Number(message.id),
-        {caption:branded}
-      );
+      try {
+        sent = await botTelegram.copyMessage(
+          cfg.target_chat_id, '@' + sourceUsername, Number(message.id),
+          {caption:branded}
+        );
+      } catch (botCopyError) {
+        // Bot API may not access a public source channel even though the
+        // authenticated Telegram user can read it. Reuse Telegram-side media
+        // via MTProto instead; the authenticated user must have posting rights
+        // in the destination channel. No media download occurs.
+        const target = cfg.target_username ? '@'+cfg.target_username : cfg.target_chat_id;
+        const copied = await client.sendMessage(target,{message});
+        try {
+          await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
+        } catch (editError) {
+          // Never leave an unbranded copy behind on a failed edit.
+          await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
+          throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
+        }
+        sent={message_id:copied.id};
+      }
     }
     await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
