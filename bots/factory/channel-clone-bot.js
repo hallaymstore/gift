@@ -107,9 +107,13 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
           rows.push({id:Number(m.id),views:Number(m.views||0),reactions});
         }
       }
-      const top=rows.sort((a,b)=>(b.views+b.reactions*3)-(a.views+a.reactions*3)).slice(0,limit);
       const channel=String(cfg.target_username||'').replace(/^@/,'');
-      const output='🏆 TOP '+limit+' POSTLAR (oxirgi '+logs.length+' ta jurnal)\n\n'+top.map((p,i)=>(i+1)+'. 👁 '+p.views+' | ❤️ '+p.reactions+'\n'+(channel?'https://t.me/'+channel+'/'+p.id:'Post ID: '+p.id)).join('\n\n');
+      const link=p=>channel?'https://t.me/'+channel+'/'+p.id:'Post ID: '+p.id;
+      const viewsTop=[...rows].sort((a,b)=>b.views-a.views).slice(0,limit);
+      const reactionsTop=[...rows].sort((a,b)=>b.reactions-a.reactions).slice(0,limit);
+      const output='🏆 TOP '+limit+' POSTLAR (oxirgi '+logs.length+' ta jurnal)\n\n'
+        +'👁 KO‘RISH BO‘YICHA\n'+viewsTop.map((p,i)=>(i+1)+'. '+p.views+' ko‘rish | '+p.reactions+' reaksiya\n'+link(p)).join('\n')
+        +'\n\n❤️ REAKSIYA BO‘YICHA\n'+reactionsTop.map((p,i)=>(i+1)+'. '+p.reactions+' reaksiya | '+p.views+' ko‘rish\n'+link(p)).join('\n');
       for(let i=0;i<output.length;i+=3700)await ctx.reply(output.slice(i,i+3700),{disable_web_page_preview:true});
     }catch(e){await ctx.reply('⚠️ TOP hisoblash xatosi: '+String(e.message||e).slice(0,160),menu());}
     finally{if(client)await client.disconnect().catch(()=>{});}
