@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check bots/giftgo/server.js && node --check bots/course/server.js && node --check bots/social/server.js && node --check bots/factory/server.js && node --check bots/factory/shorts-studio.js && node --check bots/factory/shorts-overlay.js && node --check bots/factory/shorts-upload.js"
+    "check": "node --check server.js && node --check bots/giftgo/server.js && node --check bots/course/server.js && node --check bots/social/server.js && node --check bots/factory/server.js && node --check bots/factory/shorts-studio.js && node --check bots/factory/shorts-overlay.js && node --check bots/factory/shorts-upload.js && node --check bots/factory/channel-publisher.js"
   },
   "engines": {
     "node": ">=18"
