@@ -186,22 +186,56 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!cfg?.source_username)return ctx.reply('❌ Avval manba kanalni ulang.',menu());
     void recount(ctx,cfg).catch(e=>console.warn('[clone] background source count:',String(e.message||e).slice(0,120)));
   });
+  const humanInterval=mins=>{
+    const n=Number(mins)||0;
+    if(!n)return '⚡ Intervalsiz';
+    if(n%1440===0)return (n/1440)+' kun';
+    if(n%60===0)return (n/60)+' soat';
+    return n+' daqiqa';
+  };
+  async function updateRouteInterval(ctx,key,value){
+    const n=Number(value);
+    if(!Number.isSafeInteger(n)||n<0||n>1440)
+      return ctx.reply('❌ Interval 0–1440 daqiqa bo‘lishi kerak.',menu());
+    const configRow=await Config.findOne({bot_key:key,$or:[{owner_bot_key:cloneKey},{bot_key:cloneKey}]}).lean();
+    if(!configRow)return ctx.reply('❌ Bu kanal yo‘nalishi topilmadi.',menu());
+    const next=n>0?new Date(Date.now()+n*60000):null;
+    await Config.updateOne({bot_key:key},{$set:{publish_interval_minutes:n,next_publish_at:next}});
+    const label=configRow.route_title||(key===cloneKey?'Asosiy yo‘nalish':'Kanal yo‘nalishi');
+    return ctx.reply('✅ '+label+' uchun interval: '+humanInterval(n)+
+      '\n📥 '+(configRow.source_username?'@'+configRow.source_username:'manbasiz')+
+      '\n📤 '+(configRow.target_username?'@'+configRow.target_username:'kanalsiz')+
+      '\n\n'+(n?'Eski va yangi postlar bitta navbatda yuboriladi. Boshqa kanallar intervali o‘zgarmaydi.':'Postlar navbatda kutmaydi; imkon qadar tez yuboriladi.')+
+      '\nTelegram so‘rov cheklovi sabab real yuborish vaqti biroz kechikishi mumkin.',menu());
+  }
   bot.hears('⏱ Postlash intervali',async ctx=>{
     if(!permitted(ctx))return;
     ctx.session.step=null;
     const cfg=await load(ctx);
-    return ctx.reply('⏱ Hozirgi interval: '+Number(cfg?.publish_interval_minutes||0)+' daqiqa\n0 = tarixiy postlar navbat bilan imkon qadar tez yuboriladi. Yangi postlar odatdagidek kuzatiladi.',Markup.inlineKeyboard([
-      [1,5,10,30].map(n=>Markup.button.callback(n+' daqiqa','clone:interval:'+n)),
-      [60,180,360,1440].map(n=>Markup.button.callback(n>=60?(n/60)+' soat':n+' daq','clone:interval:'+n)),
+    if(!cfg)return ctx.reply('❌ Yo‘nalish topilmadi. 🗂 Yo‘nalishlar ni oching.',menu());
+    const name=cfg.route_title||(routeKey(ctx)===cloneKey?'Asosiy yo‘nalish':'Kanal yo‘nalishi');
+    return ctx.reply('⏱ '+name+' — POSTLASH INTERVALI'+
+      '\n📥 '+(cfg.source_username?'@'+cfg.source_username:'ulanmagan')+
+      '\n📤 '+(cfg.target_username?'@'+cfg.target_username:'ulanmagan')+
+      '\n\nHozir: '+humanInterval(cfg.publish_interval_minutes)+
+      '\n\nTanlangan vaqt faqat SHU yo‘nalishga tegishli. Eski va yangi postlarning hammasi bitta navbatda chiqariladi.',Markup.inlineKeyboard([
+      [1,5,10,30].map(n=>Markup.button.callback(n+' daq','clone:interval:'+n)),
+      [60,180,360,1440].map(n=>Markup.button.callback(humanInterval(n),'clone:interval:'+n)),
+      [Markup.button.callback('✏️ O‘zim vaqt kiritaman','clone:interval:custom')],
       [Markup.button.callback('⚡ Intervalsiz','clone:interval:0')]
     ]));
+  });
+  bot.action('clone:interval:custom',async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    ctx.session.step='interval_custom';
+    ctx.session.intervalRoute=routeKey(ctx);
+    return ctx.reply('✏️ Faqat tanlangan kanal yo‘nalishi uchun intervalni daqiqada yozing.\nMisol: 2, 7, 15, 45, 90, 240 yoki 1440.\n0 — intervalsiz.\n\n❌ Bekor qilish: /cancel',menu());
   });
   bot.action(/^clone:interval:(0|1|5|10|30|60|180|360|1440)$/,async ctx=>{
     if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
     await ctx.answerCbQuery();
-    const value=Number(ctx.match[1]);
-    await Config.updateOne({bot_key:routeKey(ctx)},{$set:{publish_interval_minutes:value,next_publish_at:value?new Date(Date.now()+value*60000):null}},{upsert:true});
-    return ctx.reply('✅ Interval: '+(value?value+' daqiqa':'intervalsiz')+'. Tarixiy navbat shu tezlikda chiqariladi.',menu());
+    return updateRouteInterval(ctx,routeKey(ctx),Number(ctx.match[1]));
   });
   // Avoid blocking Telegram webhook updates while MTProto statistics are read.
   // Large ID batches caused FloodWait and 90-second webhook timeouts.
@@ -380,9 +414,12 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   });
   bot.hears('📊 Holat',async ctx=>{
     if(!permitted(ctx))return;const c=await load(ctx);const sent=await Log.countDocuments({bot_key:routeKey(ctx),target_chat_id:c?.target_chat_id,status:'sent'});
-    return ctx.reply('📊 CHANNEL CLONE\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
+    return ctx.reply('📊 CHANNEL CLONE\nYo‘nalish: '+(c?.route_title||'Asosiy')+'\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
       '\nKanal: '+(c?.target_username?'@'+c.target_username:'yo‘q')+
-      '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+'\nYuborilgan: '+sent+
+      '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+
+      '\n⏱ Interval: '+humanInterval(c?.publish_interval_minutes)+
+      (c?.next_publish_at&&Number(c.publish_interval_minutes)>0?'\n🕒 Navbatdagi vaqt (server): '+new Date(c.next_publish_at).toLocaleString('uz-UZ',{timeZone:'Asia/Tashkent'}):'')+
+      '\nYuborilgan: '+sent+
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
       (c?.history_last_error?'\n⚠️ '+c.history_last_error:''),menu());
@@ -473,6 +510,16 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const raw=String(ctx.message.text||'').trim();
     if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
+    if(step==='interval_custom'){
+      const selected=ctx.session.intervalRoute||routeKey(ctx);
+      ctx.session.intervalRoute=null;
+      if(!/^\d{1,4}$/.test(raw)){
+        ctx.session.step='interval_custom';
+        ctx.session.intervalRoute=selected;
+        return ctx.reply('❌ 0 dan 1440 gacha butun daqiqa kiriting. Masalan: 7 yoki 120.',menu());
+      }
+      return updateRouteInterval(ctx,selected,Number(raw));
+    }
     if(step==='route_title'){
       const title=raw.slice(0,40).trim();
       if(title.length<2)return ctx.reply('❌ Kamida 2 belgi kiriting.',menu());
