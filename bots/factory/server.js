@@ -3052,10 +3052,29 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       data.offset=offset;
       return ctx.reply(formatExternalMusic(data.items,data.query,offset),{
         disable_web_page_preview:true,
-        reply_markup:{inline_keyboard:[[{
-          text:'🎵 Yana natijalar',callback_data:'music:external:more'
-        }]]}
+        reply_markup:{inline_keyboard:[
+          ...data.items.slice(offset,offset+8).map((x,i)=>[{text:(offset+i+1)+'. 🎧 '+x.artist+' — '+x.title,callback_data:'music:mp3:'+(offset+i)}]),
+          [{text:'🎵 Yana natijalar',callback_data:'music:external:more'}]
+        ]}
       });
+    });
+    bot.action(/^music:mp3:(\d{1,2})$/,async ctx=>{
+      await ctx.answerCbQuery();
+      const data=ctx.session?.musicExternal;
+      if(!data||Date.now()-data.at>15*60000)return ctx.reply('⏳ Qidiruv eskirgan. Nomini qayta yozing.');
+      const index=Number(ctx.match[1]);
+      const track=data.items[index];
+      if(!track)return ctx.reply('❌ Qo‘shiq topilmadi.');
+      if(!/^https:\/\//.test(track.url))return ctx.reply('❌ MP3 manzili yaroqsiz.');
+      try{
+        await ctx.replyWithChatAction('upload_voice');
+        await ctx.replyWithAudio(track.url,{title:track.title,performer:track.artist,
+          duration:Math.max(0,Math.round(track.durationMs/1000)),
+          caption:'🎵 '+track.artist+' — '+track.title+(track.license?'\nLitsenziya: '+track.license:'')});
+      }catch(e){
+        console.warn('Music MP3 send failed:',String(e.message||e).slice(0,150));
+        return ctx.reply('❌ Telegram MP3 faylni uzata olmadi. Boshqa variantni tanlang.');
+      }
     });
     bot.action('music:external:help',async ctx=>{
       await ctx.answerCbQuery();
@@ -3290,10 +3309,11 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         const {searchExternalMusic,formatExternalMusic}=require('./external-music-search');
         const result=await searchExternalMusic(text,24);
         if(result.length){
-          ctx.session.musicExternal={query:text,items:result,at:Date.now()};
+          ctx.session.musicExternal={query:text,items:result,at:Date.now(),offset:0};
           await ctx.reply(formatExternalMusic(result,text,0),{
             disable_web_page_preview:true,
             reply_markup:{inline_keyboard:[
+              ...result.slice(0,8).map((x,i)=>[{text:(i+1)+'. 🎧 '+x.artist+' — '+x.title,callback_data:'music:mp3:'+i}]),
               [{text:'🎵 Yana natijalar',callback_data:'music:external:more'}],
               [{text:'🔎 Boshqa qo‘shiq qidirish',callback_data:'music:external:help'}]
             ]}
