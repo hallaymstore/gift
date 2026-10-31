@@ -10903,17 +10903,31 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
         try {
           copied=await client.sendMessage(target,{message});
         } catch (userCopyError) {
-          const userErrorText=String(userCopyError.message||userCopyError).slice(0,130);
-          throw new Error('Bot API: '+botErrorText+'; user session: '+userErrorText+
-            '. Bot cannot copy source media and session cannot post to destination. Check access/rights.');
+          // For customer-owned destination channels, the shared MTProto account
+          // is NOT an admin. Upload media via the customer's authorized bot.
+          // This avoids adding the shared account to every customer's channel.
+          const {uploadSourceMedia}=require('./channel-clone-media');
+          try {
+            sent=await uploadSourceMedia({
+              client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,
+              caption:originalFormat?String(message.message||''):branded
+            });
+          } catch(uploadError) {
+            const uploadReason=String(uploadError.description||uploadError.message||uploadError).slice(0,165);
+            const userReason=String(userCopyError.message||userCopyError).slice(0,85);
+            throw new Error('Media upload: '+uploadReason+
+              '; MTProto: '+userReason+'; copyMessage: '+botErrorText);
+          }
         }
-        try {
-          if (!originalFormat) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
-        } catch (editError) {
-          await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
-          throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
+        if(copied){
+          try {
+            if (!originalFormat) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
+          } catch (editError) {
+            await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
+            throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
+          }
+          sent={message_id:copied.id};
         }
-        sent={message_id:copied.id};
       }
     }
     await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
