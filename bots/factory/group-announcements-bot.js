@@ -32,9 +32,8 @@ function attachGroupAnnouncer({bot,config,adminIds,Markup,Group,Campaign,Log,uti
     try {
       const me = ctx.botInfo || await ctx.telegram.getMe();
       const botMember = await ctx.telegram.getChatMember(ctx.chat.id,me.id);
-      if (botMember.status === 'left' || botMember.status === 'kicked' ||
-          (botMember.status === 'restricted' && !botMember.can_send_messages)) {
-        return ctx.reply('❌ Bot bu guruhga xabar yubora olmaydi.');
+      if(!['creator','administrator'].includes(botMember.status)){
+        return ctx.reply('❌ Botni ushbu guruhga ADMIN qiling. Shundan keyin /allowannounce yuboring.');
       }
       await Group.updateOne({bot_key:key,chat_id:String(ctx.chat.id)},
         {$set:{title:String(ctx.chat.title||'Guruh').slice(0,140),
@@ -79,6 +78,7 @@ function attachGroupAnnouncer({bot,config,adminIds,Markup,Group,Campaign,Log,uti
       '⏱ Interval: '+campaign.interval_minutes+' daqiqa\n' +
       '🎯 Chegara: '+campaign.max_sends+' ta\n' +
       '✅ Yuborildi: '+campaign.sent_count+' ta\n' +
+      '📤 Jami urinish: '+(campaign.attempt_count||0)+' / '+campaign.max_sends+'\n' +
       '📡 Holat: '+(campaign.running?'🟢 Ishlayapti':'⏸ To‘xtatilgan')+
       (campaign.next_send_at?'\n🕒 Keyingi reja: '+new Date(campaign.next_send_at).toLocaleString('uz-UZ',{timeZone:'Asia/Tashkent'}):'') +
       '\n\nRuxsatli guruhlar: '+(groups.map(g=>String(g.title||g.chat_id).slice(0,38)).join(', ')||'yo‘q'),menu());
