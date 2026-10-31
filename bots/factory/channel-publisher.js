@@ -57,7 +57,6 @@ function buildChannelCaption({ message, destination, botUsername, otherBots = []
   const channelHandle = telegramHandle(destination?.username);
   if (!ownBot || !destination?.id) throw new Error('Kino bot yoki nishon kanal sozlanmagan.');
   const raw = String(message?.caption || message?.text || '');
-  const source = originalSource(message);
   const name = String(localContent?.title || guessTitle(raw,
     message?.video?.file_name || message?.document?.file_name || '') || 'Yangi post')
     .replace(/\s+/g, ' ').trim().slice(0, 115);
@@ -73,8 +72,6 @@ function buildChannelCaption({ message, destination, botUsername, otherBots = []
     channelHandle ? '📢 Kanalimiz: @' + channelHandle : '📢 Kanalimiz: ' + String(destination.title || 'Kino kanali').slice(0, 70),
     codeNorm ? '▶️ https://t.me/' + ownBot + '?start=c_' + codeNorm : '▶️ https://t.me/' + ownBot,
     extras.length ? '🎞 Boshqa botlarimiz: ' + extras.map(x => '@' + x).join(' ') : '',
-    source.handle ? '📌 Manba: @' + source.handle :
-      source.title ? '📌 Manba: ' + source.title : '',
   ].filter(Boolean);
   // Keep copyMessage captions below Telegram's 1024 UTF-16 code unit limit.
   // Preserve branding and attribution even when original captions are long.
