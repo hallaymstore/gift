@@ -85,6 +85,10 @@ async function scanLive({client,cfg,deliver,log=console}) {
       result=await deliver({type:'post',cfg,message,client,
         sourceUsername:handle,kind:mediaKind(message),phase:'live'})||result;
     }
+    if(result?.status==='failed') {
+      log.warn('[channel sync] live relay failed; cursor stays at',message.id);
+      break;
+    }
     await deliver({type:'cursor',cfg,cursor:Number(message.id),result});
     cfg.source_cursor=Number(message.id);
   }
@@ -118,6 +122,9 @@ async function scanHistory({client,cfg,deliver,log=console}){
         sourceUsername:handle,kind:mediaKind(message),phase:'history'})||result;
     }else log.warn('[channel sync] protected, unsupported or large historic item skipped',
       handle,message.id);
+    if(result?.status==='failed') {
+      throw new Error('History post '+message.id+' could not be relayed: '+String(result.error||'see server logs'));
+    }
     await deliver({type:'history_cursor',cfg,cursor:Number(message.id),result});
     cfg.history_cursor=Number(message.id);
   }
