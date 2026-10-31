@@ -14,7 +14,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
-    ['🔢 Manba postlarini sanash'],
+    ['🔢 Manba postlarini sanash','⏱ Postlash intervali'],
+    ['🏆 TOP 10','🏆 TOP 20'],
     ['🧪 Ulanishni tekshirish','🎨 Post formati'],
     ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
@@ -66,6 +67,55 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!cfg?.source_username)return ctx.reply('❌ Avval manba kanalni ulang.',menu());
     await recount(ctx,cfg);
   });
+  bot.hears('⏱ Postlash intervali',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const cfg=await load();
+    return ctx.reply('⏱ Hozirgi interval: '+Number(cfg?.publish_interval_minutes||0)+' daqiqa\n0 = tarixiy postlar navbat bilan imkon qadar tez yuboriladi. Yangi postlar odatdagidek kuzatiladi.',Markup.inlineKeyboard([
+      [1,5,10,30].map(n=>Markup.button.callback(n+' daqiqa','clone:interval:'+n)),
+      [60,180,360,1440].map(n=>Markup.button.callback(n>=60?(n/60)+' soat':n+' daq','clone:interval:'+n)),
+      [Markup.button.callback('⚡ Intervalsiz','clone:interval:0')]
+    ]));
+  });
+  bot.action(/^clone:interval:(0|1|5|10|30|60|180|360|1440)$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const value=Number(ctx.match[1]);
+    await Config.updateOne({bot_key:cloneKey},{$set:{publish_interval_minutes:value,next_publish_at:value?new Date(Date.now()+value*60000):null}},{upsert:true});
+    return ctx.reply('✅ Interval: '+(value?value+' daqiqa':'intervalsiz')+'. Tarixiy navbat shu tezlikda chiqariladi.',menu());
+  });
+  async function showTop(ctx,limit){
+    if(!permitted(ctx))return;
+    const cfg=await load();
+    if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va sessiya sozlanmagan.',menu());
+    const logs=await Log.find({bot_key:cloneKey,status:'sent',target_message_id:{$gt:0}}).sort({createdAt:-1}).limit(1000).lean();
+    if(!logs.length)return ctx.reply('📭 Hali yuborilgan postlar yo‘q.',menu());
+    let client;
+    try{
+      const {TelegramClient}=require('teleproto');
+      const {StringSession}=require('teleproto/sessions');
+      client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
+      await client.connect();
+      const peer=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
+      const rows=[];
+      for(let i=0;i<logs.length;i+=100){
+        const chunk=logs.slice(i,i+100),ids=chunk.map(x=>Number(x.target_message_id));
+        const messages=await client.getMessages(peer,{ids});
+        for(const m of Array.isArray(messages)?messages:[messages]){
+          if(!m?.id)continue;
+          const reactions=(m.reactions?.results||[]).reduce((n,r)=>n+Number(r.count||0),0);
+          rows.push({id:Number(m.id),views:Number(m.views||0),reactions});
+        }
+      }
+      const top=rows.sort((a,b)=>(b.views+b.reactions*3)-(a.views+a.reactions*3)).slice(0,limit);
+      const channel=String(cfg.target_username||'').replace(/^@/,'');
+      const output='🏆 TOP '+limit+' POSTLAR (oxirgi '+logs.length+' ta jurnal)\n\n'+top.map((p,i)=>(i+1)+'. 👁 '+p.views+' | ❤️ '+p.reactions+'\n'+(channel?'https://t.me/'+channel+'/'+p.id:'Post ID: '+p.id)).join('\n\n');
+      for(let i=0;i<output.length;i+=3700)await ctx.reply(output.slice(i,i+3700),{disable_web_page_preview:true});
+    }catch(e){await ctx.reply('⚠️ TOP hisoblash xatosi: '+String(e.message||e).slice(0,160),menu());}
+    finally{if(client)await client.disconnect().catch(()=>{});}
+  }
+  bot.hears('🏆 TOP 10',ctx=>showTop(ctx,10));
+  bot.hears('🏆 TOP 20',ctx=>showTop(ctx,20));
   bot.hears('▶️ Sinxronlash',async ctx=>{
     if(!permitted(ctx))return;const c=await load();
     if(!c?.target_chat_id||!c?.source_username)return ctx.reply('Avval ikkala kanalni ulang.',menu());
@@ -225,7 +275,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     const handle=telegramHandle(ctx.message.text);
     if(!handle)return ctx.reply('❌ Ommaviy @username kiriting.',menu());
