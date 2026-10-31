@@ -384,6 +384,7 @@ const relayConfigSchema = new mongoose.Schema({
   history_skipped: {type:Number,default:0},
   history_last_error: String,
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
+  promo_bot_username: {type:String,default:''},
   publish_interval_minutes: {type:Number,default:0},
   next_publish_at: Date,
   auto_enabled: { type: Boolean, default: false },
@@ -10714,17 +10715,17 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
         .select('title code code_norm').lean() : null;
     const username = active.bot.botInfo?.username || active.config?.telegramUsername ||
       (await botTelegram.getMe()).username;
-    const branded = cfg.bot_key === 'channel_clone'
+    const branded = active?.config?.engine === 'channel_clone' || cfg.bot_key === 'channel_clone'
       ? (() => {
           const original=String(message.message||'');
-          const own='@'+String(username).replace(/^@/,'');
+          const own=cfg.promo_bot_username?'@'+String(cfg.promo_bot_username).replace(/^@/,''):'';
           const dest='@'+String(cfg.target_username||'').replace(/^@/,'');
           const cleaned=original
             .replace(/https?:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}(?:\?[^\s]*)?/gi,'')
             .replace(/@[A-Za-z][A-Za-z0-9_]{4,31}/g,'')
             .replace(/(?:📌\s*)?Manba\s*:[^\n]*/giu,'')
             .replace(/\n{3,}/g,'\n\n').trim();
-          return [cleaned,'🤖 Bot: '+own,cfg.target_username?'📢 Kanal: '+dest:'']
+          return [cleaned,own?'🤖 Botimiz: '+own:'',cfg.target_username?'📢 Kanalimiz: '+dest:'']
             .filter(Boolean).join('\n\n').slice(0,1024);
         })()
       : buildChannelCaption({
@@ -10733,7 +10734,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
           otherBots:cfg.linked_bots||[],localContent:local
         });
     let sent;
-    const originalFormat=cfg.bot_key==='channel_clone' && cfg.clone_format==='original';
+    const originalFormat=(active?.config?.engine==='channel_clone'||cfg.bot_key==='channel_clone') && cfg.clone_format==='original';
     if (kind === 'text' && !originalFormat) {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
         {disable_web_page_preview:true});
