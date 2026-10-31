@@ -55,7 +55,7 @@ function orderedIds(messages) {
 function canRepublish(message) {
   if(message?.action || (!message?.media && !String(message?.message||'').trim())) return false;
   return !isProtected(message) && mediaKind(message)!=='unsupported' &&
-    mediaBytes(message)<=MAX_MEDIA_BYTES;
+    true;
 }
 
 // Track independently: (1) the newest post ID already seen, and
