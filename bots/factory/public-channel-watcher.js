@@ -99,6 +99,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
 }
 async function scanHistory({client,cfg,deliver,log=console}){
   if(cfg.history_enabled!==true || cfg.history_completed===true)return;
+  if(Number(cfg.publish_interval_minutes)>0 && cfg.next_publish_at && new Date(cfg.next_publish_at).getTime()>Date.now())return;
   const handle=normalizePublicUsername(cfg.source_username);
   if(!handle || Number(cfg.source_cursor||0)<=0)return; // live baseline first
   const ceiling=Number(cfg.history_ceiling||cfg.source_cursor);
@@ -131,6 +132,10 @@ async function scanHistory({client,cfg,deliver,log=console}){
     }
     await deliver({type:'history_cursor',cfg,cursor:Number(message.id),result});
     cfg.history_cursor=Number(message.id);
+    if(result?.status==='sent' && Number(cfg.publish_interval_minutes)>0){
+      cfg.next_publish_at=new Date(Date.now()+Number(cfg.publish_interval_minutes)*60000);
+      break;
+    }
   }
   if(ended || batch[batch.length-1].id>=ceiling){
     await deliver({type:'history_complete',cfg,cursor:cfg.history_cursor||before});
