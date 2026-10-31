@@ -1897,7 +1897,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       const copy = buildChannelCaption({
         message, destination:{ id:settings.target_chat_id,username:settings.target_username,
           title:settings.target_title },
-        botUsername:botUsername({botInfo:await telegram.getMe()}),
+        botUsername: bot.botInfo?.username || config.telegramUsername || (await telegram.getMe()).username,
         otherBots:settings.linked_bots || [],
         localContent
       });
