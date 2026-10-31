@@ -10448,6 +10448,98 @@ Qayta token yuboring yoki /cancel bosing.`);
   return { key: 'factory', title: 'BotFactory', bot, config: { key: 'factory', title: 'BotFactory' } };
 }
 
+// Public-channel monitor via a user-owned Telegram MTProto session.
+// Only admin-configured public channels are read. Never reads private chats.
+// Channel ownership/posting rights are checked when the target is configured.
+let publicSourceWatcher = null;
+async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind}) {
+  if (type === 'seed' || type === 'cursor') {
+    await ChannelRelayConfig.updateOne(
+      { bot_key:cfg.bot_key,source_username:cfg.source_username,
+        source_mode:'mtproto',auto_enabled:true },
+      { $set: {source_cursor:Number(cursor)} }
+    );
+    return;
+  }
+  const active = activeBots.get(cfg.bot_key);
+  if (!active?.bot?.telegram || !cfg.target_chat_id) {
+    throw new Error('Nishon kino boti faol emas; keyingi so‘rovda qayta urinish');
+  }
+  const botTelegram = active.bot.telegram;
+  const sourceKey = 'public:' + sourceUsername.toLowerCase() + ':' + message.id;
+  let created = false;
+  try {
+    await ChannelRelayLog.create({bot_key:cfg.bot_key,source_key:sourceKey,
+      target_chat_id:cfg.target_chat_id,status:'pending'});
+    created = true;
+  } catch(error) {
+    if (error.code === 11000) return;
+    throw error;
+  }
+  try {
+    const caption = publicMessageData(message,sourceUsername);
+    const code = candidateCode(caption);
+    const local = code
+      ? await Content.findOne({bot_key:cfg.bot_key,code_norm:normalizeCode(code),is_active:true})
+        .select('title code code_norm').lean() : null;
+    const username = active.bot.botInfo?.username || active.config?.telegramUsername ||
+      (await botTelegram.getMe()).username;
+    const branded = buildChannelCaption({
+      message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
+        title:cfg.target_title}, botUsername:username,
+      otherBots:cfg.linked_bots||[],localContent:local
+    });
+    let sent;
+    if (kind === 'text') {
+      sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
+        {disable_web_page_preview:true});
+    } else {
+      const downloaded = await client.downloadMedia(message,{workers:1});
+      if (!Buffer.isBuffer(downloaded) ||
+          downloaded.byteLength === 0 ||
+          downloaded.byteLength > 18*1024*1024) {
+        throw new Error('Media juda katta yoki olinmadi (18 MB limit)');
+      }
+      const filename = kind === 'video'?'post.mp4':kind === 'photo'?'post.jpg':'post.bin';
+      const file = {source:downloaded,filename};
+      if (kind === 'video') sent = await botTelegram.sendVideo(cfg.target_chat_id,file,
+        {caption:branded,supports_streaming:true});
+      else if (kind === 'photo') sent = await botTelegram.sendPhoto(cfg.target_chat_id,file,
+        {caption:branded});
+      else sent = await botTelegram.sendDocument(cfg.target_chat_id,file,
+        {caption:branded});
+    }
+    await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
+      {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
+  } catch(error) {
+    // Do not blindly retry on ambiguous network failures; a duplicate channel
+    // post is worse than a logged failure. Admin can manually retry via forward.
+    if (created) await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
+      {$set:{status:'failed',error:String(error.message||error).slice(0,160)}});
+    console.warn('Public source post failed', cfg.bot_key, message.id,
+      String(error.message||error).slice(0,160));
+  }
+}
+
+async function launchPublicSourceMonitor() {
+  if (!sessionConfigured()) return;
+  try {
+    publicSourceWatcher = await launchPublicChannelWatcher({
+      listSources:async()=>{
+        if (!(mongoReady && mongoose.connection.readyState===1)) return [];
+        return ChannelRelayConfig.find({auto_enabled:true,source_mode:'mtproto',
+          source_username:{$exists:true,$ne:''},target_chat_id:{$exists:true,$ne:''}})
+          .limit(15).lean();
+      },
+      deliver:routeExternalPublicPost
+    });
+    console.info('Public channel MTProto monitor',
+      publicSourceWatcher?.enabled?'enabled':'not ready: '+publicSourceWatcher?.reason);
+  } catch(error) {
+    console.error('Public channel MTProto monitor unavailable:',String(error.message||error).slice(0,170));
+  }
+}
+
 // =========================
 // START: KO'P BOT + FACTORY BITTA SERVERDA
 // =========================
@@ -10503,6 +10595,8 @@ async function start() {
   }
 
   startMongoBackgroundLoop();
+  // Optional monitoring of unrelated PUBLIC channels using an authorized user session.
+  void launchPublicSourceMonitor();
 
   setInterval(() => {
     if (mongoReady && mongoose.connection.readyState === 1) {
@@ -10526,14 +10620,16 @@ async function start() {
 
   process.once('SIGINT', async () => {
     console.log('Botlar toʻxtatilmoqda...');
-    for (const active of activeBots.values()) active.bot.stop('SIGINT');
+    for (const active of activeBots.values()) { try { active.bot.stop('SIGINT'); } catch (_) {} }
+    if (publicSourceWatcher?.stop) await publicSourceWatcher.stop().catch(() => {});
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close().catch(() => {});
     process.exit(0);
   });
 
   process.once('SIGTERM', async () => {
     console.log('Botlar toʻxtatilmoqda...');
-    for (const active of activeBots.values()) active.bot.stop('SIGTERM');
+    for (const active of activeBots.values()) { try { active.bot.stop('SIGTERM'); } catch (_) {} }
+    if (publicSourceWatcher?.stop) await publicSourceWatcher.stop().catch(() => {});
     if (mongoose.connection.readyState !== 0) await mongoose.connection.close().catch(() => {});
     process.exit(0);
   });
