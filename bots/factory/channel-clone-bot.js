@@ -12,6 +12,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['📥 Manba kanal','📤 Bizning kanal'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
+    ['🧪 Ulanishni tekshirish'],
     ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
   const load=()=>Config.findOne({bot_key:cloneKey}).lean();
@@ -64,6 +65,36 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(c.history_enabled&&!c.history_completed)return ctx.reply('🔄 Sinxronlash davom etmoqda.',menu());
     await Config.updateOne({bot_key:cloneKey},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:''}});
     return ctx.reply('✅ Tarix qayta tekshiriladi. Ilgari yuborilgan postlar MongoDB jurnalidan aniqlanadi.',menu());
+  });
+  bot.hears('🧪 Ulanishni tekshirish',async ctx=>{
+    if(!permitted(ctx))return;
+    const c=await load();
+    if(!c?.source_username||!c?.target_chat_id)return ctx.reply('❌ Manba va joylash kanallarini ulang.',menu());
+    let client;
+    try {
+      const me=await ctx.telegram.getMe();
+      const member=await ctx.telegram.getChatMember(c.target_chat_id,me.id);
+      if(member.status!=='creator'&&!(member.status==='administrator'&&member.can_post_messages))
+        return ctx.reply('❌ Bot maqsad kanalga post joylay olmaydi. Botga Post Messages huquqini bering.',menu());
+      if(!sessionReady())return ctx.reply('❌ Render user sessiyasi mavjud emas.',menu());
+      const {TelegramClient}=require('teleproto');
+      const {StringSession}=require('teleproto/sessions');
+      client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
+        Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
+      await client.connect();
+      const messages=await client.getMessages('@'+c.source_username,{limit:20});
+      const sample=messages.find(x=>x && !x.action && (x.media||x.message));
+      if(!sample)return ctx.reply('⚠️ Manbadan nusxalanadigan post topilmadi.',menu());
+      try {
+        const test=await ctx.telegram.copyMessage(ctx.from.id,'@'+c.source_username,Number(sample.id),
+          {caption:'🧪 Kanal klonlash sinovi (kanalingizga yuborilmadi)'});
+        await ctx.reply('✅ Bot API manba postni nusxalashga ruxsat oldi. Maqsad botining admin huquqi ham bor. Sinov xabari: '+test.message_id,menu());
+      } catch(e) {
+        await ctx.reply('⚠️ Telegram akkaunti manbani o‘qiydi, lekin sizning bot Bot API orqali uni nusxalay olmaydi.\nSabab: '+String(e.description||e.message||e).slice(0,190)+
+          '\n\nBunday manba uchun akkauntning maqsad kanalga postlash huquqi yoki ruxsatli boshqa uzatish mexanizmi kerak.',menu());
+      }
+    }catch(e){return ctx.reply('❌ Tekshirish xatosi: '+String(e.message||e).slice(0,190),menu());}
+    finally{if(client)await client.disconnect().catch(()=>{});}
   });
   bot.hears('📊 Holat',async ctx=>{
     if(!permitted(ctx))return;const c=await load();const sent=await Log.countDocuments({bot_key:cloneKey,status:'sent'});
