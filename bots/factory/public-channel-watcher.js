@@ -58,8 +58,8 @@ function publicMessageData(message, handle) {
 
 async function launchPublicChannelWatcher({env = process.env, listSources, deliver, log = console}) {
   if (!sessionConfigured(env)) return { enabled:false, reason:'missing_user_session', stop:async()=>{} };
-  const {TelegramClient} = require('telegram');
-  const {StringSession} = require('telegram/sessions');
+  const {TelegramClient} = require('teleproto');
+  const {StringSession} = require('teleproto/sessions');
   const client = new TelegramClient(
     new StringSession(env.TELEGRAM_STRING_SESSION),
     Number(env.TELEGRAM_API_ID), env.TELEGRAM_API_HASH,
