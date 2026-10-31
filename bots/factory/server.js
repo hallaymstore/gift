@@ -3041,6 +3041,27 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply('➖ Oʻchirmoqchi boʻlgan kanal/guruh username yuboring. Masalan: @kanal_nomi\n\n❌ Bekor qilish: /cancel');
   });
 
+  if (config.type_key==='music'||config.item==='musiqa') {
+    bot.action('music:external:more',async ctx=>{
+      await ctx.answerCbQuery();
+      const data=ctx.session?.musicExternal;
+      if(!data||Date.now()-data.at>15*60000)return ctx.reply('⏳ Natijalar eskirdi. Qo‘shiq nomini qayta yozing.');
+      const {formatExternalMusic}=require('./external-music-search');
+      const offset=Number(data.offset||0)+8;
+      if(offset>=data.items.length)return ctx.reply('✅ Barcha natijalar ko‘rsatildi.');
+      data.offset=offset;
+      return ctx.reply(formatExternalMusic(data.items,data.query,offset),{
+        disable_web_page_preview:true,
+        reply_markup:{inline_keyboard:[[{
+          text:'🎵 Yana natijalar',callback_data:'music:external:more'
+        }]]}
+      });
+    });
+    bot.action('music:external:help',async ctx=>{
+      await ctx.answerCbQuery();
+      return ctx.reply('🔎 Qo‘shiq yoki ijrochi nomini yozing. Masalan: JONY Kometa');
+    });
+  }
   bot.on('text', async (ctx) => {
     await saveUser(ctx);
 
@@ -3264,6 +3285,25 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     if (!ok && !isAdmin(userId)) return sendSubscriptionWarning(ctx);
 
     const matches = await findContentsByQuery(text, 8);
+    if (!matches.length && (config.type_key==='music' || config.item==='musiqa')) {
+      try {
+        const {searchExternalMusic,formatExternalMusic}=require('./external-music-search');
+        const result=await searchExternalMusic(text,24);
+        if(result.length){
+          ctx.session.musicExternal={query:text,items:result,at:Date.now()};
+          await ctx.reply(formatExternalMusic(result,text,0),{
+            disable_web_page_preview:true,
+            reply_markup:{inline_keyboard:[
+              [{text:'🎵 Yana natijalar',callback_data:'music:external:more'}],
+              [{text:'🔎 Boshqa qo‘shiq qidirish',callback_data:'music:external:help'}]
+            ]}
+          });
+          return;
+        }
+      } catch(e) {
+        console.warn('External music search:',String(e.message||e).slice(0,150));
+      }
+    }
     if (!matches.length) {
       return ctx.reply(
         `❌ Bunday ${config.item} topilmadi.\n\n${config.itemTitle} nomi yoki kodini tekshirib qayta yuboring. Masalan: ${config.codeExamples}\n\n💡 ${USER_BTN.top} yoki ${USER_BTN.fresh} bo‘limini ham ko‘ring.`,
