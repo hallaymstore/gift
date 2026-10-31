@@ -2,7 +2,8 @@
 const {Telegraf,Markup,session}=require('telegraf');
 const {telegramChatRef,telegramHandle}=require('./channel-publisher');
 
-function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
+function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
+  const cloneKey=config.key||'channel_clone';
   if(!token || !/^\d+:[\w-]{20,}$/.test(token))return null;
   const bot=new Telegraf(token);
   bot.use(session({defaultSession:()=>({step:null})}));
@@ -13,7 +14,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
     ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
-  const load=()=>Config.findOne({bot_key:'channel_clone'}).lean();
+  const load=()=>Config.findOne({bot_key:cloneKey}).lean();
   const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning.',menu());
   bot.start(async ctx=>permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.'));
   bot.hears('📥 Manba kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='source';return ctx.reply('Manba public kanal @username ni yuboring.');});
@@ -31,13 +32,13 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
         if(chat.type!=='channel'||!['creator','administrator'].includes(rights.status)||
            (rights.status==='administrator'&&!rights.can_post_messages))
           return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
-        await Config.updateOne({bot_key:'channel_clone'},{$set:{target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle}},{upsert:true});
+        await Config.updateOne({bot_key:cloneKey},{$set:{target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle}},{upsert:true});
         return ctx.reply('✅ Joylash kanali: @'+handle,menu());
       }catch(e){return ctx.reply('❌ Kanal tekshiruvi: '+String(e.message||e).slice(0,140),menu());}
     }
     if(step==='source'){
       if(!sessionReady())return ctx.reply('⚠️ Telegram user sessiyasi sozlanmagan. Render env: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION.',menu());
-      await Config.updateOne({bot_key:'channel_clone'},{$set:{
+      await Config.updateOne({bot_key:cloneKey},{$set:{
         source_username:handle,source_mode:'mtproto',source_cursor:0,
         history_enabled:false,history_completed:false,history_cursor:0,history_ceiling:0,
         auto_enabled:false
@@ -49,19 +50,19 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
     if(!permitted(ctx))return;const c=await load();
     if(!c?.target_chat_id||!c?.source_username)return ctx.reply('Avval ikkala kanalni ulang.',menu());
     if(!sessionReady())return ctx.reply('Telegram sessiyasi mavjud emas.',menu());
-    await Config.updateOne({bot_key:'channel_clone'},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:''}});
+    await Config.updateOne({bot_key:cloneKey},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:''}});
     return ctx.reply('✅ Kuzatuv yoqildi. Eski postlar ham sinxronlanadi. Oldin yuborilganlar takrorlanmaydi.',menu());
   });
-  bot.hears('⏸ To‘xtatish',async ctx=>{if(!permitted(ctx))return;await Config.updateOne({bot_key:'channel_clone'},{$set:{auto_enabled:false,history_enabled:false}});return ctx.reply('⏸ Sinxronlash to‘xtatildi.',menu());});
+  bot.hears('⏸ To‘xtatish',async ctx=>{if(!permitted(ctx))return;await Config.updateOne({bot_key:cloneKey},{$set:{auto_enabled:false,history_enabled:false}});return ctx.reply('⏸ Sinxronlash to‘xtatildi.',menu());});
   bot.hears('🔄 Eski postlarni qayta tekshirish',async ctx=>{
     if(!permitted(ctx))return;const c=await load();
     if(!c?.source_username||!c?.target_chat_id)return ctx.reply('Avval kanallarni ulang.',menu());
     if(c.history_enabled&&!c.history_completed)return ctx.reply('🔄 Sinxronlash davom etmoqda.',menu());
-    await Config.updateOne({bot_key:'channel_clone'},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:''}});
+    await Config.updateOne({bot_key:cloneKey},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:''}});
     return ctx.reply('✅ Tarix qayta tekshiriladi. Ilgari yuborilgan postlar MongoDB jurnalidan aniqlanadi.',menu());
   });
   bot.hears('📊 Holat',async ctx=>{
-    if(!permitted(ctx))return;const c=await load();const sent=await Log.countDocuments({bot_key:'channel_clone',status:'sent'});
+    if(!permitted(ctx))return;const c=await load();const sent=await Log.countDocuments({bot_key:cloneKey,status:'sent'});
     return ctx.reply('📊 CHANNEL CLONE\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
       '\nKanal: '+(c?.target_username?'@'+c.target_username:'yo‘q')+
       '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+'\nYuborilgan: '+sent+
@@ -87,7 +88,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
         const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
         let after=null;
         while(true){
-          const query={bot_key:'channel_clone',status:'sent',target_message_id:{$gt:0}};
+          const query={bot_key:cloneKey,status:'sent',target_message_id:{$gt:0}};
           if(after)query._id={$gt:after};
           const items=await Log.find(query).sort({_id:1}).limit(50).lean();
           if(!items.length)break;
@@ -118,6 +119,6 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
       finally{if(client)await client.disconnect().catch(()=>{});repairing=false;}
     })();
   });
-  return {key:'channel_clone',title:'Channel Clone Bot',bot,config:{key:'channel_clone'}};
+  return {key:cloneKey,title:config.title||'Channel Clone Bot',bot,config};
 }
 module.exports={createChannelCloneBot};
