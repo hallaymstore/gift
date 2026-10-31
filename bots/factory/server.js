@@ -9676,6 +9676,7 @@ function createFactoryBot() {
     const id = String(record._id);
     const rows = [
       [Markup.button.callback('🔎 Batafsil / boshqarish', `factory:mybot:${id}`)],
+      [Markup.button.callback('🎥 Reklama videosi yaratish', `factory:promo:select:${id}`)],
       [Markup.button.callback('🔄 Qayta ishga tushirish', `factory:restart:${id}`)],
       [Markup.button.callback('🔐 API token almashtirish', `factory:change_token:${id}`)],
       [Markup.button.callback('👨‍💻 Admin ID almashtirish', `factory:change_admins:${id}`)],
@@ -9709,7 +9710,8 @@ function createFactoryBot() {
   function userKeyboard(ctx) {
     const rows = [
       ['🤖 Bot tayyorlash', '💰 Narxlar'],
-      ['📋 Mening botlarim', '☎️ Admin bilan kelishish']
+      ['📋 Mening botlarim', '☎️ Admin bilan kelishish'],
+      ['🎥 Video reklama Studio']
     ];
     if (ctx.from && isOwner(ctx.from.id)) {
       rows.unshift(['🛂 Kutilayotgan soʻrovlar', '⏳ Toʻlovi tugaganlar']);
@@ -10115,6 +10117,7 @@ function createFactoryBot() {
       '🤖 Bot tayyorlash — BotFather tokeni bilan yangi bot yaratish',
       '💰 Narxlar — bot turlari va oylik tariflar',
       '📋 Mening botlarim — botlaringizni boshqarish (restart, token/admin almashtirish)',
+      '🎥 Video reklama Studio — video ustiga Telegram ikonka va bot nomini joylash',
       '☎️ Admin bilan kelishish — to‘lov va ruxsat',
       '',
       'Buyruqlar: /start, /help, /id, /cancel'
@@ -10144,6 +10147,50 @@ function createFactoryBot() {
   bot.hears('💰 Narxlar', showPlans);
   bot.hears('💰 Tarif narxlari', showPlans);
   bot.hears('📋 Mening botlarim', showMyBots);
+  async function showPromoVideoPicker(ctx){
+    if(!(await requireMongo(ctx,'Reklama videosi uchun botlar ro‘yxati kerak')))return;
+    reset(ctx);
+    const filter=isOwner(ctx.from.id)?{}:{owner_user_id:ctx.from.id};
+    const records=await ManagedBot.find(filter).sort({createdAt:-1}).limit(30)
+      .select('_id title telegram_username owner_user_id').lean();
+    if(!records.length)return ctx.reply('📭 Hali yaratilgan botingiz yo‘q. Avval bot yarating.',userKeyboard(ctx));
+    const rows=records.map(r=>[Markup.button.callback(
+      '🎥 '+String(r.title||'Bot').slice(0,24)+' · @'+String(r.telegram_username||'').slice(0,23),
+      'factory:promo:select:'+String(r._id)
+    )]);
+    return ctx.reply('🎬 VIDEO REKLAMA STUDIO\n\nQaysi botni videoda reklama qilamiz?\nTanlang — uning @username havolasi videoga yoziladi.',
+      Markup.inlineKeyboard(rows));
+  }
+  bot.hears('🎥 Video reklama Studio',showPromoVideoPicker);
+  bot.action(/^factory:promo:select:([a-f0-9]{24})$/,async ctx=>{
+    await ctx.answerCbQuery();
+    const record=await loadManageableBot(ctx,ctx.match[1]);
+    if(!record)return;
+    reset(ctx);
+    ctx.session.mode='promo_video';
+    ctx.session.draft={manage_bot_id:String(record._id),placement:'bottom'};
+    return ctx.reply('🎥 '+record.title+' (@'+record.telegram_username+')\n\nTelegram belgisi va bot nomini videoning qayeriga joylaymiz?',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('⬆️ Tepada','factory:promo:place:top'),Markup.button.callback('⬇️ Pastda','factory:promo:place:bottom')],
+        [Markup.button.callback('↖️ Chap tepada','factory:promo:place:tl'),Markup.button.callback('↗️ O‘ng tepada','factory:promo:place:tr')],
+        [Markup.button.callback('↙️ Chap pastda','factory:promo:place:bl'),Markup.button.callback('↘️ O‘ng pastda','factory:promo:place:br')]
+      ]));
+  });
+  bot.action(/^factory:promo:place:(top|bottom|tl|tr|bl|br)$/,async ctx=>{
+    await ctx.answerCbQuery();
+    if(ctx.session?.mode!=='promo_video'||!ctx.session?.draft?.manage_bot_id)
+      return ctx.reply('❌ Avval 🎥 Video reklama Studio orqali botni tanlang.',userKeyboard(ctx));
+    const record=await loadManageableBot(ctx,ctx.session.draft.manage_bot_id);
+    if(!record)return;
+    const placement=ctx.match[1];
+    ctx.session.draft.placement=placement;
+    const positions={top:'tepada',bottom:'pastda',tl:'chap tepada',tr:'o‘ng tepada',bl:'chap pastda',br:'o‘ng pastda'};
+    return ctx.reply('✅ Joylashuv: '+positions[placement]+
+      '\n\n📤 Endi 60 soniyagacha, 19 MB gacha qisqa videoni yuboring.\n\n'+
+      '🎬 Videoda Telegram ikonchasi va @'+record.telegram_username+' yozuvi chiqadi.\n'+
+      'Tayyor MP4 shu chatga qaytadi.\n\n❌ Bekor qilish: /cancel');
+  });
+
   bot.hears('🛂 Kutilayotgan soʻrovlar', showPending);
   bot.hears('⏳ Toʻlovi tugaganlar', showExpired);
   bot.hears('📋 Barcha botlar', showAllBots);
@@ -10750,6 +10797,51 @@ Qayta token yuboring yoki /cancel bosing.`);
 
   bot.on('message', async (ctx) => {
     if (ctx.session.mode === 'global_broadcast') return sendGlobalBroadcast(ctx);
+    if(ctx.session.mode==='promo_video_processing')
+      return ctx.reply('🎬 Hozir video montaj qilinyapti. Natija shu chatga yuboriladi.');
+    if(ctx.session.mode!=='promo_video')return;
+    const media=ctx.message?.video||
+      (String(ctx.message?.document?.mime_type||'').startsWith('video/')?ctx.message.document:null);
+    if(!media)return ctx.reply('🎥 Video yuboring. Oddiy matn yoki rasm emas. Maksimum 60 soniya, 19 MB.');
+    const record=await loadManageableBot(ctx,ctx.session.draft?.manage_bot_id);
+    if(!record){reset(ctx);return;}
+    const {MAX_INPUT_BYTES,MAX_DURATION,createPromoVideo}=require('./promo-video-studio');
+    const {sendShortsVideo,publicUploadError}=require('./shorts-upload');
+    if(Number(media.file_size||0)>MAX_INPUT_BYTES)
+      return ctx.reply('❌ Video 19 MB dan katta. Qisqartirib qayta yuboring.');
+    if(Number(media.duration||0)>MAX_DURATION)
+      return ctx.reply('❌ Video 60 soniyadan uzun. Qisqaroq video yuboring.');
+    const opts={
+      telegram:ctx.telegram,fileId:media.file_id,size:media.file_size,
+      duration:media.duration,width:media.width,height:media.height,
+      username:record.telegram_username,title:record.title,
+      placement:ctx.session.draft.placement||'bottom'
+    };
+    const chatId=ctx.chat.id;
+    ctx.session.mode='promo_video_processing';
+    await ctx.reply('🎞 Video qabul qilindi. Telegram ikonchasi va @'+record.telegram_username+
+      ' nomi bilan reklama MP4 tayyorlanmoqda.',userKeyboard(ctx));
+    // Do not block the webhook while FFmpeg encodes the uploaded video.
+    void (async()=>{
+      try{
+        await createPromoVideo({...opts,deliver:async result=>{
+          await sendShortsVideo({
+            telegram:ctx.telegram,chatId,output:result.output,
+            filename:'telegram-promo.mp4',
+            caption:'✅ Tayyor reklama videosi\n🤖 @'+record.telegram_username+
+              '\n🔗 https://t.me/'+record.telegram_username+
+              '\n\nTelegram, Instagram Reels, TikTok va YouTube Shorts uchun.'
+          });
+        }});
+        await ctx.telegram.sendMessage(chatId,'✅ Video tayyor! Yana video yaratish uchun 🎥 Video reklama Studio ni bosing.').catch(()=>{});
+      }catch(error){
+        const reason=publicUploadError(error);
+        console.warn('[factory] Promo video failed:',reason);
+        await ctx.telegram.sendMessage(chatId,'❌ Reklama videosi tayyorlanmadi: '+reason+
+          '\nQisqaroq MP4 yuborib qayta urinib ko‘ring.').catch(()=>{});
+      }
+    })();
+    reset(ctx);
   });
 
   bot.on('chat_join_request', async (ctx) => {
