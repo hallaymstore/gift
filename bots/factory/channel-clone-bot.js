@@ -242,7 +242,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(c.history_enabled&&!c.history_completed&&c.auto_enabled)return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
     const stats=await recount(ctx,c);
     if(!stats)return;
-    await Config.updateOne({bot_key:routeKey(ctx),source_username:c.source_username},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:''}});
+    await Config.updateOne({bot_key:routeKey(ctx),source_username:c.source_username},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:'',history_retry_at:null,history_error_count:0}});
     return ctx.reply('✅ Kuzatuv yoqildi. Eski postlar ham sinxronlanadi. Oldin yuborilganlar takrorlanmaydi.',menu());
   });
   bot.hears('⏸ To‘xtatish',async ctx=>{if(!permitted(ctx))return;await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:false,history_enabled:false}});return ctx.reply('⏸ Sinxronlash to‘xtatildi.',menu());});
@@ -250,7 +250,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;const c=await load(ctx);
     if(!c?.source_username||!c?.target_chat_id)return ctx.reply('Avval kanallarni ulang.',menu());
     if(c.history_enabled&&!c.history_completed)return ctx.reply('🔄 Sinxronlash davom etmoqda.',menu());
-    await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:''}});
+    await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0}});
     return ctx.reply('✅ Tarix qayta tekshiriladi. Ilgari yuborilgan postlar MongoDB jurnalidan aniqlanadi.',menu());
   });
   bot.hears('🧪 Ulanishni tekshirish',async ctx=>{
@@ -384,7 +384,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const choice=ctx.match[1];
     if(choice==='cancel')return ctx.reply('Bekor qilindi.',menu());
     const $set={auto_enabled:false,history_enabled:false,history_completed:false,
-      history_cursor:0,history_ceiling:0,history_last_error:''};
+      history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0};
     if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_cursor:0});
     if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:''});
     await Config.updateOne({bot_key:routeKey(ctx)},{$set},{upsert:true});
