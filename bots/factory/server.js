@@ -369,6 +369,8 @@ const BroadcastLog = mongoose.model('BroadcastLog', broadcastLogSchema);
 
 const relayConfigSchema = new mongoose.Schema({
   bot_key: { type: String, required: true, unique: true, index: true },
+  owner_bot_key: {type:String,index:true},
+  route_title: String,
   target_chat_id: String,
   target_username: String,
   target_title: String,
@@ -10683,7 +10685,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     const stillEnabled=await ChannelRelayConfig.exists({...selector,history_enabled:true});
     if(!stillEnabled)return {status:'skipped'};
   }
-  const active = activeBots.get(cfg.bot_key);
+  const active = activeBots.get(cfg.owner_bot_key||cfg.bot_key);
   if (!active?.bot?.telegram || !cfg.target_chat_id) {
     throw new Error('Nishon kino boti faol emas; keyingi so‘rovda qayta urinish');
   }
@@ -10790,7 +10792,7 @@ async function launchPublicSourceMonitor() {
         if (!(mongoReady && mongoose.connection.readyState===1)) return [];
         return ChannelRelayConfig.find({auto_enabled:true,source_mode:'mtproto',
           source_username:{$exists:true,$ne:''},target_chat_id:{$exists:true,$ne:''}})
-          .limit(15).lean();
+          .limit(200).lean();
       },
       deliver:routeExternalPublicPost
     });
