@@ -15,6 +15,7 @@ const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { attachMiniGames } = require('./mini-games-engine');
 const {attachGroupAnnouncer}=require('./group-announcements-bot');
+const {createChannelCloneBot}=require('./channel-clone-bot');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
@@ -10708,11 +10709,24 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
         .select('title code code_norm').lean() : null;
     const username = active.bot.botInfo?.username || active.config?.telegramUsername ||
       (await botTelegram.getMe()).username;
-    const branded = buildChannelCaption({
-      message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
-        title:cfg.target_title}, botUsername:username,
-      otherBots:cfg.linked_bots||[],localContent:local
-    });
+    const branded = cfg.bot_key === 'channel_clone'
+      ? (() => {
+          const original=String(message.message||'');
+          const own='@'+String(username).replace(/^@/,'');
+          const dest='@'+String(cfg.target_username||'').replace(/^@/,'');
+          const cleaned=original
+            .replace(/https?:\\/\\/t\\.me\\/[A-Za-z][A-Za-z0-9_]{4,31}(?:\\?[^\\s]*)?/gi,'')
+            .replace(/@[A-Za-z][A-Za-z0-9_]{4,31}/g,'')
+            .replace(/(?:📌\\s*)?Manba\\s*:[^\\n]*/giu,'')
+            .replace(/\\n{3,}/g,'\\n\\n').trim();
+          return [cleaned,'🤖 Bot: '+own,cfg.target_username?'📢 Kanal: '+dest:'']
+            .filter(Boolean).join('\\n\\n').slice(0,1024);
+        })()
+      : buildChannelCaption({
+          message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
+            title:cfg.target_title}, botUsername:username,
+          otherBots:cfg.linked_bots||[],localContent:local
+        });
     let sent;
     if (kind === 'text') {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
@@ -10823,6 +10837,10 @@ async function start() {
 
   const factory = createFactoryBot();
   if (factory) await activateBot(factory, 'factory');
+  const cloneBot = createChannelCloneBot({token:process.env.CLONE_BOT_TOKEN,
+    adminIds:GLOBAL_ADMIN_IDS,Config:ChannelRelayConfig,Log:ChannelRelayLog,
+    sessionReady:()=>sessionConfigured()});
+  if (cloneBot) await activateBot(cloneBot,'channel_clone');
 
   for (const config of STATIC_BOT_CONFIGS) {
     const active = createContentBot(config);
