@@ -1941,7 +1941,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       // Bot API may not resolve public channel details without membership.
       // We still accept the syntactically valid PUBLIC handle for MTProto.
     }
-    const mode = botIsSourceAdmin ? 'bot_api' : 'mtproto';
+    // Prefer MTProto whenever a user session exists: Bot API cannot read history,
+    // even if the bot is a source administrator.
+    const mode = sessionConfigured() ? 'mtproto' : (botIsSourceAdmin ? 'bot_api' : 'mtproto');
     await ChannelRelayConfig.updateOne({bot_key:config.key},{
       $set:{
         source_chat_id:sourceChatId,
