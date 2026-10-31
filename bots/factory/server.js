@@ -14,6 +14,8 @@ const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { attachMiniGames } = require('./mini-games-engine');
+const {attachGroupAnnouncer}=require('./group-announcements-bot');
+const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
 const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
@@ -226,6 +228,41 @@ const miniGamesPlayerSchema = new mongoose.Schema({
 }, { timestamps: true, collection: 'multibot_mini_games_players' });
 miniGamesPlayerSchema.index({ bot_key: 1, user_id: 1 }, { unique: true });
 const MiniGamesPlayer = mongoose.model('MultiBotMiniGamesPlayer', miniGamesPlayerSchema);
+
+const announcementGroupSchema = new mongoose.Schema({
+  bot_key:{type:String,required:true,index:true},
+  chat_id:{type:String,required:true},
+  title:String,
+  active:{type:Boolean,default:true},
+  approved_by:Number,
+  approved_at:Date,
+  last_sent_at:Date
+},{timestamps:true,collection:'multibot_announcement_groups'});
+announcementGroupSchema.index({bot_key:1,chat_id:1},{unique:true});
+const AnnouncementGroup=mongoose.model('MultiBotAnnouncementGroup',announcementGroupSchema);
+
+const announcementCampaignSchema=new mongoose.Schema({
+  bot_key:{type:String,required:true,unique:true,index:true},
+  source_chat_id:Number,
+  source_message_id:Number,
+  interval_minutes:{type:Number,default:60},
+  max_sends:{type:Number,default:10},
+  sent_count:{type:Number,default:0},
+  attempt_count:{type:Number,default:0},
+  revision:{type:Number,default:0},
+  running:{type:Boolean,default:false},
+  next_send_at:Date,
+  lock_until:Date,
+  last_error:String
+},{timestamps:true,collection:'multibot_announcement_campaigns'});
+const AnnouncementCampaign=mongoose.model('MultiBotAnnouncementCampaign',announcementCampaignSchema);
+const announcementLogSchema=new mongoose.Schema({
+  bot_key:{type:String,required:true},
+  attempt_key:{type:String,required:true},
+  chat_id:String,status:String,message_id:Number,error:String,created_at:Date
+},{timestamps:true,collection:'multibot_announcement_logs'});
+announcementLogSchema.index({bot_key:1,attempt_key:1},{unique:true});
+const AnnouncementLog=mongoose.model('MultiBotAnnouncementLog',announcementLogSchema);
 
 const Content = mongoose.model('MultiBotContent', contentSchema);
 const ContentPart = mongoose.model('MultiBotContentPart', partSchema);
@@ -1626,6 +1663,17 @@ function createSharedUtils(bot, config, adminIds) {
     broadcastMessage,
     handleSubscriptionCallback
   };
+}
+
+function createGroupAnnouncerBot(config,tokenOverride=null,adminIdsOverride=null){
+  const token=String(tokenOverride||process.env[config.tokenEnv]||'').trim();
+  if(!hasUsableToken(token))return null;
+  const admins=adminIdsOverride||parseIds(process.env.ADMIN_IDS);
+  const bot=createBaseBot(token,config,admins);
+  const utils=createSharedUtils(bot,config,admins);
+  attachGroupAnnouncer({bot,config,adminIds:admins,Markup,
+    Group:AnnouncementGroup,Campaign:AnnouncementCampaign,Log:AnnouncementLog,utils});
+  return {key:config.key,title:config.title,bot,config};
 }
 
 function createMiniGamesBot(config, tokenOverride = null, adminIdsOverride = null) {
@@ -8392,6 +8440,15 @@ function commandListForConfig(config = {}) {
       { command: 'cancel', description: 'Jarayonni bekor qilish' }
     ];
   }
+  if (engine === 'group_announcements') {
+    return [
+      ...base,
+      {command:'admin',description:'Guruh e’lonlarini boshqarish'},
+      {command:'status',description:'Kampaniya holati'},
+      {command:'allowannounce',description:'Guruh admini: e’lonlarga ruxsat berish'},
+      {command:'stopannounce',description:'Guruh admini: e’lonlarni o‘chirish'}
+    ];
+  }
   if (engine === 'mini_games') {
     return [
       ...base,
@@ -9117,7 +9174,8 @@ async function startManagedRecord(record, source = 'db') {
   }
   const engine = preset.engine || 'content';
   let active = null;
-  if (engine === 'mini_games') active = createMiniGamesBot(config, token, adminIds);
+  if (engine === 'group_announcements') active = createGroupAnnouncerBot(config,token,adminIds);
+  else if (engine === 'mini_games') active = createMiniGamesBot(config, token, adminIds);
   else if (engine === 'vip') active = createVipBot(config, token, adminIds);
   else if (engine === 'giveaway') active = createGiveawayBot(config, token, adminIds);
   else if (engine === 'channel_form') active = createChannelFormBot(config, token, adminIds);
@@ -9142,7 +9200,7 @@ function typeRows(prefix = 'factory:type', requestingUserId = 0) {
     preset && preset.title && (typeKey !== 'mini_games' || canCreatePrivateGameBot(requestingUserId)));
   const rows = [];
   for (const [key, preset] of entries) {
-    const engineLabel = preset.engine === 'mini_games' ? 'O‘yin' : preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
+    const engineLabel = preset.engine === 'group_announcements' ? 'E’lon' : preset.engine === 'mini_games' ? 'O‘yin' : preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
     rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
   }
   return rows;
@@ -10597,6 +10655,17 @@ async function start() {
   startMongoBackgroundLoop();
   // Optional monitoring of unrelated PUBLIC channels using an authorized user session.
   void launchPublicSourceMonitor();
+
+  let announcementRunnerBusy=false;
+  const announcementTimer=setInterval(()=>{
+    if(announcementRunnerBusy||!(mongoReady&&mongoose.connection.readyState===1))return;
+    announcementRunnerBusy=true;
+    runGroupAnnouncementTick({Group:AnnouncementGroup,Campaign:AnnouncementCampaign,
+      Log:AnnouncementLog,activeBots})
+      .catch(e=>console.error('Guruh e’lonlari scheduler:',String(e.message||e).slice(0,150)))
+      .finally(()=>{announcementRunnerBusy=false;});
+  },60*1000);
+  announcementTimer.unref?.();
 
   setInterval(() => {
     if (mongoReady && mongoose.connection.readyState === 1) {
