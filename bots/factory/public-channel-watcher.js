@@ -2,9 +2,9 @@
 
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
 const LIVE_POLL_MS = 12000;
-const HISTORY_POLL_MS = 60000;
+const HISTORY_POLL_MS = 20000;
 const LIVE_BATCH_SIZE = 20;
-const HISTORY_BATCH_SIZE = 2;
+const HISTORY_BATCH_SIZE = 3;
 
 function sessionConfigured(env = process.env) {
   const id = Number(env.TELEGRAM_API_ID);
@@ -53,6 +53,7 @@ function orderedIds(messages) {
     .sort((a,b)=>Number(a.id)-Number(b.id));
 }
 function canRepublish(message) {
+  if(message?.action || (!message?.media && !String(message?.message||'').trim())) return false;
   return !isProtected(message) && mediaKind(message)!=='unsupported' &&
     mediaBytes(message)<=MAX_MEDIA_BYTES;
 }
@@ -155,7 +156,8 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
         try{await scanLive({client,cfg,deliver,log});}
         catch(e){log.warn('[channel sync] live failed',cfg.bot_key,String(e.message||e).slice(0,160));}
       }
-    }finally{liveRunning=false;}
+    }catch(e){log.warn('[channel sync] source listing failed',String(e.message||e).slice(0,160));}
+    finally{liveRunning=false;}
   }
   async function history(){
     if(stopped||historyRunning)return;
@@ -171,10 +173,12 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
             .catch(()=>{});
         }
       }
-    }finally{historyRunning=false;}
+    }catch(e){log.warn('[channel sync] source listing failed',String(e.message||e).slice(0,160));}
+    finally{historyRunning=false;}
   }
-  // Do not block server startup on a large post / download.
-  void live();
+  // Start new post tracking and then historical sync immediately.
+  // Neither one blocks HTTP startup.
+  void (async()=>{await live();await history();})();
   const liveTimer=setInterval(()=>{void live();},LIVE_POLL_MS);
   const historyTimer=setInterval(()=>{void history();},HISTORY_POLL_MS);
   liveTimer.unref?.();
