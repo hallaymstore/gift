@@ -3061,19 +3061,37 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     bot.action(/^music:mp3:(\d{1,2})$/,async ctx=>{
       await ctx.answerCbQuery();
       const data=ctx.session?.musicExternal;
-      if(!data||Date.now()-data.at>15*60000)return ctx.reply('⏳ Qidiruv eskirgan. Nomini qayta yozing.');
+      if(!data||Date.now()-data.at>15*60000)
+        return ctx.reply('⏳ Qidiruv eskirgan. Qo‘shiq nomini qayta yozing.');
       const index=Number(ctx.match[1]);
       const track=data.items[index];
       if(!track)return ctx.reply('❌ Qo‘shiq topilmadi.');
-      if(!/^https:\/\//.test(track.url))return ctx.reply('❌ MP3 manzili yaroqsiz.');
+      // The source track must be explicitly downloadable according to Jamendo.
+      // Do not pass remote redirects as sendAudio URLs: Telegram often rejects them.
+      const {downloadLicensedMp3}=require('./music-mp3-upload');
+      const {Input}=require('telegraf');
+      let temp=null;
       try{
+        await ctx.reply('⏳ MP3 tayyorlanmoqda: '+track.artist+' — '+track.title);
+        temp=await downloadLicensedMp3(track);
         await ctx.sendChatAction('upload_document').catch(()=>{});
-        await ctx.replyWithAudio(track.url,{title:track.title,performer:track.artist,
-          duration:Math.max(0,Math.round(track.durationMs/1000)),
-          caption:'🎵 '+track.artist+' — '+track.title+(track.license?'\nLitsenziya: '+track.license:'')});
+        await ctx.replyWithAudio(
+          Input.fromLocalFile(temp.filePath,'music.mp3'),
+          {
+            title:track.title,
+            performer:track.artist,
+            duration:Math.max(0,Math.round(track.durationMs/1000)),
+            caption:'🎵 '+track.artist+' — '+track.title+
+              (track.license?'\nLitsenziya: '+track.license:'')
+          }
+        );
       }catch(e){
-        console.warn('Music MP3 send failed:',String(e.message||e).slice(0,150));
-        return ctx.reply('❌ Telegram MP3 faylni uzata olmadi. Boshqa variantni tanlang.');
+        const message=String(e.description||e.message||e).slice(0,190);
+        console.warn('Music MP3 download/upload failed:',message);
+        return ctx.reply('❌ MP3 yuborishda xatolik: '+message+
+          '\nBoshqa qo‘shiqni tanlang yoki qayta urinib ko‘ring.');
+      }finally{
+        if(temp)await temp.cleanup().catch(error=>console.warn('MP3 cleanup:',error.message));
       }
     });
     bot.action('music:external:help',async ctx=>{
