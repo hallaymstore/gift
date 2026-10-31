@@ -26,9 +26,9 @@ node bots/factory/telegram-login.js
 7. Kino bot admin menyusi → `📣 Kanal postlari` → `📢 Joylash kanalini ulash` → `📡 Manba kanalni kuzatish` → `@Kino_Trenduzz`.
 
 ## Cheklovlar
-- Avtomat ish **faqat yangi postlardan** boshlanadi; ilk ishga tushishda oxirgi ID qayd etiladi, avvalgi postlar qayta tarqatilmaydi.
-- Har 90 soniyada bir marta 12 tagacha yangi post tekshiriladi. Juda faol kanallarda ayrim postlar o'tib ketishi mumkin.
+- Endi yangi manba ulanganda **eski postlar ham** sinxronlash navbatiga tushadi: oldindan yangi postlar uchun baseline yoziladi, tarixiy postlar esa eng eskisidan boshlab yuboriladi. Eski konfiguratsiyalar uchun admin menyusida **📚 Eski postlarni sinxronlash** tugmasini bir marta bosish kerak.
+- Yangi postlar har **12 soniyada** tekshiriladi; oldingi cursor'dan boshlab 20 tagacha yangi post qatorma-qator olinadi. Eski postlar har **20 soniyada 3 tagacha** olinadi; juda katta arxivni to'liq ko'chirish ancha vaqt oladi. Postlar chegaralar va Telegram/Render imkoniyatlariga qarab o‘tkazilishi mumkin.
 - Hozircha bitta videoning/media-faylning hajmi 18 MB dan oshmasligi lozim; muqova, video, oddiy hujjat va text asosiy turlardir. Albomlar bitta butun post bo'lib birlashtirilmaydi.
-- Himoyalangan kontentni aylanib o'tmaydi. Telegram yoki MTProto cheklovlari sabab xabarni yuborib bo'lmasa, logda xato qoladi.
+- Himoyalangan kontentni aylanib o'tmaydi. Telegram yoki MTProto cheklovlari sabab xabarni yuborib bo'lmasa, logda xato qoladi. **📋 Postlash holati** orqali arxivda joylangan va o‘tkazilgan postlar sanog‘i hamda oxirgi xatoni ko‘rish mumkin. **⏸ Tarixni to‘xtatish** eski postlar oqimini pauza qiladi, yangi postlar kuzatuvi davom etadi.
 - Foydalanuvchi sessiyasi sozlanmagan holatda **admin kanalga qo'shmasdan avtomatik kuzatuv faol emas**. Lekin `📥 Forward → kanal` orqali qo'lda ko'plab postlar yuborish davom etadi.
 - Telegram akkauntingizdan avtomatlashtirish bilan ko'p/tezkor qayta joylash spam cheklovlari yoki akkount risklarini tug'dirishi mumkin. Faqat o'zingiz boshqaradigan yoki qayta tarqatishga ruxsat etilgan manbalarni ishlating.

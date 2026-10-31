@@ -375,6 +375,13 @@ const relayConfigSchema = new mongoose.Schema({
   source_username: String,
   source_mode: { type: String, default: 'bot_api' },
   source_cursor: { type: Number, default: 0 },
+  history_enabled: {type:Boolean,default:false},
+  history_completed: {type:Boolean,default:false},
+  history_cursor: {type:Number,default:0},
+  history_ceiling: {type:Number,default:0},
+  history_sent: {type:Number,default:0},
+  history_skipped: {type:Number,default:0},
+  history_last_error: String,
   auto_enabled: { type: Boolean, default: false },
   linked_bots: { type: [String], default: [] },
   updated_by: Number
@@ -1837,6 +1844,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   const relayMenu = () => Markup.keyboard([
     ['📢 Joylash kanalini ulash', '🤖 Ulangan botlar'],
     ['📥 Forward → kanal', '📡 Manba kanalni kuzatish'],
+    ['📚 Eski postlarni sinxronlash', '⏸ Tarixni to‘xtatish'],
     ['⛔ Avto kuzatuvni o‘chirish', '📋 Postlash holati'],
     ['✅ Postlashni yakunlash', '🏠 Bosh menyu']
   ]).resize();
@@ -1851,13 +1859,20 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       return ctx.reply('📭 Hali post joylash kanali ulanmagan.\nAvval “📢 Joylash kanalini ulash” tugmasini bosing.', relayMenu());
     }
     const stats = await ChannelRelayLog.countDocuments({ bot_key: config.key, status: 'sent' });
+    const historyState = cfg.history_enabled
+      ? (cfg.history_completed ? '✅ Yakunlangan' : '🔄 Sinxronlanmoqda')
+      : '⏸ O‘chiq';
     return ctx.reply('📣 KANAL POSTLARI\n\n' +
       '🎯 Kanal: ' + (cfg.target_username ? '@' + cfg.target_username : cfg.target_title || cfg.target_chat_id) +
       '\n🤖 Kino bot: @' + botUsername(ctx) +
       '\n🎞 Ulangan botlar: ' + ((cfg.linked_bots || []).map(x => '@' + x).join(', ') || 'yo‘q') +
       '\n📡 Avto manba: ' + (cfg.auto_enabled ? (cfg.source_username ? '@' + cfg.source_username : cfg.source_chat_id) + (cfg.source_mode === 'mtproto' ? (sessionConfigured() ? ' (akkaunt sessiyasi ulangan)' : ' (Telegram akkaunt sessiyasi kutilmoqda)') : ' (Bot API)') : 'o‘chiq') +
       '\n✅ Joylangan postlar: ' + stats +
-      '\n\n💡 Begona PUBLIC kanalni admin bo‘lmasdan kuzatish uchun Telegram user sessiyasi kerak. U bo‘lmasa, bir nechta postni “📥 Forward → kanal” orqali joylang.',
+      '\n📚 Eski postlar: ' + historyState +
+      '\n📈 Tarix: ' + Number(cfg.history_sent||0) + ' joylandi, ' + Number(cfg.history_skipped||0) + ' o‘tkazildi' +
+      (cfg.history_cursor ? '\n🔎 Oxirgi tarixiy post ID: ' + cfg.history_cursor : '') +
+      (cfg.history_last_error ? '\n⚠️ Xato: ' + String(cfg.history_last_error).slice(0,120) : '') +
+      '\n⚡ Yangi postlar taxminan har 12 soniyada tekshiriladi; tarixiy postlar serverni zo‘riqtirmasdan navbatda chiqadi.',
       relayMenu());
   }
 
@@ -1926,13 +1941,22 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       // Bot API may not resolve public channel details without membership.
       // We still accept the syntactically valid PUBLIC handle for MTProto.
     }
-    const mode = botIsSourceAdmin ? 'bot_api' : 'mtproto';
+    // Prefer MTProto whenever a user session exists: Bot API cannot read history,
+    // even if the bot is a source administrator.
+    const mode = sessionConfigured() ? 'mtproto' : (botIsSourceAdmin ? 'bot_api' : 'mtproto');
     await ChannelRelayConfig.updateOne({bot_key:config.key},{
       $set:{
         source_chat_id:sourceChatId,
         source_username:publicHandle,
         source_mode:mode,
         source_cursor:0,
+        history_enabled:true,
+        history_completed:false,
+        history_cursor:0,
+        history_ceiling:0,
+        history_sent:0,
+        history_skipped:0,
+        history_last_error:'',
         auto_enabled:true,
         updated_by:ctx.from.id
       }
@@ -1944,7 +1968,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply(
       '✅ Begona PUBLIC manba saqlandi: @' + publicHandle + '\\n\\n' +
       (sessionConfigured()
-        ? '📡 Telegram akkaunt sessiyasi ulangan. Monitoring yangi postlardan boshlanadi.'
+        ? '📡 Telegram sessiyasi ulangan. Yangi postlar kuzatiladi, eski postlar ham navbat bilan sinxronlanadi.'
         : '⚠️ Avtomatik kuzatuv hali ISHLAMAYDI: serverda Telegram akkaunti sessiyasi sozlanmagan.\\n' +
           'Render Environment: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION.\\n' +
           'Bu maʼlumotlarni faqat o‘z Render envingizga kiriting; kod yoki sessiyani botga yubormang.') +
@@ -2060,9 +2084,38 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   bot.hears('⛔ Avto kuzatuvni o‘chirish', async ctx => {
     if (!isAdmin(ctx.from?.id)) return;
     await ChannelRelayConfig.updateOne({bot_key:config.key},
-      {$set:{auto_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
+      {$set:{auto_enabled:false,history_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
     return ctx.reply('⛔ Avtomatik kuzatuv o‘chirildi. Qo‘lda forward davom etadi.', relayMenu());
   });
+  bot.hears('📚 Eski postlarni sinxronlash', async ctx => {
+    if(!isAdmin(ctx.from?.id) || ctx.chat?.type!=='private') return;
+    const cfg=await relaySettings();
+    if(!cfg?.target_chat_id || !cfg?.source_username)
+      return ctx.reply('❌ Avval joylash va manba kanallarini ulang.',relayMenu());
+    if(cfg.source_mode!=='mtproto')
+      return ctx.reply('⚠️ Tarixiy postlarni olish uchun user sessiyali public kanal rejimi kerak.',relayMenu());
+    if(!sessionConfigured())
+      return ctx.reply('❌ Telegram akkaunt sessiyasi serverda sozlanmagan.',relayMenu());
+    await ChannelRelayConfig.updateOne({bot_key:config.key},{
+      $set:{history_enabled:true,history_completed:false,history_cursor:0,
+        history_ceiling:0,history_sent:0,history_skipped:0,history_last_error:'',
+        auto_enabled:true}
+    });
+    // Trigger next history scan immediately instead of waiting a full minute.
+    if(publicSourceWatcher?.scanHistory)void publicSourceWatcher.scanHistory();
+    return ctx.reply('✅ @'+cfg.source_username+' kanalining eski postlari sinxronlash navbatiga qo‘shildi.\n'+
+      '⏳ Dastlabki yuborishdan keyin “📋 Postlash holati” orqali jarayonni kuzating.\n'+
+      '📌 Eski xabarlar tarixiy tartibda, server yuklanmasligi uchun bosqichma-bosqich yuboriladi.\n'+
+      '⚡ Yangi postlar esa alohida 12 soniyalik tekshiruvda qoladi.',relayMenu());
+  });
+  bot.hears('⏸ Tarixni to‘xtatish', async ctx => {
+    if(!isAdmin(ctx.from?.id) || ctx.chat?.type!=='private') return;
+    await ChannelRelayConfig.updateOne({bot_key:config.key},
+      {$set:{history_enabled:false}});
+    return ctx.reply('⏸ Eski postlarni sinxronlash to‘xtatildi.\n'+
+      '⚡ Yangi postlarni kuzatish yoqilgan bo‘lsa davom etadi.',relayMenu());
+  });
+
   bot.hears('📥 Forward → kanal', async ctx => {
     if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
     const cfg = await relaySettings();
@@ -10510,14 +10563,44 @@ Qayta token yuboring yoki /cancel bosing.`);
 // Only admin-configured public channels are read. Never reads private chats.
 // Channel ownership/posting rights are checked when the target is configured.
 let publicSourceWatcher = null;
-async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind}) {
-  if (type === 'seed' || type === 'cursor') {
-    await ChannelRelayConfig.updateOne(
-      { bot_key:cfg.bot_key,source_username:cfg.source_username,
-        source_mode:'mtproto',auto_enabled:true },
-      { $set: {source_cursor:Number(cursor)} }
-    );
+async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind,phase,result,ceiling,error}) {
+  const selector={bot_key:cfg.bot_key,source_username:cfg.source_username,
+    source_mode:'mtproto',auto_enabled:true};
+  if(type==='seed'){
+    const set={source_cursor:Number(cursor)};
+    if(cfg.history_enabled && !Number(cfg.history_ceiling))set.history_ceiling=Number(cursor);
+    await ChannelRelayConfig.updateOne(selector,{$set:set});
     return;
+  }
+  if(type==='cursor'){
+    await ChannelRelayConfig.updateOne(selector,{$set:{source_cursor:Number(cursor)}});
+    return;
+  }
+  if(type==='history_begin'){
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true,history_ceiling:0},
+      {$set:{history_ceiling:Number(ceiling),history_last_error:''}});
+    return;
+  }
+  if(type==='history_cursor'){
+    const status=String(result?.status||'skipped');
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
+      {$set:{history_cursor:Number(cursor),history_last_error:''},
+       $inc:status==='sent'?{history_sent:1}:{history_skipped:1}});
+    return;
+  }
+  if(type==='history_complete'){
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
+      {$set:{history_completed:true,history_last_error:''}});
+    return;
+  }
+  if(type==='history_error'){
+    await ChannelRelayConfig.updateOne(selector,
+      {$set:{history_last_error:String(error||'Nomaʼlum xato').slice(0,160)}});
+    return;
+  }
+  if(phase==='history'){
+    const stillEnabled=await ChannelRelayConfig.exists({...selector,history_enabled:true});
+    if(!stillEnabled)return {status:'skipped'};
   }
   const active = activeBots.get(cfg.bot_key);
   if (!active?.bot?.telegram || !cfg.target_chat_id) {
@@ -10531,7 +10614,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       target_chat_id:cfg.target_chat_id,status:'pending'});
     created = true;
   } catch(error) {
-    if (error.code === 11000) return;
+    if (error.code === 11000) return {status:'duplicate'};
     throw error;
   }
   try {
@@ -10569,6 +10652,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     }
     await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
+    return {status:'sent'};
   } catch(error) {
     // Do not blindly retry on ambiguous network failures; a duplicate channel
     // post is worse than a logged failure. Admin can manually retry via forward.
@@ -10576,6 +10660,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{status:'failed',error:String(error.message||error).slice(0,160)}});
     console.warn('Public source post failed', cfg.bot_key, message.id,
       String(error.message||error).slice(0,160));
+    return {status:'failed'};
   }
 }
 
