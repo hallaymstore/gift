@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "check": "node --check server.js && node --check auto-branding.js && node --check bulk-import.js && node --check shorts-studio.js && node --check shorts-overlay.js && node --check shorts-upload.js && node --check subscription-support.js && node --check mini-games-core.js && node --check mini-games-engine.js && node --check channel-publisher.js && node --check public-channel-watcher.js",
-    "test": "node --test auto-branding.test.js bulk-import.test.js shorts-studio.test.js shorts-overlay.test.js shorts-upload.test.js subscription-support.test.js mini-games-core.test.js channel-publisher.test.js public-channel-watcher.test.js",
+    "check": "node --check server.js && node --check auto-branding.js && node --check bulk-import.js && node --check shorts-studio.js && node --check shorts-overlay.js && node --check shorts-upload.js && node --check subscription-support.js && node --check mini-games-core.js && node --check mini-games-engine.js && node --check channel-publisher.js && node --check public-channel-watcher.js && node --check group-announcements-core.js && node --check group-announcements-bot.js && node --check group-announcements-runner.js",
+    "test": "node --test auto-branding.test.js bulk-import.test.js shorts-studio.test.js shorts-overlay.test.js shorts-upload.test.js subscription-support.test.js mini-games-core.test.js channel-publisher.test.js public-channel-watcher.test.js group-announcements-core.test.js",
     "telegram:login": "node telegram-login.js"
   },
   "dependencies": {
