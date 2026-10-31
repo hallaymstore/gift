@@ -10836,7 +10836,15 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     throw new Error('Nishon kino boti faol emas; keyingi so‘rovda qayta urinish');
   }
   const botTelegram = active.bot.telegram;
-  const sourceKey = 'public:' + sourceUsername.toLowerCase() + ':' + message.id;
+  const legacySourceKey='public:'+sourceUsername.toLowerCase()+':'+message.id;
+  // A route can be reconnected to a new destination. The same source post
+  // is a new delivery there, but must not be reposted to the original channel.
+  const sourceKey=legacySourceKey+':target:'+String(cfg.target_chat_id);
+  const legacy=await ChannelRelayLog.findOne({
+    bot_key:cfg.bot_key,source_key:legacySourceKey,target_chat_id:String(cfg.target_chat_id)
+  }).select('status').lean();
+  if(legacy?.status==='sent')return {status:'duplicate'};
+  if(legacy?.status==='pending')return {status:'failed',error:'Earlier relay still pending; manual verification required'};
   let created = false;
   try {
     await ChannelRelayLog.create({bot_key:cfg.bot_key,source_key:sourceKey,
