@@ -53,14 +53,23 @@ async function runGroupAnnouncementTick({Group,Campaign,Log,activeBots,logger=co
       }
       // Reserve the group's 24-hour interval before transmission, so a socket
       // hangup cannot cause repeated or duplicated announcements.
-      await Group.updateOne({_id:selected._id,active:true},{$set:{last_sent_at:now}});
+      const reserved=await Group.updateOne({_id:selected._id,active:true,
+        $or:[{last_sent_at:{$exists:false}},{last_sent_at:{$lte:new Date(now.getTime()-24*60*60*1000)}}]},
+        {$set:{last_sent_at:now}});
+      if (!reserved.matchedCount) {
+        await Log.updateOne({bot_key:locked.bot_key,attempt_key:logKey},
+          {$set:{status:'cancelled',error:'Guruh ruxsati bekor qilingan yoki 24 soatlik cheklov'}});
+        continue;
+      }
       const telegram=active.bot.telegram;
       try {
         const me=active.bot.botInfo || await telegram.getMe();
         const member=await telegram.getChatMember(selected.chat_id,me.id);
-        if(!['member','creator','administrator'].includes(member?.status) ||
-           (member.status==='restricted' && !member.can_send_messages)){
-          throw new Error('Bot guruhdan chiqarilgan yoki xabar huquqi yo‘q');
+        if(!['creator','administrator'].includes(member?.status)){
+          throw new Error('Bot guruhdagi admin huquqini yo‘qotgan');
+        }
+        if(!await Group.exists({_id:selected._id,active:true})){
+          throw new Error('Guruh administratori e’lon ruxsatini bekor qilgan');
         }
         const copy=await telegram.copyMessage(selected.chat_id,
           locked.source_chat_id,locked.source_message_id,{disable_notification:true});
