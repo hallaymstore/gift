@@ -10936,7 +10936,7 @@ async function launchPublicSourceMonitor() {
         if (!(mongoReady && mongoose.connection.readyState===1)) return [];
         return ChannelRelayConfig.find({auto_enabled:true,source_mode:'mtproto',
           source_username:{$exists:true,$ne:''},target_chat_id:{$exists:true,$ne:''}})
-          .limit(200).lean();
+          .sort({bot_key:1}).limit(200).lean();
       },
       deliver:routeExternalPublicPost
     });
