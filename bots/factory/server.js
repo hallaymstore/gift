@@ -10877,7 +10877,11 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     return;
   }
   if(type==='cursor'){
-    await ChannelRelayConfig.updateOne(selector,{$set:{source_cursor:Number(cursor),history_retry_at:null,history_error_count:0}});
+    const updates={source_cursor:Number(cursor),history_retry_at:null,history_error_count:0};
+    if(result?.status==='sent' && Number(cfg.publish_interval_minutes)>0){
+      updates.next_publish_at=new Date(Date.now()+Number(cfg.publish_interval_minutes)*60000);
+    }
+    await ChannelRelayConfig.updateOne(selector,{$set:updates});
     return;
   }
   if(type==='history_begin'){
