@@ -2123,7 +2123,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
               const post=Array.isArray(m)?m[0]:m;
               if(!post){counts.failed++;continue;}
               const prior=String(post.message||'');
-              const next=prior.split('\n').filter(line=>!/^\\s*(?:📌\\s*)?Manba\\s*:/iu.test(line))
+              const next=prior.split('\n').filter(line=>!/^\s*(?:📌\s*)?Manba\s*:/iu.test(line))
                 .join('\n').replace(/\n{3,}/g,'\n\n').trim();
               if(next===prior.trim()){counts.unchanged++;continue;}
               if(!next){counts.failed++;continue;}
