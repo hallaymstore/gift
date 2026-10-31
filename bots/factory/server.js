@@ -1782,6 +1782,240 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return String(ctx?.botInfo?.username || config.telegramUsername || '').replace(/^@/, '').trim();
   }
 
+  // 📣 Channel Publisher — only the owner/admin configures the destination.
+  const relayMenu = () => Markup.keyboard([
+    ['📢 Joylash kanalini ulash', '🤖 Ulangan botlar'],
+    ['📥 Forward → kanal', '📡 Manba kanalni kuzatish'],
+    ['⛔ Avto kuzatuvni o‘chirish', '📋 Postlash holati'],
+    ['✅ Postlashni yakunlash', '🏠 Bosh menyu']
+  ]).resize();
+
+  async function relaySettings() {
+    return ChannelRelayConfig.findOne({ bot_key: config.key }).lean();
+  }
+
+  async function reportRelay(ctx) {
+    const cfg = await relaySettings();
+    if (!cfg?.target_chat_id) {
+      return ctx.reply('📭 Hali post joylash kanali ulanmagan.\nAvval “📢 Joylash kanalini ulash” tugmasini bosing.', relayMenu());
+    }
+    const stats = await ChannelRelayLog.countDocuments({ bot_key: config.key, status: 'sent' });
+    return ctx.reply('📣 KANAL POSTLARI\n\n' +
+      '🎯 Kanal: ' + (cfg.target_username ? '@' + cfg.target_username : cfg.target_title || cfg.target_chat_id) +
+      '\n🤖 Kino bot: @' + botUsername(ctx) +
+      '\n🎞 Ulangan botlar: ' + ((cfg.linked_bots || []).map(x => '@' + x).join(', ') || 'yo‘q') +
+      '\n📡 Avto manba: ' + (cfg.auto_enabled ? (cfg.source_username ? '@' + cfg.source_username : cfg.source_chat_id) : 'o‘chiq') +
+      '\n✅ Joylangan postlar: ' + stats +
+      '\n\n💡 Boshqa public kanaldan avtomatik kuzatish uchun aynan shu bot o‘sha kanalda admin bo‘lishi zarur.',
+      relayMenu());
+  }
+
+  async function storeRelayTarget(ctx, input) {
+    const ref = telegramChatRef(input);
+    if (!ref) return ctx.reply('❌ @kanal_username yoki -100... formatidagi kanal ID yuboring.');
+    try {
+      const chat = await ctx.telegram.getChat(ref);
+      if (chat.type !== 'channel') return ctx.reply('❌ Postlash uchun faqat kanal qabul qilinadi.');
+      const botInfo = ctx.botInfo || await ctx.telegram.getMe();
+      const rights = await ctx.telegram.getChatMember(chat.id, botInfo.id);
+      if (!['administrator', 'creator'].includes(rights.status) ||
+          (rights.status !== 'creator' && rights.can_post_messages !== true)) {
+        return ctx.reply('❌ @' + botInfo.username + ' botini ushbu kanalga ADMIN qiling va “Post Messages / Xabar joylash” huquqini yoqing.');
+      }
+      const previous = await relaySettings();
+      await ChannelRelayConfig.updateOne({ bot_key: config.key }, {
+        $set: {
+          target_chat_id: String(chat.id), target_username: telegramHandle(chat.username),
+          target_title: String(chat.title || '').slice(0,120),
+          updated_by: ctx.from.id,
+          ...(String(previous?.source_chat_id || '') === String(chat.id)
+            ? { auto_enabled: false, source_chat_id:'', source_username:'' } : {})
+        }
+      }, { upsert: true });
+      ctx.session.mode = null;
+      return ctx.reply('✅ Joylash kanali ulandi: ' + (chat.username ? '@'+chat.username : chat.title) +
+        '\n🤖 Bot post joylash huquqiga ega.\n\nEndi “📥 Forward → kanal” orqali post yuboring.', relayMenu());
+    } catch (err) {
+      return ctx.reply('❌ Kanal tekshirilmadi. Botni kanalga admin qiling va ID/username to‘g‘riligini tekshiring. ' +
+        String(err.description || err.message).slice(0,150));
+    }
+  }
+
+  async function storeRelaySource(ctx, input) {
+    const ref = telegramChatRef(input);
+    if (!ref) return ctx.reply('❌ Public manba @kanal_username yoki kanalning -100... ID sini kiriting.');
+    const cfg = await relaySettings();
+    if (!cfg?.target_chat_id) return ctx.reply('❌ Avval joylash kanalini ulang.', relayMenu());
+    try {
+      const chat = await ctx.telegram.getChat(ref);
+      if (chat.type !== 'channel') return ctx.reply('❌ Manba kanal bo‘lishi kerak.');
+      if (String(chat.id) === cfg.target_chat_id) return ctx.reply('❌ Manba va joylash kanali bir xil bo‘la olmaydi.');
+      const me = ctx.botInfo || await ctx.telegram.getMe();
+      const ownMember = await ctx.telegram.getChatMember(chat.id, me.id);
+      if (!['administrator', 'creator'].includes(ownMember.status)) {
+        return ctx.reply('❌ @' + me.username + ' manba kanalda ADMIN emas.\n' +
+          'Bot API begona public kanallarni adminsiz kuzata olmaydi.\n' +
+          'Bunday postlarni “📥 Forward → kanal” orqali qo‘lda yuboring.');
+      }
+      await ChannelRelayConfig.updateOne({bot_key:config.key},{
+        $set:{source_chat_id:String(chat.id),source_username:telegramHandle(chat.username),
+          auto_enabled:true,updated_by:ctx.from.id}
+      },{upsert:true});
+      ctx.session.mode = null;
+      return ctx.reply('✅ Manba kuzatuvi yoqildi: ' + (chat.username ? '@'+chat.username : chat.title) +
+        '\n\n🆕 Endi shu kanalda paydo bo‘lgan yangi postlar kanalingizga moslashtirib joylanadi.\n' +
+        '📝 Faqat qayta tarqatishga ruxsat berilgan postlarni ishlating.', relayMenu());
+    } catch (err) {
+      return ctx.reply('❌ Manba kanal tekshirilmadi. Bot u yerda admin emas yoki ID noto‘g‘ri.\n' +
+        String(err.description || err.message).slice(0,150));
+    }
+  }
+
+  async function relayPublish({telegram, message, fromChatId, fromMessageId, settings, explicitManual = false}) {
+    if (!settings?.target_chat_id) return { ok:false, reason:'target_missing' };
+    const kind = messageKind(message);
+    if (!kind) return { ok:false, reason:'unsupported' };
+    if (message.has_protected_content) return { ok:false, reason:'protected' };
+    const origin = originalSource(message);
+    const sourceKey = origin.chatId && origin.messageId
+      ? 'channel:' + origin.chatId + ':' + origin.messageId
+      : 'message:' + String(fromChatId) + ':' + String(fromMessageId);
+    // Unique upsert prevents both automated and manually forwarded duplicates.
+    try {
+      await ChannelRelayLog.create({bot_key:config.key,source_key:sourceKey,
+        target_chat_id:settings.target_chat_id,status:'pending'});
+    } catch(err) {
+      if (err.code === 11000) return {ok:false,reason:'duplicate'};
+      throw err;
+    }
+    try {
+      const foundCode = candidateCode(message);
+      const localContent = foundCode
+        ? await Content.findOne({bot_key:config.key,code_norm:normalizeCode(foundCode),is_active:true})
+          .select('title code code_norm').lean()
+        : null;
+      const copy = buildChannelCaption({
+        message, destination:{ id:settings.target_chat_id,username:settings.target_username,
+          title:settings.target_title },
+        botUsername:botUsername({botInfo:await telegram.getMe()}),
+        otherBots:settings.linked_bots || [],
+        localContent
+      });
+      // Preserve media server-side; nothing is downloaded or re-uploaded.
+      // Protected content fails via Telegram copyMessage. No workaround.
+      const result = kind === 'text'
+        ? await telegram.sendMessage(settings.target_chat_id, copy, { disable_web_page_preview:true })
+        : await telegram.copyMessage(settings.target_chat_id, fromChatId, fromMessageId,
+          {caption:copy});
+      await ChannelRelayLog.updateOne({bot_key:config.key,source_key:sourceKey},{
+        $set:{status:'sent',target_message_id:result?.message_id||null,error:''}
+      });
+      return {ok:true,localCode:localContent?.code||'',targetMessageId:result?.message_id||null};
+    } catch(err) {
+      // Keep failed event recorded: ambiguous network failures must not produce
+      // duplicate channel posts through automatic retries.
+      await ChannelRelayLog.updateOne({bot_key:config.key,source_key:sourceKey},
+        {$set:{status:'failed',error:String(err.description||err.message).slice(0,200)}});
+      console.warn('Channel relay publish failed', {bot:config.key,error:String(err.description||err.message).slice(0,180)});
+      return {ok:false,reason:'telegram_error'};
+    }
+  }
+
+  async function relayForwardMessage(ctx) {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private' ||
+        ctx.session?.mode !== 'relay_forward') return;
+    const settings = await relaySettings();
+    if (!settings?.target_chat_id) return ctx.reply('❌ Avval postlash kanalini sozlang.', relayMenu());
+    const result = await relayPublish({telegram:ctx.telegram,message:ctx.message,
+      fromChatId:ctx.chat.id,fromMessageId:ctx.message.message_id,settings,explicitManual:true});
+    const stats = ctx.session.relayStats || (ctx.session.relayStats = {sent:0,skipped:0});
+    if (result.ok) {
+      stats.sent++;
+      if (stats.sent === 1 || stats.sent % 10 === 0)
+        return ctx.reply('✅ Kanalga joylandi. Jami: ' + stats.sent +
+          '\n➡️ Keyingi postlarni ham forward qilavering.', relayMenu());
+      return;
+    }
+    stats.skipped++;
+    const reason = {duplicate:'takroriy post',protected:'himoyalangan postni nusxalash taqiqlangan',
+      unsupported:'bu xabar turi qo‘llanmaydi',telegram_error:'Telegram postni yubormadi; admin huquqi va logni tekshiring.'}[result.reason] || 'Kanal sozlanmagan';
+    return ctx.reply('⚠️ Post joylanmadi: ' + reason, relayMenu());
+  }
+
+  bot.hears('📣 Kanal postlari', async ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    resetSession(ctx);
+    return reportRelay(ctx);
+  });
+  bot.command('postlar', async ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    resetSession(ctx);
+    return reportRelay(ctx);
+  });
+  bot.hears('📋 Postlash holati', async ctx => {
+    if (!isAdmin(ctx.from?.id)) return;
+    return reportRelay(ctx);
+  });
+  bot.hears('📢 Joylash kanalini ulash', ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    resetSession(ctx);ctx.session.mode='relay_target';
+    return ctx.reply('📢 Post joylash kanalingizni yuboring:\n@kanal_username yoki -100... kanal ID.\n\n' +
+      '🤖 Aynan shu bot kanalga ADMIN, “Post Messages” huquqiga ega bo‘lishi kerak.', relayMenu());
+  });
+  bot.hears('🤖 Ulangan botlar', ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    resetSession(ctx);ctx.session.mode='relay_bots';
+    return ctx.reply('🤖 Reklama postlarida chiqadigan O‘ZINGIZGA tegishli bot username’larini yuboring.\n' +
+      'Misol: @y808bot, @multikbot, @serial_bot\n5 tagacha; “-” — ro‘yxatni tozalash.', relayMenu());
+  });
+  bot.hears('📡 Manba kanalni kuzatish', ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    resetSession(ctx);ctx.session.mode='relay_source';
+    return ctx.reply('📡 Avtomatik kuzatiladigan manba kanal ID yoki @username’ini yuboring.\n' +
+      '⚠️ Bot manba kanalda ham admin bo‘lishi kerak. Begona public kanalni adminsiz Bot API kuzata olmaydi.', relayMenu());
+  });
+  bot.hears('⛔ Avto kuzatuvni o‘chirish', async ctx => {
+    if (!isAdmin(ctx.from?.id)) return;
+    await ChannelRelayConfig.updateOne({bot_key:config.key},
+      {$set:{auto_enabled:false,source_chat_id:'',source_username:''}});
+    return ctx.reply('⛔ Avtomatik kuzatuv o‘chirildi. Qo‘lda forward davom etadi.', relayMenu());
+  });
+  bot.hears('📥 Forward → kanal', async ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    const cfg = await relaySettings();
+    if (!cfg?.target_chat_id) return ctx.reply('❌ Avval “📢 Joylash kanalini ulash” tugmasini bosing.', relayMenu());
+    resetSession(ctx);
+    ctx.session.mode='relay_forward';
+    ctx.session.relayStats={sent:0,skipped:0};
+    return ctx.reply('📥 OMMAVIY KANAL POSTLARI\n\n' +
+      'Telegram kanalidan postlarni shu botga forward qiling. Matn/reklama o‘z kanalingiz va botga moslanadi.\n' +
+      'Bitta yoki bir nechta post yuborishingiz mumkin.\n' +
+      '✅ Tugagach “Postlashni yakunlash”ni bosing.\n\n' +
+      '⚠️ Faqat ruxsat bilan qayta tarqatishingiz mumkin bo‘lgan materiallardan foydalaning.',relayMenu());
+  });
+  bot.hears('✅ Postlashni yakunlash', ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.session?.mode !== 'relay_forward') return;
+    const stats=ctx.session.relayStats||{sent:0,skipped:0};
+    resetSession(ctx);
+    return ctx.reply('✅ OMMAVIY POSTLASH TUGADI\n\n📣 Joylandi: '+stats.sent+
+      '\n⚠️ O‘tkazildi: '+stats.skipped,adminKeyboard());
+  });
+
+  bot.on('channel_post', async ctx => {
+    const msg=ctx.update.channel_post;
+    try {
+      const cfg=await relaySettings();
+      if(!cfg?.auto_enabled || !cfg.source_chat_id || !cfg.target_chat_id) return;
+      if(String(msg.chat?.id)!==String(cfg.source_chat_id)) return;
+      if(String(msg.chat.id)===String(cfg.target_chat_id)) return;
+      const result=await relayPublish({telegram:ctx.telegram,message:msg,
+        fromChatId:msg.chat.id,fromMessageId:msg.message_id,settings:cfg});
+      if(!result.ok && result.reason!=='duplicate') console.warn('Channel relay auto skip',config.key,result.reason);
+    } catch(err) {
+      console.error('Channel relay auto error:',config.key,String(err.message).slice(0,160));
+    }
+  });
+
   function contentDeepLink(ctx, content) {
     const username = botUsername(ctx);
     return username && content?.code_norm ? `https://t.me/${username}?start=c_${content.code_norm}` : '';
