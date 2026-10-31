@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check bots/giftgo/server.js && node --check bots/course/server.js && node --check bots/social/server.js && node --check bots/factory/server.js && node --check bots/factory/shorts-studio.js && node --check bots/factory/shorts-overlay.js && node --check bots/factory/shorts-upload.js && node --check bots/factory/channel-publisher.js"
+    "check": "node --check server.js && node --check bots/giftgo/server.js && node --check bots/course/server.js && node --check bots/social/server.js && node --check bots/factory/server.js && node --check bots/factory/shorts-studio.js && node --check bots/factory/shorts-overlay.js && node --check bots/factory/shorts-upload.js && node --check bots/factory/channel-publisher.js && node --check bots/factory/public-channel-watcher.js"
   },
   "engines": {
     "node": ">=18"
@@ -25,6 +25,7 @@
     "path": "^0.12.7",
     "telegraf": "^4.16.3",
     "ffmpeg-static": "5.3.0",
-    "sharp": "^0.34.4"
+    "sharp": "^0.34.4",
+    "teleproto": "1.232.0"
   }
 }
