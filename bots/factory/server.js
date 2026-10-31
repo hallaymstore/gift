@@ -2082,9 +2082,38 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   bot.hears('⛔ Avto kuzatuvni o‘chirish', async ctx => {
     if (!isAdmin(ctx.from?.id)) return;
     await ChannelRelayConfig.updateOne({bot_key:config.key},
-      {$set:{auto_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
+      {$set:{auto_enabled:false,history_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
     return ctx.reply('⛔ Avtomatik kuzatuv o‘chirildi. Qo‘lda forward davom etadi.', relayMenu());
   });
+  bot.hears('📚 Eski postlarni sinxronlash', async ctx => {
+    if(!isAdmin(ctx.from?.id) || ctx.chat?.type!=='private') return;
+    const cfg=await relaySettings();
+    if(!cfg?.target_chat_id || !cfg?.source_username)
+      return ctx.reply('❌ Avval joylash va manba kanallarini ulang.',relayMenu());
+    if(cfg.source_mode!=='mtproto')
+      return ctx.reply('⚠️ Tarixiy postlarni olish uchun user sessiyali public kanal rejimi kerak.',relayMenu());
+    if(!sessionConfigured())
+      return ctx.reply('❌ Telegram akkaunt sessiyasi serverda sozlanmagan.',relayMenu());
+    await ChannelRelayConfig.updateOne({bot_key:config.key},{
+      $set:{history_enabled:true,history_completed:false,history_cursor:0,
+        history_ceiling:0,history_sent:0,history_skipped:0,history_last_error:'',
+        auto_enabled:true}
+    });
+    // Trigger next history scan immediately instead of waiting a full minute.
+    if(publicSourceWatcher?.scanHistory)void publicSourceWatcher.scanHistory();
+    return ctx.reply('✅ @'+cfg.source_username+' kanalining eski postlari sinxronlash navbatiga qo‘shildi.\n'+
+      '⏳ Dastlabki yuborishdan keyin “📋 Postlash holati” orqali jarayonni kuzating.\n'+
+      '📌 Eski xabarlar tarixiy tartibda, server yuklanmasligi uchun bosqichma-bosqich yuboriladi.\n'+
+      '⚡ Yangi postlar esa alohida 12 soniyalik tekshiruvda qoladi.',relayMenu());
+  });
+  bot.hears('⏸ Tarixni to‘xtatish', async ctx => {
+    if(!isAdmin(ctx.from?.id) || ctx.chat?.type!=='private') return;
+    await ChannelRelayConfig.updateOne({bot_key:config.key},
+      {$set:{history_enabled:false}});
+    return ctx.reply('⏸ Eski postlarni sinxronlash to‘xtatildi.\n'+
+      '⚡ Yangi postlarni kuzatish yoqilgan bo‘lsa davom etadi.',relayMenu());
+  });
+
   bot.hears('📥 Forward → kanal', async ctx => {
     if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
     const cfg = await relaySettings();
