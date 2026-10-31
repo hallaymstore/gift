@@ -93,6 +93,10 @@ async function scanHistory({client,cfg,deliver,log=console}){
   const handle=normalizePublicUsername(cfg.source_username);
   if(!handle || Number(cfg.source_cursor||0)<=0)return; // live baseline first
   const ceiling=Number(cfg.history_ceiling||cfg.source_cursor);
+  if(!Number(cfg.history_ceiling)){
+    await deliver({type:'history_begin',cfg,ceiling});
+    cfg.history_ceiling=ceiling;
+  }
   const before=Number(cfg.history_cursor||0);
   const batch=orderedIds(await client.getMessages('@'+handle,{
     limit:HISTORY_BATCH_SIZE,reverse:true,minId:before
