@@ -383,6 +383,7 @@ const relayConfigSchema = new mongoose.Schema({
   history_sent: {type:Number,default:0},
   history_skipped: {type:Number,default:0},
   history_last_error: String,
+  source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   auto_enabled: { type: Boolean, default: false },
   linked_bots: { type: [String], default: [] },
   updated_by: Number
