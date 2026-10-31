@@ -23,6 +23,11 @@ const typePresets = {
   music: { engine: 'content', key: 'music', title: 'MusicBot', item: 'musiqa', itemTitle: 'Musiqa', itemPlural: 'musiqalar', itemPluralTitle: 'Musiqalar', mainEmoji: '🎵', addEmoji: '➕', listEmoji: '🎧', codeExamples: 'hit2026, remix, music7', welcomeLine: 'Musiqa nomi yoki kodini yuboring.', description: 'Nom/kod bo‘yicha qidiruv, qismli va qismsiz postlar, ▶️ keyingi qism tugmasi, 🔥 Top / 🆕 Yangilari / 🎲 Tasodifiy, ⭐ Saqlanganlar, ↗️ ulashish havolasi (deep link), inline qidiruv, 🔒 forwarddan himoya, ketma-ket qism yuklash, majburiy obuna, broadcast va statistika.' },
 
   vip_obuna: { engine: 'vip', key: 'vip_obuna', title: 'VIP Obuna Bot', itemTitle: 'VIP obuna', mainEmoji: '💎', description: 'Bir nechta tarif (7/30/90 kun), to‘lov chekini bot orqali yuborish, admin tasdiqlagach 1 martalik maxfiy invite link, “Mening obunam”, tugashidan 3 va 1 kun oldin eslatma, uzaytirishda qolgan kunlar saqlanadi, muddat tugasa avtomatik chiqarish, qo‘lda VIP berish/olish.' },
+  group_announcements: {
+    engine: 'group_announcements', key: 'group_announcements',
+    title: 'Guruh E’lon Bot', itemTitle: 'Guruh e’lonlari', mainEmoji: '📣',
+    description: 'Guruh administratori /allowannounce bilan ruxsat bergan guruhlarga e’lon yuboradi. Post saqlash, 30 daqiqadan boshlangan interval, 1–100 jami urinish chegarasi, pauza, ko‘rish, statistika, guruh bo‘yicha 24 soatlik tanaffus. Begona guruhlarga ruxsatsiz reklama yubormaydi; Telegram akkaunt sessiyasi talab qilinmaydi.'
+  },
   mini_games: {
     engine: 'mini_games', key: 'mini_games', title: 'Mini Games Bot',
     itemTitle: 'Bepul o‘yinlar', mainEmoji: '🎮',
