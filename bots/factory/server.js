@@ -267,6 +267,15 @@ const AnnouncementLog=mongoose.model('MultiBotAnnouncementLog',announcementLogSc
 
 const Content = mongoose.model('MultiBotContent', contentSchema);
 const ContentPart = mongoose.model('MultiBotContentPart', partSchema);
+const musicAudioFileSchema=new mongoose.Schema({
+  bot_key:{type:String,required:true,index:true},
+  track_id:{type:String,required:true},
+  file_id:{type:String,required:true},
+  title:String,artist:String
+},{timestamps:true,collection:'multibot_music_audio_fileids'});
+musicAudioFileSchema.index({bot_key:1,track_id:1},{unique:true});
+const MusicAudioFile=mongoose.model('MultiBotMusicAudioFile',musicAudioFileSchema);
+
 
 const managedBotSchema = new mongoose.Schema(
   {
@@ -3058,40 +3067,62 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         ]}
       });
     });
+    const musicSending=new Set();
     bot.action(/^music:mp3:(\d{1,2})$/,async ctx=>{
-      await ctx.answerCbQuery();
       const data=ctx.session?.musicExternal;
-      if(!data||Date.now()-data.at>15*60000)
-        return ctx.reply('⏳ Qidiruv eskirgan. Qo‘shiq nomini qayta yozing.');
+      if(!data||Date.now()-data.at>15*60000){
+        await ctx.answerCbQuery('Qidiruv eskirgan');
+        return ctx.reply('⏳ Qidiruv eskirdi. Qo‘shiq nomini qayta yozing.');
+      }
       const index=Number(ctx.match[1]);
       const track=data.items[index];
-      if(!track)return ctx.reply('❌ Qo‘shiq topilmadi.');
-      // The source track must be explicitly downloadable according to Jamendo.
-      // Do not pass remote redirects as sendAudio URLs: Telegram often rejects them.
-      const {downloadLicensedMp3}=require('./music-mp3-upload');
-      const {Input}=require('telegraf');
-      let temp=null;
+      if(!track){
+        await ctx.answerCbQuery('Qo‘shiq topilmadi');
+        return;
+      }
+      const sendingKey=String(ctx.from?.id||'')+':'+String(track.id);
+      if(musicSending.has(sendingKey)){
+        await ctx.answerCbQuery('🎵 MP3 yuborilmoqda...', {show_alert:false});
+        return;
+      }
+      musicSending.add(sendingKey);
+      await ctx.answerCbQuery('🎵 MP3 yuborilmoqda...', {show_alert:false}).catch(()=>{});
       try{
-        await ctx.reply('⏳ MP3 tayyorlanmoqda: '+track.artist+' — '+track.title);
-        temp=await downloadLicensedMp3(track);
-        await ctx.sendChatAction('upload_document').catch(()=>{});
-        await ctx.replyWithAudio(
-          Input.fromLocalFile(temp.filePath,'music.mp3'),
-          {
-            title:track.title,
-            performer:track.artist,
-            duration:Math.max(0,Math.round(track.durationMs/1000)),
-            caption:'🎵 '+track.artist+' — '+track.title+
-              (track.license?'\nLitsenziya: '+track.license:'')
+        const caption=('🎵 '+track.artist+' — '+track.title+
+          (track.license?'\nLitsenziya: '+track.license:'')).slice(0,1000);
+        const options={title:track.title,performer:track.artist,
+          duration:Math.max(0,Math.round(track.durationMs/1000)),caption};
+        // Telegram file_id is specific to the current bot. Cache it per bot,
+        // never reuse IDs between independent Factory client bots.
+        const cached=await MusicAudioFile.findOne({bot_key:config.key,track_id:String(track.id)}).lean();
+        if(cached?.file_id){
+          try{
+            await ctx.replyWithAudio(cached.file_id,options);
+            return;
+          }catch(e){
+            console.warn('[music] Cached Telegram file_id invalid',config.key,track.id,String(e.message||e).slice(0,130));
+            await MusicAudioFile.deleteOne({bot_key:config.key,track_id:String(track.id),file_id:cached.file_id}).catch(()=>{});
           }
-        );
+        }
+        const {Input}=require('telegraf');
+        const {getMusicMp3Buffer}=require('./music-fast-cache');
+        const buffer=await getMusicMp3Buffer(track);
+        await ctx.sendChatAction('upload_document').catch(()=>{});
+        const sent=await ctx.replyWithAudio(Input.fromBuffer(buffer,'music.mp3'),options);
+        if(sent?.audio?.file_id){
+          await MusicAudioFile.updateOne(
+            {bot_key:config.key,track_id:String(track.id)},
+            {$set:{file_id:sent.audio.file_id,title:track.title,artist:track.artist}},
+            {upsert:true}
+          ).catch(e=>console.warn('[music] file ID cache save:',String(e.message||e).slice(0,130)));
+        }
       }catch(e){
-        const message=String(e.description||e.message||e).slice(0,190);
-        console.warn('Music MP3 download/upload failed:',message);
-        return ctx.reply('❌ MP3 yuborishda xatolik: '+message+
-          '\nBoshqa qo‘shiqni tanlang yoki qayta urinib ko‘ring.');
+        const detail=String(e.description||e.message||e).slice(0,180);
+        console.warn('[music] MP3 send error',config.key,String(track.id),detail);
+        await ctx.reply('❌ MP3 hozir yuborilmadi: '+detail+
+          '\nBoshqa variantni tanlang yoki qayta urinib ko‘ring.').catch(()=>{});
       }finally{
-        if(temp)await temp.cleanup().catch(error=>console.warn('MP3 cleanup:',error.message));
+        musicSending.delete(sendingKey);
       }
     });
     bot.action('music:external:help',async ctx=>{
@@ -3336,6 +3367,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
               [{text:'🔎 Boshqa qo‘shiq qidirish',callback_data:'music:external:help'}]
             ]}
           });
+          const {prefetchMusicTracks}=require('./music-fast-cache');
+          prefetchMusicTracks(result);
           return;
         }
         return ctx.reply(
