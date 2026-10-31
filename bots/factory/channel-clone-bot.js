@@ -153,7 +153,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     '\n📥 Qolgan (taxminiy): '+Math.max(0,n.total-sent)+
     '\n\nℹ️ Linkli postlar boshqa turlar bilan kesishishi mumkin.';
   async function recount(ctx,cfg){
-    if(counting){await ctx.reply('🔄 Postlar hozir sanalmoqda.',menu());return null;}
+    const selectedKey=routeKey(ctx);
+    if(counting){await ctx.reply('🔄 Boshqa yo‘nalishning postlari hozir sanalmoqda.',menu());return null;}
     if(!sessionReady()){await ctx.reply('❌ Telegram sessiyasi sozlanmagan.',menu());return null;}
     counting=true;
     let client;
@@ -165,11 +166,12 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
       await client.connect();
       const result=await countSourcePosts(client,cfg.source_username);
-      const current=await load(ctx);
-      if(current?.source_username!==cfg.source_username)throw new Error('Manba kanal o‘zgardi. Qayta urinib ko‘ring.');
-      await Config.updateOne({bot_key:routeKey(ctx),source_username:cfg.source_username},
+      const current=await Config.findOne({bot_key:selectedKey}).lean();
+      if(current?.source_username!==cfg.source_username||current?.target_chat_id!==cfg.target_chat_id)
+        throw new Error('Manba yoki maqsad kanal o‘zgardi. Qayta urinib ko‘ring.');
+      await Config.updateOne({bot_key:selectedKey,source_username:cfg.source_username,target_chat_id:cfg.target_chat_id},
         {$set:{source_stats:result}});
-      const sent=await Log.countDocuments({bot_key:routeKey(ctx),status:'sent',target_chat_id:cfg.target_chat_id,
+      const sent=await Log.countDocuments({bot_key:selectedKey,status:'sent',target_chat_id:cfg.target_chat_id,
         source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}});
       await ctx.reply(formatCounts(result,sent),menu());
       return result;
@@ -182,7 +184,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;
     const cfg=await load(ctx);
     if(!cfg?.source_username)return ctx.reply('❌ Avval manba kanalni ulang.',menu());
-    await recount(ctx,cfg);
+    void recount(ctx,cfg).catch(e=>console.warn('[clone] background source count:',String(e.message||e).slice(0,120)));
   });
   bot.hears('⏱ Postlash intervali',async ctx=>{
     if(!permitted(ctx))return;
@@ -298,10 +300,27 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!c?.target_chat_id||!c?.source_username)return ctx.reply('Avval ikkala kanalni ulang.',menu());
     if(!sessionReady())return ctx.reply('Telegram sessiyasi mavjud emas.',menu());
     if(c.history_enabled&&!c.history_completed&&c.auto_enabled)return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
-    const stats=await recount(ctx,c);
-    if(!stats)return;
-    await Config.updateOne({bot_key:routeKey(ctx),source_username:c.source_username},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:'',history_retry_at:null,history_error_count:0}});
-    return ctx.reply('✅ Kuzatuv yoqildi. Eski postlar ham sinxronlanadi. Oldin yuborilganlar takrorlanmaydi.',menu());
+    if(counting)return ctx.reply('🔄 Postlar sanalayotgan paytda boshqa yo‘nalishni boshlash mumkin emas. Birozdan so‘ng qayta bosing.',menu());
+    const selectedKey=routeKey(ctx);
+    const chatId=ctx.chat.id;
+    // A full channel history count may take minutes; never keep a Telegram
+    // webhook open while counting. Launch only when the scan has succeeded.
+    void (async()=>{
+      const stats=await recount(ctx,c);
+      if(!stats)return;
+      const saved=await Config.updateOne({
+        bot_key:selectedKey,source_username:c.source_username,target_chat_id:c.target_chat_id
+      },{$set:{auto_enabled:true,history_enabled:true,history_completed:false,
+        history_last_error:'',history_retry_at:null,history_error_count:0}});
+      if(!saved.matchedCount)return ctx.telegram.sendMessage(chatId,'⚠️ Kanal sozlamasi o‘zgargan, sinxronlash boshlanmadi.');
+      await ctx.telegram.sendMessage(chatId,
+        '✅ '+(c.route_title||'Tanlangan yo‘nalish')+' ishga tushirildi!\n📥 @'+c.source_username+
+        '\n📤 @'+(c.target_username||'kanal')+'\n📚 '+stats.total+' ta tarixiy post tekshirildi. Dublikatlar yuborilmaydi.');
+    })().catch(e=>{
+      console.warn('[clone] start background:',String(e.message||e).slice(0,170));
+      void ctx.telegram.sendMessage(chatId,'❌ Sinxronlash boshlanmadi: '+String(e.message||e).slice(0,150)).catch(()=>{});
+    });
+    return;
   });
   bot.hears('⏸ To‘xtatish',async ctx=>{if(!permitted(ctx))return;await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:false,history_enabled:false}});return ctx.reply('⏸ Sinxronlash to‘xtatildi.',menu());});
   bot.hears('🔄 Eski postlarni qayta tekshirish',async ctx=>{
