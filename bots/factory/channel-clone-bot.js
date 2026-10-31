@@ -169,7 +169,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       if(current?.source_username!==cfg.source_username)throw new Error('Manba kanal o‘zgardi. Qayta urinib ko‘ring.');
       await Config.updateOne({bot_key:routeKey(ctx),source_username:cfg.source_username},
         {$set:{source_stats:result}});
-      const sent=await Log.countDocuments({bot_key:routeKey(ctx),status:'sent',
+      const sent=await Log.countDocuments({bot_key:routeKey(ctx),status:'sent',target_chat_id:cfg.target_chat_id,
         source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}});
       await ctx.reply(formatCounts(result,sent),menu());
       return result;
@@ -251,7 +251,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       let client;
       try{
         // A small batch avoids multi-minute Telegram MTProto FloodWait.
-        const logs=await Log.find({bot_key:route,status:'sent',target_message_id:{$gt:0}})
+        const logs=await Log.find({bot_key:route,target_chat_id:cfg.target_chat_id,status:'sent',target_message_id:{$gt:0}})
           .sort({createdAt:-1}).limit(60).select('target_message_id').lean();
         if(!logs.length){
           await telegram.sendMessage(chatId,'📭 Hali yuborilgan postlar yo‘q.');
@@ -360,7 +360,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     return ctx.reply('✅ Post formati: '+ctx.match[1]+'. Bu sozlama faqat yangi nusxalanadigan postlarga qo‘llanadi.',menu());
   });
   bot.hears('📊 Holat',async ctx=>{
-    if(!permitted(ctx))return;const c=await load(ctx);const sent=await Log.countDocuments({bot_key:routeKey(ctx),status:'sent'});
+    if(!permitted(ctx))return;const c=await load(ctx);const sent=await Log.countDocuments({bot_key:routeKey(ctx),target_chat_id:c?.target_chat_id,status:'sent'});
     return ctx.reply('📊 CHANNEL CLONE\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
       '\nKanal: '+(c?.target_username?'@'+c.target_username:'yo‘q')+
       '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+'\nYuborilgan: '+sent+
@@ -387,7 +387,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
         let after=null;
         while(true){
-          const query={bot_key:routeKey(ctx),status:'sent',target_message_id:{$gt:0}};
+          const query={bot_key:routeKey(ctx),target_chat_id:cfg.target_chat_id,status:'sent',target_message_id:{$gt:0}};
           if(after)query._id={$gt:after};
           const items=await Log.find(query).sort({_id:1}).limit(50).lean();
           if(!items.length)break;
@@ -484,14 +484,24 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         if(chat.type!=='channel'||!['creator','administrator'].includes(rights.status)||
            (rights.status==='administrator'&&!rights.can_post_messages))
           return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
-        await Config.updateOne({bot_key:routeKey(ctx)},{$set:{target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle}},{upsert:true});
+        const existingTarget=await load(ctx);
+        const changedTarget=Boolean(existingTarget?.target_chat_id&&String(existingTarget.target_chat_id)!==String(chat.id));
+        const newTargetData={target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle};
+        if(changedTarget)Object.assign(newTargetData,{
+          source_cursor:0,history_cursor:0,history_ceiling:0,
+          history_completed:false,history_enabled:false,auto_enabled:false,
+          history_sent:0,history_skipped:0,history_last_error:'',
+          history_retry_at:null,history_error_count:0,top_metrics_cache:null,
+          next_publish_at:null
+        });
+        await Config.updateOne({bot_key:routeKey(ctx)},{$set:newTargetData},{upsert:true});
         if(ctx.session.wizard){
           ctx.session.wizard=false;
           return ctx.reply('✅ Yo‘nalish tayyor!\n📥 Manba: @'+(await load(ctx))?.source_username+
             '\n📤 Kanal: @'+handle+
             '\n\n3/3 🤖 Reklama botini ulash (ixtiyoriy), ⏱ Postlash intervali ni tanlang va ▶️ Sinxronlash tugmasini bosing.\n\nBoshqa kanal juftligini yaratish uchun ➕ Yangi yo‘nalish ni bosing.',menu());
         }
-        return ctx.reply('✅ Joylash kanali: @'+handle,menu());
+        return ctx.reply('✅ Joylash kanali: @'+handle+(changedTarget?'\n🔄 Yangi kanal uchun tarixiy navbat qayta boshlanadi. Oldingi kanal postlari o‘zgarmaydi.':'')+'\n▶️ Sinxronlash ni bosing.',menu());
       }catch(e){return ctx.reply('❌ Kanal tekshiruvi: '+String(e.message||e).slice(0,140),menu());}
     }
     if(step==='source'){
