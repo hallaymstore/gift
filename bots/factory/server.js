@@ -380,6 +380,8 @@ const relayConfigSchema = new mongoose.Schema({
   bot_key: { type: String, required: true, unique: true, index: true },
   owner_bot_key: {type:String,index:true},
   route_title: String,
+  active_route_by_user: {type:mongoose.Schema.Types.Mixed,default:{}},
+  clone_format: {type:String,enum:['original','branded'],default:'branded'},
   target_chat_id: String,
   target_username: String,
   target_title: String,
