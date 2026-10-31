@@ -27,6 +27,10 @@ function mediaKind(message) {
   const doc = media?.document;
   if (doc) {
     const mime = String(doc.mimeType || '');
+    const attrs=doc.attributes||[];
+    if(attrs.some(a=>a.className==='DocumentAttributeSticker'))return 'sticker';
+    if(attrs.some(a=>a.className==='DocumentAttributeAnimated'))return 'animation';
+    if(mime.startsWith('audio/'))return 'audio';
     return mime.startsWith('video/') ? 'video' : 'document';
   }
   return 'unsupported';
