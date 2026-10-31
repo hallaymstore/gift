@@ -394,6 +394,9 @@ const relayConfigSchema = new mongoose.Schema({
   history_sent: {type:Number,default:0},
   history_skipped: {type:Number,default:0},
   history_last_error: String,
+  history_retry_at: Date,
+  history_error_count: {type:Number,default:0},
+  top_metrics_cache: {type:mongoose.Schema.Types.Mixed,default:null},
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   promo_bot_username: {type:String,default:''},
   publish_interval_minutes: {type:Number,default:0},
@@ -10780,7 +10783,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     return;
   }
   if(type==='cursor'){
-    await ChannelRelayConfig.updateOne(selector,{$set:{source_cursor:Number(cursor)}});
+    await ChannelRelayConfig.updateOne(selector,{$set:{source_cursor:Number(cursor),history_retry_at:null,history_error_count:0}});
     return;
   }
   if(type==='history_begin'){
@@ -10791,7 +10794,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
   if(type==='history_cursor'){
     const status=String(result?.status||'skipped');
     await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
-      {$set:{history_cursor:Number(cursor),history_last_error:''},
+      {$set:{history_cursor:Number(cursor),history_last_error:'',history_retry_at:null,history_error_count:0},
        $inc:status==='sent'?{history_sent:1}:{history_skipped:1}});
     if(status==='sent' && Number(cfg.publish_interval_minutes)>0) await ChannelRelayConfig.updateOne(selector,{$set:{next_publish_at:new Date(Date.now()+Number(cfg.publish_interval_minutes)*60000)}});
     return;
@@ -10801,9 +10804,25 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{history_completed:true,history_last_error:''}});
     return;
   }
-  if(type==='history_error'){
-    await ChannelRelayConfig.updateOne(selector,
-      {$set:{history_last_error:String(error||'Nomaʼlum xato').slice(0,160)}});
+  if(type==='history_error'||type==='live_error'){
+    const reason=String(error||'Nomaʼlum xato').slice(0,200);
+    const denied=/You can't write in this chat|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL/i.test(reason);
+    if(denied){
+      // A permanent permissions error must NOT trigger another MTProto request
+      // every 12/20 seconds. Explicit re-enabling is required after fixing rights.
+      await ChannelRelayConfig.updateOne(selector,{$set:{
+        auto_enabled:false,history_enabled:false,history_last_error:reason,
+        history_retry_at:null
+      },$inc:{history_error_count:1}});
+      console.warn('[channel sync] route paused due to permissions',cfg.bot_key,reason.slice(0,110));
+    }else{
+      const errors=Number(cfg.history_error_count||0);
+      const delayMs=Math.min(60*60*1000,60*1000*Math.pow(2,Math.min(6,errors)));
+      await ChannelRelayConfig.updateOne(selector,{$set:{
+        history_last_error:reason,history_retry_at:new Date(Date.now()+delayMs)
+      },$inc:{history_error_count:1}});
+      console.warn('[channel sync] retry scheduled',cfg.bot_key,delayMs,reason.slice(0,100));
+    }
     return;
   }
   if(phase==='history'){
