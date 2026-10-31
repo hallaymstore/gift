@@ -10715,12 +10715,12 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
           const own='@'+String(username).replace(/^@/,'');
           const dest='@'+String(cfg.target_username||'').replace(/^@/,'');
           const cleaned=original
-            .replace(/https?:\\/\\/t\\.me\\/[A-Za-z][A-Za-z0-9_]{4,31}(?:\\?[^\\s]*)?/gi,'')
+            .replace(/https?:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}(?:\?[^\s]*)?/gi,'')
             .replace(/@[A-Za-z][A-Za-z0-9_]{4,31}/g,'')
-            .replace(/(?:📌\\s*)?Manba\\s*:[^\\n]*/giu,'')
-            .replace(/\\n{3,}/g,'\\n\\n').trim();
+            .replace(/(?:📌\s*)?Manba\s*:[^\n]*/giu,'')
+            .replace(/\n{3,}/g,'\n\n').trim();
           return [cleaned,'🤖 Bot: '+own,cfg.target_username?'📢 Kanal: '+dest:'']
-            .filter(Boolean).join('\\n\\n').slice(0,1024);
+            .filter(Boolean).join('\n\n').slice(0,1024);
         })()
       : buildChannelCaption({
           message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
