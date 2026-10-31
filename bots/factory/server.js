@@ -10635,20 +10635,12 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
         {disable_web_page_preview:true});
     } else {
-      const downloaded = await client.downloadMedia(message,{workers:1});
-      if (!Buffer.isBuffer(downloaded) ||
-          downloaded.byteLength === 0 ||
-          downloaded.byteLength > 18*1024*1024) {
-        throw new Error('Media juda katta yoki olinmadi (18 MB limit)');
-      }
-      const filename = kind === 'video'?'post.mp4':kind === 'photo'?'post.jpg':'post.bin';
-      const file = {source:downloaded,filename};
-      if (kind === 'video') sent = await botTelegram.sendVideo(cfg.target_chat_id,file,
-        {caption:branded,supports_streaming:true});
-      else if (kind === 'photo') sent = await botTelegram.sendPhoto(cfg.target_chat_id,file,
-        {caption:branded});
-      else sent = await botTelegram.sendDocument(cfg.target_chat_id,file,
-        {caption:branded});
+      // Telegram server-side copy: no file download, size cap or local storage.
+      // copyMessage supports replacing media captions while keeping original media.
+      sent = await botTelegram.copyMessage(
+        cfg.target_chat_id, '@' + sourceUsername, Number(message.id),
+        {caption:branded}
+      );
     }
     await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
