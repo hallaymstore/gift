@@ -29,6 +29,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         const chat=await ctx.telegram.getChat('@'+handle);
         const me=await ctx.telegram.getMe();
         const rights=await ctx.telegram.getChatMember(chat.id,me.id);
+        const ownerRights=await ctx.telegram.getChatMember(chat.id,ctx.from.id);
+        if(!['creator','administrator'].includes(ownerRights.status))
+          return ctx.reply('❌ Maqsad kanalga faqat uning administratori ulanishi mumkin.',menu());
         if(chat.type!=='channel'||!['creator','administrator'].includes(rights.status)||
            (rights.status==='administrator'&&!rights.can_post_messages))
           return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
@@ -50,6 +53,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;const c=await load();
     if(!c?.target_chat_id||!c?.source_username)return ctx.reply('Avval ikkala kanalni ulang.',menu());
     if(!sessionReady())return ctx.reply('Telegram sessiyasi mavjud emas.',menu());
+    if(c.history_enabled&&!c.history_completed&&c.auto_enabled)return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
     await Config.updateOne({bot_key:cloneKey},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_last_error:''}});
     return ctx.reply('✅ Kuzatuv yoqildi. Eski postlar ham sinxronlanadi. Oldin yuborilganlar takrorlanmaydi.',menu());
   });
