@@ -9310,6 +9310,7 @@ async function startManagedRecord(record, source = 'db') {
   else if (engine === 'group_tools') active = createGroupToolsBot(config, token, adminIds);
   else if (engine === 'chat_learning') active = createChatLearningBot(config, token, adminIds);
   else if (engine === 'video_downloader') active = createVideoDownloaderBot(config, token, adminIds);
+  else if (engine === 'channel_clone') active = createChannelCloneBot({token,adminIds,Config:ChannelRelayConfig,Log:ChannelRelayLog,sessionReady:()=>sessionConfigured(),config});
   else active = createContentBot(config, token, adminIds);
   if (!active) return null;
   await activateBot(active, source);
@@ -9328,7 +9329,7 @@ function typeRows(prefix = 'factory:type', requestingUserId = 0) {
     preset && preset.title && (typeKey !== 'mini_games' || canCreatePrivateGameBot(requestingUserId)));
   const rows = [];
   for (const [key, preset] of entries) {
-    const engineLabel = preset.engine === 'group_announcements' ? 'E’lon' : preset.engine === 'mini_games' ? 'O‘yin' : preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : 'Media';
+    const engineLabel = preset.engine === 'group_announcements' ? 'E’lon' : preset.engine === 'mini_games' ? 'O‘yin' : preset.engine === 'vip' ? 'VIP' : preset.engine === 'giveaway' ? 'Konkurs' : preset.engine === 'channel_form' ? 'Kanal' : preset.engine === 'group_tools' ? 'Guruh' : preset.engine === 'chat_learning' ? 'Suhbatchi' : preset.engine === 'video_downloader' ? 'Yuklovchi' : preset.engine === 'channel_clone' ? 'Klonlash' : 'Media';
     rows.push([Markup.button.callback(`${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title} • ${engineLabel}`, `${prefix}:${key}`)]);
   }
   return rows;
