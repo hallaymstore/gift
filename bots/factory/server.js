@@ -10729,7 +10729,8 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
           otherBots:cfg.linked_bots||[],localContent:local
         });
     let sent;
-    if (kind === 'text') {
+    const originalFormat=cfg.bot_key==='channel_clone' && cfg.clone_format==='original';
+    if (kind === 'text' && !originalFormat) {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
         {disable_web_page_preview:true});
     } else {
@@ -10738,7 +10739,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       try {
         sent = await botTelegram.copyMessage(
           cfg.target_chat_id, '@' + sourceUsername, Number(message.id),
-          {caption:branded}
+          originalFormat ? {} : {caption:branded}
         );
       } catch (botCopyError) {
         // The user-session account may post only where it has its own write rights.
@@ -10754,7 +10755,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
             '. Bot cannot copy source media and session cannot post to destination. Check access/rights.');
         }
         try {
-          await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
+          if (!originalFormat) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
         } catch (editError) {
           await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
           throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
