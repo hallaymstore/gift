@@ -2836,6 +2836,18 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (isAdmin(userId)) {
+      if (ctx.session.mode === 'relay_target') return storeRelayTarget(ctx, text);
+      if (ctx.session.mode === 'relay_source') return storeRelaySource(ctx, text);
+      if (ctx.session.mode === 'relay_bots') {
+        const selected = text === '-' ? [] : linkedBots(text, botUsername(ctx));
+        if (text !== '-' && !selected.length)
+          return ctx.reply('❌ Yaroqli bot username yo‘q. Misol: @y808bot, @multikbot yoki - yuboring.');
+        await ChannelRelayConfig.updateOne({bot_key:config.key},
+          {$set:{linked_bots:selected,updated_by:ctx.from.id}},{upsert:true});
+        ctx.session.mode = null;
+        return ctx.reply('✅ Qo‘shimcha botlar: ' + (selected.map(x=>'@'+x).join(', ')||'yo‘q'),relayMenu());
+      }
+      if (ctx.session.mode === 'relay_forward') return relayForwardMessage(ctx);
       if (ctx.session.mode === 'shorts_wait_code') {
         ctx.session.mode = 'shorts_processing';
         void renderAdminShorts(ctx, text).catch(err => {
@@ -3062,6 +3074,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     }
 
     if (ctx.session.mode === 'bulk_import') return handleBulkImport(ctx);
+    if (ctx.session.mode === 'relay_forward') return relayForwardMessage(ctx);
+    if (['relay_target','relay_source','relay_bots'].includes(ctx.session.mode))
+      return ctx.reply('📝 Kanalni sozlash uchun matn yuboring yoki /cancel bosing.',relayMenu());
 
     if (['shorts_wait_video', 'shorts_wait_code'].includes(ctx.session.mode)) return receiveShortsVideo(ctx);
     if (ctx.session.mode === 'shorts_processing') return ctx.reply('⏳ Video montaj qilinmoqda.');
