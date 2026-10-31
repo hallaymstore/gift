@@ -484,6 +484,15 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         if(chat.type!=='channel'||!['creator','administrator'].includes(rights.status)||
            (rights.status==='administrator'&&!rights.can_post_messages))
           return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
+        const sourceForRoute=(await load(ctx))?.source_username;
+        if(sourceForRoute){
+          const clash=await Config.findOne({
+            $and:[routesQuery(),{bot_key:{$ne:routeKey(ctx)}},
+              {source_username:sourceForRoute,target_chat_id:String(chat.id)}]
+          }).select('route_title').lean();
+          if(clash)return ctx.reply('⚠️ Shu manba va maqsad kanal juftligi boshqa yo‘nalishda mavjud: '+(clash.route_title||'Asosiy')+
+            '. Ikkita bir xil yo‘nalish kanalingizda takroriy postlar chiqarishi mumkin.',menu());
+        }
         const existingTarget=await load(ctx);
         const changedTarget=Boolean(existingTarget?.target_chat_id&&String(existingTarget.target_chat_id)!==String(chat.id));
         const newTargetData={target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle};
