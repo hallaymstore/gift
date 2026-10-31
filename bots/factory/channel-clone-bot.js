@@ -7,10 +7,25 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   const cloneKey=config.key||'channel_clone';
   if(!token || !/^\d+:[\w-]{20,}$/.test(token))return null;
   const bot=new Telegraf(token);
-  bot.use(session({defaultSession:()=>({step:null,activeRoute:cloneKey})}));
+  bot.use(session({defaultSession:()=>({step:null,activeRoute:cloneKey,routeLoaded:false,wizard:false})}));
   const permitted=ctx=>ctx.chat?.type==='private'&&adminIds.includes(Number(ctx.from?.id));
+  bot.use(async(ctx,next)=>{
+    if(!ctx.from||!ctx.session||ctx.session.routeLoaded)return next();
+    ctx.session.routeLoaded=true;
+    try{
+      const base=await Config.findOne({bot_key:cloneKey}).select('active_route_by_user').lean();
+      const remembered=base?.active_route_by_user?.[String(ctx.from.id)];
+      if(remembered&&remembered!==cloneKey){
+        const exists=await Config.exists({bot_key:remembered,owner_bot_key:cloneKey});
+        if(exists)ctx.session.activeRoute=remembered;
+      }
+    }catch(e){console.warn('[clone] restored route:',String(e.message||e).slice(0,120));}
+    return next();
+  });
+
   const menu=()=>Markup.keyboard([
     ['➕ Yangi yo‘nalish','🗂 Yo‘nalishlar'],
+    ['📊 Barcha yo‘nalishlar','⏸ Hammasini to‘xtatish'],
     ['📥 Manba kanal','📤 Bizning kanal'],
     ['🤖 Reklama botini ulash','🔗 Bot havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
@@ -22,25 +37,34 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
   const routeKey=ctx=>ctx?.session?.activeRoute||cloneKey;
+  const routesQuery=()=>({$or:[{bot_key:cloneKey},{owner_bot_key:cloneKey}]});
+  async function rememberRoute(ctx,key){
+    ctx.session.activeRoute=key;
+    ctx.session.routeLoaded=true;
+    await Config.updateOne({bot_key:cloneKey},
+      {$set:{['active_route_by_user.'+String(ctx.from.id)]:key}},{upsert:true});
+  }
+  const routeLabel=(c,i)=>String(c.route_title||(c.bot_key===cloneKey?'Asosiy kanal':'Yo‘nalish '+i)).slice(0,40);
   const load=ctx=>Config.findOne({bot_key:routeKey(ctx)}).lean();
   const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning.',menu());
-  bot.start(async ctx=>{ctx.session.step=null;return permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.');});
-  bot.command('cancel',async ctx=>{ctx.session.step=null;return ctx.reply('✅ Amal bekor qilindi.',menu());});
+  bot.start(async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.');});
+  bot.command('cancel',async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return ctx.reply('✅ Amal bekor qilindi.',menu());});
   bot.hears('➕ Yangi yo‘nalish',async ctx=>{
     if(!permitted(ctx))return;
-    const existing=await Config.countDocuments({$or:[{bot_key:cloneKey},{owner_bot_key:cloneKey}]});
+    const existing=await Config.countDocuments(routesQuery());
     if(existing>=20)return ctx.reply('⚠️ Bitta botda maksimal 20 ta yo‘nalish.',menu());
+    ctx.session.wizard=true;
     ctx.session.step='route_title';
     return ctx.reply('➕ Yangi yo‘nalishga nom bering (masalan: Musiqa, Yangiliklar).',menu());
   });
   bot.hears('🗂 Yo‘nalishlar',async ctx=>{
     if(!permitted(ctx))return;
     ctx.session.step=null;
-    const configs=await Config.find({$or:[{bot_key:cloneKey},{owner_bot_key:cloneKey}]}).sort({createdAt:1}).limit(20).lean();
+    const configs=await Config.find(routesQuery()).sort({createdAt:1}).limit(20).lean();
     if(!configs.length)return ctx.reply('Hozircha yo‘nalish yo‘q. ➕ Yangi yo‘nalish ni bosing.',menu());
     const rows=configs.map((r,i)=>[Markup.button.callback((r.bot_key===routeKey(ctx)?'✅ ':'')+
-      (r.route_title||('Yo‘nalish '+(i+1)))+' | '+(r.source_username?'@'+r.source_username:'manbasiz')+
-      ' → '+(r.target_username?'@'+r.target_username:'kanalsiz'),'clone:route:'+r.bot_key)]);
+      routeLabel(r,i+1)+' | '+(r.source_username?'@'+r.source_username:'manbasiz')+
+      ' → '+(r.target_username?'@'+r.target_username:'kanalsiz')+(r.auto_enabled?' 🟢':' ⏸'),'clone:route:'+r.bot_key)]);
     rows.push([Markup.button.callback('🗑 Tanlangan yo‘nalishni o‘chirish','clone:route:delete:ask')]);
     return ctx.reply('🗂 Yo‘nalishlar (tanlash uchun bosing):',Markup.inlineKeyboard(rows));
   });
@@ -56,8 +80,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     }
     const found=await Config.findOne({bot_key:id,$or:[{owner_bot_key:cloneKey},{bot_key:cloneKey}]}).lean();
     if(!found)return ctx.reply('❌ Yo‘nalish topilmadi.',menu());
-    ctx.session.activeRoute=id;
+    await rememberRoute(ctx,id);
     ctx.session.step=null;
+    ctx.session.wizard=false;
     return ctx.reply('✅ Faol yo‘nalish: '+(found.route_title||id)+'\n📥 '+(found.source_username||'ulanmagan')+
       '\n📤 '+(found.target_username||'ulanmagan')+'\n⏱ '+Number(found.publish_interval_minutes||0)+' daqiqa',menu());
   });
@@ -68,8 +93,41 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const key=routeKey(ctx);
     if(key===cloneKey)return ctx.reply('Asosiy yo‘nalishni o‘chirib bo‘lmaydi.',menu());
     await Config.deleteOne({bot_key:key,owner_bot_key:cloneKey});
-    ctx.session.activeRoute=cloneKey;
+    await rememberRoute(ctx,cloneKey);
     return ctx.reply('✅ Yo‘nalish o‘chirildi. Endi asosiy yo‘nalish tanlangan.',menu());
+  });
+  bot.hears('📊 Barcha yo‘nalishlar',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const configs=await Config.find(routesQuery()).sort({createdAt:1}).limit(20).lean();
+    if(!configs.length)return ctx.reply('📭 Yo‘nalishlar yo‘q. ➕ Yangi yo‘nalish tugmasini bosing.',menu());
+    const lines=configs.map((r,i)=>
+      (r.bot_key===routeKey(ctx)?'✅ ':'')+(i+1)+'. '+routeLabel(r,i+1)+
+      '\n📥 '+(r.source_username?'@'+r.source_username:'—')+
+      ' → 📤 '+(r.target_username?'@'+r.target_username:'—')+
+      '\n'+(r.auto_enabled?'🟢 Ishlamoqda':'⏸ To‘xtagan')+
+      ' · ⏱ '+Number(r.publish_interval_minutes||0)+' daq'+
+      (r.promo_bot_username?' · 🤖 @'+r.promo_bot_username:'')+
+      (r.history_last_error?'\n⚠️ '+String(r.history_last_error).slice(0,100):''));
+    return ctx.reply('📊 JAMI YO‘NALISHLAR: '+configs.length+
+      '\n🟢 Faol: '+configs.filter(x=>x.auto_enabled).length+
+      '\n⏸ To‘xtagan: '+configs.filter(x=>!x.auto_enabled).length+'\n\n'+lines.join('\n\n'),menu());
+  });
+  bot.hears('⏸ Hammasini to‘xtatish',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    return ctx.reply('Barcha yo‘nalishlarni to‘xtatishga rozimisiz?',Markup.inlineKeyboard([
+      [Markup.button.callback('⏸ Ha, hammasini to‘xtatish','clone:pause:all')],
+      [Markup.button.callback('Bekor qilish','clone:pause:cancel')]
+    ]));
+  });
+  bot.action(/^clone:pause:(all|cancel)$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    if(ctx.match[1]==='cancel')return ctx.reply('Bekor qilindi.',menu());
+    const result=await Config.updateMany(routesQuery(),{$set:{auto_enabled:false,history_enabled:false}});
+    ctx.session.step=null;
+    return ctx.reply('⏸ '+result.modifiedCount+' ta yo‘nalish to‘xtatildi. Ularni 🗂 Yo‘nalishlar orqali alohida qayta yoqishingiz mumkin.',menu());
   });
   bot.hears('🤖 Reklama botini ulash',async ctx=>{
     if(!permitted(ctx))return;
@@ -401,8 +459,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       if(title.length<2)return ctx.reply('❌ Kamida 2 belgi kiriting.',menu());
       const id=cloneKey+':r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
       await Config.create({bot_key:id,owner_bot_key:cloneKey,route_title:title,source_mode:'mtproto',auto_enabled:false});
-      ctx.session.activeRoute=id;
-      return ctx.reply('✅ '+title+' yo‘nalishi yaratildi. Endi 📥 Manba kanal va 📤 Bizning kanal ni ulang.',menu());
+      await rememberRoute(ctx,id);
+      ctx.session.step='source';
+      return ctx.reply('✅ '+title+' yo‘nalishi yaratildi!\n\n1/3 📥 Manba kanal @username ni yuboring.',menu());
     }
     const handle=telegramHandle(ctx.message.text);
     if(!handle)return ctx.reply('❌ Ommaviy @username kiriting.',menu());
@@ -426,6 +485,12 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
            (rights.status==='administrator'&&!rights.can_post_messages))
           return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
         await Config.updateOne({bot_key:routeKey(ctx)},{$set:{target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle}},{upsert:true});
+        if(ctx.session.wizard){
+          ctx.session.wizard=false;
+          return ctx.reply('✅ Yo‘nalish tayyor!\n📥 Manba: @'+(await load(ctx))?.source_username+
+            '\n📤 Kanal: @'+handle+
+            '\n\n3/3 🤖 Reklama botini ulash (ixtiyoriy), ⏱ Postlash intervali ni tanlang va ▶️ Sinxronlash tugmasini bosing.\n\nBoshqa kanal juftligini yaratish uchun ➕ Yangi yo‘nalish ni bosing.',menu());
+        }
         return ctx.reply('✅ Joylash kanali: @'+handle,menu());
       }catch(e){return ctx.reply('❌ Kanal tekshiruvi: '+String(e.message||e).slice(0,140),menu());}
     }
@@ -436,6 +501,10 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         history_enabled:false,history_completed:false,history_cursor:0,history_ceiling:0,
         auto_enabled:false
       }},{upsert:true});
+      if(ctx.session.wizard){
+        ctx.session.step='target';
+        return ctx.reply('✅ Manba: @'+handle+'\n\n2/3 📤 Endi O‘Z kanalingiz @username ni yuboring. Kloner bot kanal administratori bo‘lishi kerak.',menu());
+      }
       return ctx.reply('✅ Manba: @'+handle+'. Endi ▶️ Sinxronlash ni bosing.',menu());
     }
   });
