@@ -3100,7 +3100,12 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
             await ctx.replyWithAudio(cached.file_id,options);
             return;
           }catch(e){
-            console.warn('[music] Cached Telegram file_id invalid',config.key,track.id,String(e.message||e).slice(0,130));
+            const reason=String(e.description||e.message||e);
+            // A network timeout is NOT proof that file_id is invalid; do not
+            // discard a working Telegram cache entry for transient failures.
+            if(!/wrong file identifier|file identifier|file_id_invalid|file reference expired|invalid file_id/i.test(reason))
+              throw e;
+            console.warn('[music] Cached Telegram file_id expired',config.key,track.id,reason.slice(0,130));
             await MusicAudioFile.deleteOne({bot_key:config.key,track_id:String(track.id),file_id:cached.file_id}).catch(()=>{});
           }
         }
