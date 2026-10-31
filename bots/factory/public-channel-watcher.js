@@ -1,8 +1,8 @@
 'use strict';
 
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
-const LIVE_POLL_MS = 12000;
-const HISTORY_POLL_MS = 20000;
+const LIVE_POLL_MS = 30000;
+const HISTORY_POLL_MS = 30000;
 const LIVE_BATCH_SIZE = 20;
 const HISTORY_BATCH_SIZE = 3;
 
@@ -66,6 +66,7 @@ function canRepublish(message) {
 // (2) an oldest-to-newest historic cursor, bounded by the source's snapshot
 // ID taken when the historic sync starts. New posts are never blocked by backfill.
 async function scanLive({client,cfg,deliver,log=console}) {
+  if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
   const handle=normalizePublicUsername(cfg.source_username);
   if(!handle)return;
   const entity='@'+handle;
@@ -91,6 +92,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
     }
     if(result?.status==='failed') {
       log.warn('[channel sync] live relay failed; cursor stays at',message.id);
+      await deliver({type:'live_error',cfg,error:String(result.error||'Post relay failed')}).catch(()=>{});
       break;
     }
     await deliver({type:'cursor',cfg,cursor:Number(message.id),result});
@@ -99,6 +101,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
 }
 async function scanHistory({client,cfg,deliver,log=console}){
   if(cfg.history_enabled!==true || cfg.history_completed===true)return;
+  if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
   if(Number(cfg.publish_interval_minutes)>0 && cfg.next_publish_at && new Date(cfg.next_publish_at).getTime()>Date.now())return;
   const handle=normalizePublicUsername(cfg.source_username);
   if(!handle || Number(cfg.source_cursor||0)<=0)return; // live baseline first
