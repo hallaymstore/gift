@@ -165,12 +165,25 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
   let stopped=false;
   let liveRunning=false;
   let historyRunning=false;
+  // Shared MTProto user accounts have FloodWait limits. Spread up to 20 routes
+  // across polling ticks rather than requesting every channel in one burst.
+  const PER_TICK=6;
+  let liveOffset=0,historyOffset=0;
+  function nextBatch(sources,type){
+    if(!sources.length)return [];
+    const offset=type==='live'?liveOffset:historyOffset;
+    const count=Math.min(PER_TICK,sources.length);
+    const batch=Array.from({length:count},(_,i)=>sources[(offset+i)%sources.length]);
+    if(type==='live')liveOffset=(offset+count)%sources.length;
+    else historyOffset=(offset+count)%sources.length;
+    return batch;
+  }
   async function live(){
     if(stopped||liveRunning)return;
     liveRunning=true;
     try{
       const sources=await listSources();
-      for(const cfg of sources){
+      for(const cfg of nextBatch(sources,'live')){
         if(stopped)break;
         try{await scanLive({client,cfg,deliver,log});}
         catch(e){log.warn('[channel sync] live failed',cfg.bot_key,String(e.message||e).slice(0,160));}
@@ -183,7 +196,7 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
     historyRunning=true;
     try{
       const sources=await listSources();
-      for(const cfg of sources){
+      for(const cfg of nextBatch(sources,'history')){
         if(stopped)break;
         try{await scanHistory({client,cfg,deliver,log});}
         catch(e){
