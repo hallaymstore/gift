@@ -117,7 +117,7 @@ function attachGroupAnnouncer({bot,config,adminIds,Markup,Group,Campaign,Log,uti
     if (!count) return ctx.reply('❌ Ruxsat bergan guruh yo‘q. Guruh admini /allowannounce yuborsin.',menu());
     if (campaign.running) return ctx.reply('🟢 Kampaniya allaqachon ishlayapti.',menu());
     await Campaign.updateOne({bot_key:key},{$set:{
-      running:true,sent_count:0,next_send_at:new Date(Date.now()+1000),
+      running:true,sent_count:0,attempt_count:0,next_send_at:new Date(Date.now()+1000),
       lock_until:new Date(0),last_error:''
     },$inc:{revision:1}});
     return ctx.reply('✅ E’lon navbati ishga tushdi. Faqat ruxsatli guruhlarga yuboriladi.\n' +
@@ -161,7 +161,7 @@ function attachGroupAnnouncer({bot,config,adminIds,Markup,Group,Campaign,Log,uti
     if(msg.has_protected_content)return ctx.reply('❌ Himoyalangan post nusxalanmaydi.',menu());
     await Campaign.updateOne({bot_key:key},{$set:{
       source_chat_id:ctx.chat.id,source_message_id:msg.message_id,
-      running:false,next_send_at:null,sent_count:0
+      running:false,next_send_at:null,sent_count:0,attempt_count:0
     }},{upsert:true});
     ctx.session.mode=null;
     return ctx.reply('✅ E’lon saqlandi. “👁 Ko‘rish” bilan tekshiring, keyin ▶️ Boshlash.',menu());
