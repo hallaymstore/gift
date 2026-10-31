@@ -375,6 +375,13 @@ const relayConfigSchema = new mongoose.Schema({
   source_username: String,
   source_mode: { type: String, default: 'bot_api' },
   source_cursor: { type: Number, default: 0 },
+  history_enabled: {type:Boolean,default:false},
+  history_completed: {type:Boolean,default:false},
+  history_cursor: {type:Number,default:0},
+  history_ceiling: {type:Number,default:0},
+  history_sent: {type:Number,default:0},
+  history_skipped: {type:Number,default:0},
+  history_last_error: String,
   auto_enabled: { type: Boolean, default: false },
   linked_bots: { type: [String], default: [] },
   updated_by: Number
@@ -1837,6 +1844,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   const relayMenu = () => Markup.keyboard([
     ['📢 Joylash kanalini ulash', '🤖 Ulangan botlar'],
     ['📥 Forward → kanal', '📡 Manba kanalni kuzatish'],
+    ['📚 Eski postlarni sinxronlash', '⏸ Tarixni to‘xtatish'],
     ['⛔ Avto kuzatuvni o‘chirish', '📋 Postlash holati'],
     ['✅ Postlashni yakunlash', '🏠 Bosh menyu']
   ]).resize();
@@ -1851,13 +1859,20 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       return ctx.reply('📭 Hali post joylash kanali ulanmagan.\nAvval “📢 Joylash kanalini ulash” tugmasini bosing.', relayMenu());
     }
     const stats = await ChannelRelayLog.countDocuments({ bot_key: config.key, status: 'sent' });
+    const historyState = cfg.history_enabled
+      ? (cfg.history_completed ? '✅ Yakunlangan' : '🔄 Sinxronlanmoqda')
+      : '⏸ O‘chiq';
     return ctx.reply('📣 KANAL POSTLARI\n\n' +
       '🎯 Kanal: ' + (cfg.target_username ? '@' + cfg.target_username : cfg.target_title || cfg.target_chat_id) +
       '\n🤖 Kino bot: @' + botUsername(ctx) +
       '\n🎞 Ulangan botlar: ' + ((cfg.linked_bots || []).map(x => '@' + x).join(', ') || 'yo‘q') +
       '\n📡 Avto manba: ' + (cfg.auto_enabled ? (cfg.source_username ? '@' + cfg.source_username : cfg.source_chat_id) + (cfg.source_mode === 'mtproto' ? (sessionConfigured() ? ' (akkaunt sessiyasi ulangan)' : ' (Telegram akkaunt sessiyasi kutilmoqda)') : ' (Bot API)') : 'o‘chiq') +
       '\n✅ Joylangan postlar: ' + stats +
-      '\n\n💡 Begona PUBLIC kanalni admin bo‘lmasdan kuzatish uchun Telegram user sessiyasi kerak. U bo‘lmasa, bir nechta postni “📥 Forward → kanal” orqali joylang.',
+      '\n📚 Eski postlar: ' + historyState +
+      '\n📈 Tarix: ' + Number(cfg.history_sent||0) + ' joylandi, ' + Number(cfg.history_skipped||0) + ' o‘tkazildi' +
+      (cfg.history_cursor ? '\n🔎 Oxirgi tarixiy post ID: ' + cfg.history_cursor : '') +
+      (cfg.history_last_error ? '\n⚠️ Xato: ' + String(cfg.history_last_error).slice(0,120) : '') +
+      '\n⚡ Yangi postlar taxminan har 12 soniyada tekshiriladi; tarixiy postlar serverni zo‘riqtirmasdan navbatda chiqadi.',
       relayMenu());
   }
 
@@ -1933,6 +1948,13 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         source_username:publicHandle,
         source_mode:mode,
         source_cursor:0,
+        history_enabled:true,
+        history_completed:false,
+        history_cursor:0,
+        history_ceiling:0,
+        history_sent:0,
+        history_skipped:0,
+        history_last_error:'',
         auto_enabled:true,
         updated_by:ctx.from.id
       }
@@ -1944,7 +1966,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return ctx.reply(
       '✅ Begona PUBLIC manba saqlandi: @' + publicHandle + '\\n\\n' +
       (sessionConfigured()
-        ? '📡 Telegram akkaunt sessiyasi ulangan. Monitoring yangi postlardan boshlanadi.'
+        ? '📡 Telegram sessiyasi ulangan. Yangi postlar kuzatiladi, eski postlar ham navbat bilan sinxronlanadi.'
         : '⚠️ Avtomatik kuzatuv hali ISHLAMAYDI: serverda Telegram akkaunti sessiyasi sozlanmagan.\\n' +
           'Render Environment: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION.\\n' +
           'Bu maʼlumotlarni faqat o‘z Render envingizga kiriting; kod yoki sessiyani botga yubormang.') +
