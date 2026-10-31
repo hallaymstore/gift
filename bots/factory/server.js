@@ -3338,9 +3338,17 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
           });
           return;
         }
+        return ctx.reply(
+          '🎵 “'+text.slice(0,90)+'” bo‘yicha yuklab olishga ruxsat etilgan MP3 topilmadi.\n\n'+
+          '🌐 Tashqi manba: Jamendo (mustaqil ijrochilar katalogi).'+
+          '\nMashhur ijrochilarning barcha qo‘shiqlari bu katalogda mavjud emas.'+
+          '\n\n🔎 Sinash uchun: RedLion yoki Summer Music.'+
+          '\n📂 O‘zingizga tegishli MP3larni bot kutubxonasiga qo‘shish ham mumkin.',
+          isAdmin(userId)?adminKeyboard():userKeyboard()
+        );
       } catch(e) {
         console.warn('External music search:',String(e.message||e).slice(0,150));
-        return ctx.reply('⚠️ MP3 katalogi ishlamayapti: '+String(e.message||e).slice(0,140));
+        return ctx.reply('⚠️ MP3 katalogida texnik muammo: '+String(e.message||e).slice(0,140));
       }
     }
     if (!matches.length) {
