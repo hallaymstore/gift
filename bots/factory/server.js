@@ -14,6 +14,7 @@ const { guessTitle, brandedDelivery } = require('./auto-branding');
 const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { attachMiniGames } = require('./mini-games-engine');
+const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
@@ -326,6 +327,29 @@ const broadcastLogSchema = new mongoose.Schema(
   { timestamps: true, collection: 'multibot_broadcast_logs' }
 );
 const BroadcastLog = mongoose.model('BroadcastLog', broadcastLogSchema);
+
+const relayConfigSchema = new mongoose.Schema({
+  bot_key: { type: String, required: true, unique: true, index: true },
+  target_chat_id: String,
+  target_username: String,
+  target_title: String,
+  source_chat_id: String,
+  source_username: String,
+  auto_enabled: { type: Boolean, default: false },
+  linked_bots: { type: [String], default: [] },
+  updated_by: Number
+}, { timestamps: true, collection: 'multibot_channel_relay_settings' });
+const ChannelRelayConfig = mongoose.model('MultiBotChannelRelayConfig', relayConfigSchema);
+const relayLogSchema = new mongoose.Schema({
+  bot_key: { type: String, required: true },
+  source_key: { type: String, required: true },
+  target_chat_id: String,
+  status: { type: String, default: 'pending' },
+  target_message_id: Number,
+  error: String
+}, { timestamps: true, collection: 'multibot_channel_relay_logs' });
+relayLogSchema.index({ bot_key: 1, source_key: 1 }, { unique: true });
+const ChannelRelayLog = mongoose.model('MultiBotChannelRelayLog', relayLogSchema);
 
 
 async function connectMongoOnce() {
@@ -1631,7 +1655,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   bot.use(
     session({
-      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null, shortsVideo: null })
+      defaultSession: () => ({ mode: null, tempMessage: null, tempPart: null, bulkStats: null, shortsVideo: null, relayStats: null })
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
@@ -1698,6 +1722,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ctx.session.tempPart = null;
     ctx.session.bulkStats = null;
     ctx.session.shortsVideo = null;
+    ctx.session.relayStats = null;
   }
 
   function addButton() {
@@ -1728,6 +1753,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     return Markup.keyboard([
       [addButton(), partButton()],
       ['🎬 Shorts Studio', '⚡ Ommaviy qo‘shish'],
+      ['📣 Kanal postlari'],
       [listButton()],
       ['📊 Statistika', '✏️ Tahrirlash'],
       ['🔒 Kontent himoyasi'],
