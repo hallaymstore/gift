@@ -384,6 +384,8 @@ const relayConfigSchema = new mongoose.Schema({
   history_skipped: {type:Number,default:0},
   history_last_error: String,
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
+  publish_interval_minutes: {type:Number,default:0},
+  next_publish_at: Date,
   auto_enabled: { type: Boolean, default: false },
   linked_bots: { type: [String], default: [] },
   updated_by: Number
@@ -10663,6 +10665,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
       {$set:{history_cursor:Number(cursor),history_last_error:''},
        $inc:status==='sent'?{history_sent:1}:{history_skipped:1}});
+    if(status==='sent' && Number(cfg.publish_interval_minutes)>0) await ChannelRelayConfig.updateOne(selector,{$set:{next_publish_at:new Date(Date.now()+Number(cfg.publish_interval_minutes)*60000)}});
     return;
   }
   if(type==='history_complete'){
