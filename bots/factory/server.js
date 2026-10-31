@@ -15,6 +15,7 @@ const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { attachMiniGames } = require('./mini-games-engine');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
+const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
 const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./subscription-support');
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
@@ -335,6 +336,8 @@ const relayConfigSchema = new mongoose.Schema({
   target_title: String,
   source_chat_id: String,
   source_username: String,
+  source_mode: { type: String, default: 'bot_api' },
+  source_cursor: { type: Number, default: 0 },
   auto_enabled: { type: Boolean, default: false },
   linked_bots: { type: [String], default: [] },
   updated_by: Number
@@ -1804,9 +1807,9 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       '🎯 Kanal: ' + (cfg.target_username ? '@' + cfg.target_username : cfg.target_title || cfg.target_chat_id) +
       '\n🤖 Kino bot: @' + botUsername(ctx) +
       '\n🎞 Ulangan botlar: ' + ((cfg.linked_bots || []).map(x => '@' + x).join(', ') || 'yo‘q') +
-      '\n📡 Avto manba: ' + (cfg.auto_enabled ? (cfg.source_username ? '@' + cfg.source_username : cfg.source_chat_id) : 'o‘chiq') +
+      '\n📡 Avto manba: ' + (cfg.auto_enabled ? (cfg.source_username ? '@' + cfg.source_username : cfg.source_chat_id) + (cfg.source_mode === 'mtproto' ? (sessionConfigured() ? ' (akkaunt sessiyasi ulangan)' : ' (Telegram akkaunt sessiyasi kutilmoqda)') : ' (Bot API)') : 'o‘chiq') +
       '\n✅ Joylangan postlar: ' + stats +
-      '\n\n💡 Boshqa public kanaldan avtomatik kuzatish uchun aynan shu bot o‘sha kanalda admin bo‘lishi zarur.',
+      '\n\n💡 Begona PUBLIC kanalni admin bo‘lmasdan kuzatish uchun Telegram user sessiyasi kerak. U bo‘lmasa, bir nechta postni “📥 Forward → kanal” orqali joylang.',
       relayMenu());
   }
 
@@ -1843,32 +1846,63 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
 
   async function storeRelaySource(ctx, input) {
     const ref = telegramChatRef(input);
-    if (!ref) return ctx.reply('❌ Public manba @kanal_username yoki kanalning -100... ID sini kiriting.');
+    const publicHandle = telegramHandle(input);
+    if (!ref || !publicHandle) {
+      return ctx.reply('❌ Boshqa PUBLIC kanalning @username yoki https://t.me/username havolasini yuboring.');
+    }
     const cfg = await relaySettings();
     if (!cfg?.target_chat_id) return ctx.reply('❌ Avval joylash kanalini ulang.', relayMenu());
+    if (String(cfg.target_username || '').toLowerCase() === publicHandle.toLowerCase()) {
+      return ctx.reply('❌ Manba va o‘z kanalingiz bir xil bo‘la olmaydi.');
+    }
+    // getChatMember for an unrelated public channel fails with
+    // "member list is inaccessible": it is not proof that source is invalid.
+    // Only check if bot itself happens to be a channel admin; otherwise use
+    // authenticated Telegram user-session (MTProto) when configured.
+    let botIsSourceAdmin = false;
+    let sourceChatId = '';
     try {
       const chat = await ctx.telegram.getChat(ref);
-      if (chat.type !== 'channel') return ctx.reply('❌ Manba kanal bo‘lishi kerak.');
-      if (String(chat.id) === cfg.target_chat_id) return ctx.reply('❌ Manba va joylash kanali bir xil bo‘la olmaydi.');
-      const me = ctx.botInfo || await ctx.telegram.getMe();
-      const ownMember = await ctx.telegram.getChatMember(chat.id, me.id);
-      if (!['administrator', 'creator'].includes(ownMember.status)) {
-        return ctx.reply('❌ @' + me.username + ' manba kanalda ADMIN emas.\n' +
-          'Bot API begona public kanallarni adminsiz kuzata olmaydi.\n' +
-          'Bunday postlarni “📥 Forward → kanal” orqali qo‘lda yuboring.');
+      if (chat?.type && chat.type !== 'channel') {
+        return ctx.reply('❌ Manba public kanal bo‘lishi kerak.');
       }
-      await ChannelRelayConfig.updateOne({bot_key:config.key},{
-        $set:{source_chat_id:String(chat.id),source_username:telegramHandle(chat.username),
-          auto_enabled:true,updated_by:ctx.from.id}
-      },{upsert:true});
-      ctx.session.mode = null;
-      return ctx.reply('✅ Manba kuzatuvi yoqildi: ' + (chat.username ? '@'+chat.username : chat.title) +
-        '\n\n🆕 Endi shu kanalda paydo bo‘lgan yangi postlar kanalingizga moslashtirib joylanadi.\n' +
-        '📝 Faqat qayta tarqatishga ruxsat berilgan postlarni ishlating.', relayMenu());
-    } catch (err) {
-      return ctx.reply('❌ Manba kanal tekshirilmadi. Bot u yerda admin emas yoki ID noto‘g‘ri.\n' +
-        String(err.description || err.message).slice(0,150));
+      sourceChatId = chat?.id ? String(chat.id) : '';
+      const me = ctx.botInfo || await ctx.telegram.getMe();
+      try {
+        const member = await ctx.telegram.getChatMember(chat.id, me.id);
+        botIsSourceAdmin = ['administrator','creator'].includes(member?.status);
+      } catch (_) {
+        // Expected for public channels where bot is not a participant.
+      }
+    } catch (_) {
+      // Bot API may not resolve public channel details without membership.
+      // We still accept the syntactically valid PUBLIC handle for MTProto.
     }
+    const mode = botIsSourceAdmin ? 'bot_api' : 'mtproto';
+    await ChannelRelayConfig.updateOne({bot_key:config.key},{
+      $set:{
+        source_chat_id:sourceChatId,
+        source_username:publicHandle,
+        source_mode:mode,
+        source_cursor:0,
+        auto_enabled:true,
+        updated_by:ctx.from.id
+      }
+    },{upsert:true});
+    ctx.session.mode = null;
+    if (mode === 'bot_api') return ctx.reply(
+      '✅ @' + publicHandle + ' manba kuzatuvi yoqildi (Bot API).\\n' +
+      '🆕 Faqat yangi postlar kanalga joylanadi.', relayMenu());
+    return ctx.reply(
+      '✅ Begona PUBLIC manba saqlandi: @' + publicHandle + '\\n\\n' +
+      (sessionConfigured()
+        ? '📡 Telegram akkaunt sessiyasi ulangan. Monitoring yangi postlardan boshlanadi.'
+        : '⚠️ Avtomatik kuzatuv hali ISHLAMAYDI: serverda Telegram akkaunti sessiyasi sozlanmagan.\\n' +
+          'Render Environment: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION.\\n' +
+          'Bu maʼlumotlarni faqat o‘z Render envingizga kiriting; kod yoki sessiyani botga yubormang.') +
+      '\\n\\n📥 Hozir esa “Forward → kanal” orqali postlarni bemalol joylashingiz mumkin.',
+      relayMenu()
+    );
   }
 
   async function relayPublish({telegram, message, fromChatId, fromMessageId, settings, explicitManual = false}) {
@@ -1966,18 +2000,19 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
     resetSession(ctx);ctx.session.mode='relay_bots';
     return ctx.reply('🤖 Reklama postlarida chiqadigan O‘ZINGIZGA tegishli bot username’larini yuboring.\n' +
-      'Misol: @y808bot, @multikbot, @serial_bot\n5 tagacha; “-” — ro‘yxatni tozalash.', relayMenu());
+      'Asosiy @' + botUsername(ctx) + ' botingiz avtomatik qo‘shiladi. Uni qayta kiritish shart emas.\n' +
+      'Qo‘shimcha botlar: @multikbot, @serial_bot\n5 tagacha; “-” — ro‘yxatni tozalash.', relayMenu());
   });
   bot.hears('📡 Manba kanalni kuzatish', ctx => {
     if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
     resetSession(ctx);ctx.session.mode='relay_source';
     return ctx.reply('📡 Avtomatik kuzatiladigan manba kanal ID yoki @username’ini yuboring.\n' +
-      '⚠️ Bot manba kanalda ham admin bo‘lishi kerak. Begona public kanalni adminsiz Bot API kuzata olmaydi.', relayMenu());
+      '✅ Begona PUBLIC kanalga admin bo‘lish shart emas. Ammo avtomatik kuzatuv uchun Render’da TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION sozlangan bo‘lishi kerak.\n\n📥 Sessiyasiz ham qo‘lda forward ishlaydi.', relayMenu());
   });
   bot.hears('⛔ Avto kuzatuvni o‘chirish', async ctx => {
     if (!isAdmin(ctx.from?.id)) return;
     await ChannelRelayConfig.updateOne({bot_key:config.key},
-      {$set:{auto_enabled:false,source_chat_id:'',source_username:''}});
+      {$set:{auto_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
     return ctx.reply('⛔ Avtomatik kuzatuv o‘chirildi. Qo‘lda forward davom etadi.', relayMenu());
   });
   bot.hears('📥 Forward → kanal', async ctx => {
@@ -2005,7 +2040,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     const msg=ctx.update.channel_post;
     try {
       const cfg=await relaySettings();
-      if(!cfg?.auto_enabled || !cfg.source_chat_id || !cfg.target_chat_id) return;
+      if(!cfg?.auto_enabled || cfg.source_mode === 'mtproto' || !cfg.source_chat_id || !cfg.target_chat_id) return;
       if(String(msg.chat?.id)!==String(cfg.source_chat_id)) return;
       if(String(msg.chat.id)===String(cfg.target_chat_id)) return;
       const result=await relayPublish({telegram:ctx.telegram,message:msg,
@@ -2840,8 +2875,8 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       if (ctx.session.mode === 'relay_source') return storeRelaySource(ctx, text);
       if (ctx.session.mode === 'relay_bots') {
         const selected = text === '-' ? [] : linkedBots(text, botUsername(ctx));
-        if (text !== '-' && !selected.length)
-          return ctx.reply('❌ Yaroqli bot username yo‘q. Misol: @y808bot, @multikbot yoki - yuboring.');
+        if (text !== '-' && !selected.length && telegramHandle(text) !== botUsername(ctx))
+          return ctx.reply('❌ Qo‘shimcha bot username noto‘g‘ri. Asosiy bot allaqachon avtomatik kiritiladi. Yoki - yuboring.');
         await ChannelRelayConfig.updateOne({bot_key:config.key},
           {$set:{linked_bots:selected,updated_by:ctx.from.id}},{upsert:true});
         ctx.session.mode = null;
