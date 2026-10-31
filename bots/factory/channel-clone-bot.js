@@ -68,9 +68,55 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady}) {
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.history_last_error?'\n⚠️ '+c.history_last_error:''),menu());
   });
+  let repairing=false;
   bot.hears('🧹 Eski postlar matnini tuzatish',async ctx=>{
     if(!permitted(ctx))return;
-    return ctx.reply('ℹ️ Eski postlarni tahrirlash uchun mavjud Factory kino botidagi “🛠 Kanal postlarini tuzatish” bo‘limidan foydalaning. Clone Bot uchun ommaviy tahrirlash keyingi yangilanishda ulanadi.',menu());
+    if(repairing)return ctx.reply('🔄 Tahrirlash davom etmoqda.',menu());
+    const cfg=await load();
+    if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va Telegram sessiyasi kerak.',menu());
+    repairing=true;
+    await ctx.reply('🛠 Avval joylangan postlar qayta yuborilmasdan tahrirlanmoqda.',menu());
+    void (async()=>{
+      let client,edited=0,failed=0,checked=0;
+      try{
+        const {TelegramClient}=require('teleproto');
+        const {StringSession}=require('teleproto/sessions');
+        client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
+          Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
+        await client.connect();
+        const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
+        let after=null;
+        while(true){
+          const query={bot_key:'channel_clone',status:'sent',target_message_id:{$gt:0}};
+          if(after)query._id={$gt:after};
+          const items=await Log.find(query).sort({_id:1}).limit(50).lean();
+          if(!items.length)break;
+          for(const item of items){
+            after=item._id;checked++;
+            try{
+              const result=await client.getMessages(target,{ids:Number(item.target_message_id)});
+              const post=Array.isArray(result)?result[0]:result;
+              if(!post)continue;
+              const before=String(post.message||'');
+              const afterText=before.split('\n').filter(line=>!/^\\s*(?:📌\\s*)?Manba\\s*:/iu.test(line))
+                .join('\n').replace(/\n{3,}/g,'\n\n').trim();
+              if(afterText && afterText!==before.trim()){
+                try {
+                  if(post.media)await ctx.telegram.editMessageCaption(cfg.target_chat_id,item.target_message_id,undefined,afterText);
+                  else await ctx.telegram.editMessageText(cfg.target_chat_id,item.target_message_id,undefined,afterText);
+                } catch(e) {
+                  await client.editMessage(target,{message:Number(item.target_message_id),text:afterText});
+                }
+                edited++;
+              }
+            }catch(e){failed++;console.warn('clone post edit failed',item.target_message_id,String(e.message||e).slice(0,120));}
+            await new Promise(resolve=>setTimeout(resolve,400));
+          }
+        }
+        await ctx.reply('✅ Tekshirildi: '+checked+'\n✏️ Tahrirlandi: '+edited+'\n⚠️ Xato: '+failed,menu());
+      }catch(e){await ctx.reply('❌ Xato: '+String(e.message||e).slice(0,150),menu()).catch(()=>{});}
+      finally{if(client)await client.disconnect().catch(()=>{});repairing=false;}
+    })();
   });
   return {key:'channel_clone',title:'Channel Clone Bot',bot,config:{key:'channel_clone'}};
 }
