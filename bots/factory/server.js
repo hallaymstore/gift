@@ -10532,14 +10532,44 @@ Qayta token yuboring yoki /cancel bosing.`);
 // Only admin-configured public channels are read. Never reads private chats.
 // Channel ownership/posting rights are checked when the target is configured.
 let publicSourceWatcher = null;
-async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind}) {
-  if (type === 'seed' || type === 'cursor') {
-    await ChannelRelayConfig.updateOne(
-      { bot_key:cfg.bot_key,source_username:cfg.source_username,
-        source_mode:'mtproto',auto_enabled:true },
-      { $set: {source_cursor:Number(cursor)} }
-    );
+async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind,phase,result,ceiling,error}) {
+  const selector={bot_key:cfg.bot_key,source_username:cfg.source_username,
+    source_mode:'mtproto',auto_enabled:true};
+  if(type==='seed'){
+    const set={source_cursor:Number(cursor)};
+    if(cfg.history_enabled && !Number(cfg.history_ceiling))set.history_ceiling=Number(cursor);
+    await ChannelRelayConfig.updateOne(selector,{$set:set});
     return;
+  }
+  if(type==='cursor'){
+    await ChannelRelayConfig.updateOne(selector,{$set:{source_cursor:Number(cursor)}});
+    return;
+  }
+  if(type==='history_begin'){
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true,history_ceiling:0},
+      {$set:{history_ceiling:Number(ceiling),history_last_error:''}});
+    return;
+  }
+  if(type==='history_cursor'){
+    const status=String(result?.status||'skipped');
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
+      {$set:{history_cursor:Number(cursor),history_last_error:''},
+       $inc:status==='sent'?{history_sent:1}:{history_skipped:1}});
+    return;
+  }
+  if(type==='history_complete'){
+    await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
+      {$set:{history_completed:true,history_last_error:''}});
+    return;
+  }
+  if(type==='history_error'){
+    await ChannelRelayConfig.updateOne(selector,
+      {$set:{history_last_error:String(error||'Nomaʼlum xato').slice(0,160)}});
+    return;
+  }
+  if(phase==='history'){
+    const stillEnabled=await ChannelRelayConfig.exists({...selector,history_enabled:true});
+    if(!stillEnabled)return {status:'skipped'};
   }
   const active = activeBots.get(cfg.bot_key);
   if (!active?.bot?.telegram || !cfg.target_chat_id) {
@@ -10553,7 +10583,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       target_chat_id:cfg.target_chat_id,status:'pending'});
     created = true;
   } catch(error) {
-    if (error.code === 11000) return;
+    if (error.code === 11000) return {status:'duplicate'};
     throw error;
   }
   try {
@@ -10591,6 +10621,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     }
     await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
+    return {status:'sent'};
   } catch(error) {
     // Do not blindly retry on ambiguous network failures; a duplicate channel
     // post is worse than a logged failure. Admin can manually retry via forward.
@@ -10598,6 +10629,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{status:'failed',error:String(error.message||error).slice(0,160)}});
     console.warn('Public source post failed', cfg.bot_key, message.id,
       String(error.message||error).slice(0,160));
+    return {status:'failed'};
   }
 }
 
