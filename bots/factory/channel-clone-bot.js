@@ -11,6 +11,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   const permitted=ctx=>ctx.chat?.type==='private'&&adminIds.includes(Number(ctx.from?.id));
   const menu=()=>Markup.keyboard([
     ['📥 Manba kanal','📤 Bizning kanal'],
+    ['🤖 Reklama botini ulash','🔗 Bot havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
@@ -23,6 +24,17 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning.',menu());
   bot.start(async ctx=>{ctx.session.step=null;return permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.');});
   bot.command('cancel',async ctx=>{ctx.session.step=null;return ctx.reply('✅ Amal bekor qilindi.',menu());});
+  bot.hears('🤖 Reklama botini ulash',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step='promo_bot';
+    return ctx.reply('🤖 Post ostida ko‘rsatiladigan O‘Z botingiz username’ini yuboring: @MyBot yoki https://t.me/MyBot.\n\nBu klonlash boti tokenini almashtirmaydi; faqat reklama havolasini belgilaydi.',menu());
+  });
+  bot.hears('🔗 Bot havolasini uzish',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    await Config.updateOne({bot_key:cloneKey},{$set:{promo_bot_username:''}},{upsert:true});
+    return ctx.reply('✅ Reklama boti havolasi uzildi. Yangi postlarda kloner bot havolasi chiqmaydi.',menu());
+  });
   bot.hears('📥 Manba kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='source';return ctx.reply('Manba public kanal @username ni yuboring.');});
   bot.hears('📤 Bizning kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='target';return ctx.reply('O‘zingizga tegishli kanal @username ni yuboring. Botga post joylash huquqini bering.');});
   let counting=false;
@@ -279,10 +291,18 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     const handle=telegramHandle(ctx.message.text);
     if(!handle)return ctx.reply('❌ Ommaviy @username kiriting.',menu());
+    if(step==='promo_bot'){
+      try{
+        const botInfo=await ctx.telegram.getChat('@'+handle);
+        if(botInfo.type!=='private')return ctx.reply('❌ Bot username’ini yuboring (kanal emas).',menu());
+        await Config.updateOne({bot_key:cloneKey},{$set:{promo_bot_username:handle}},{upsert:true});
+        return ctx.reply('✅ Postlar ostida ko‘rsatiladigan bot: @'+handle,menu());
+      }catch(e){return ctx.reply('❌ Bot username’i tekshirib bo‘lmadi: '+String(e.message||e).slice(0,140),menu());}
+    }
     if(step==='target'){
       try{
         const chat=await ctx.telegram.getChat('@'+handle);
