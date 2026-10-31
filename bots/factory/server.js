@@ -3067,7 +3067,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       if(!track)return ctx.reply('❌ Qo‘shiq topilmadi.');
       if(!/^https:\/\//.test(track.url))return ctx.reply('❌ MP3 manzili yaroqsiz.');
       try{
-        await ctx.replyWithChatAction('upload_voice');
+        await ctx.sendChatAction('upload_document').catch(()=>{});
         await ctx.replyWithAudio(track.url,{title:track.title,performer:track.artist,
           duration:Math.max(0,Math.round(track.durationMs/1000)),
           caption:'🎵 '+track.artist+' — '+track.title+(track.license?'\nLitsenziya: '+track.license:'')});
@@ -3322,6 +3322,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
         }
       } catch(e) {
         console.warn('External music search:',String(e.message||e).slice(0,150));
+        return ctx.reply('⚠️ MP3 katalogi ishlamayapti: '+String(e.message||e).slice(0,140));
       }
     }
     if (!matches.length) {
