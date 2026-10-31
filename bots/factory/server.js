@@ -10741,16 +10741,21 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
           {caption:branded}
         );
       } catch (botCopyError) {
-        // Bot API may not access a public source channel even though the
-        // authenticated Telegram user can read it. Reuse Telegram-side media
-        // via MTProto instead; the authenticated user must have posting rights
-        // in the destination channel. No media download occurs.
-        const target = cfg.target_username ? '@'+cfg.target_username : cfg.target_chat_id;
-        const copied = await client.sendMessage(target,{message});
+        // The user-session account may post only where it has its own write rights.
+        // Distinguish Bot API source access failures from MTProto destination rights.
+        const botErrorText=String(botCopyError.description||botCopyError.message||botCopyError).slice(0,120);
+        const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
+        let copied;
+        try {
+          copied=await client.sendMessage(target,{message});
+        } catch (userCopyError) {
+          const userErrorText=String(userCopyError.message||userCopyError).slice(0,130);
+          throw new Error('Bot API: '+botErrorText+'; user session: '+userErrorText+
+            '. Bot cannot copy source media and session cannot post to destination. Check access/rights.');
+        }
         try {
           await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
         } catch (editError) {
-          // Never leave an unbranded copy behind on a failed edit.
           await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
           throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
         }
