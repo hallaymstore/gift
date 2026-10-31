@@ -10678,7 +10678,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{status:'failed',error:String(error.message||error).slice(0,160)}});
     console.warn('Public source post failed', cfg.bot_key, message.id,
       String(error.message||error).slice(0,160));
-    return {status:'failed'};
+    return {status:'failed',error:String(error.message||error).slice(0,160)};
   }
 }
 
