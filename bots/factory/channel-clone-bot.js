@@ -13,7 +13,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
-    ['🧪 Ulanishni tekshirish'],
+    ['🧪 Ulanishni tekshirish','🎨 Post formati'],
     ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
   const load=()=>Config.findOne({bot_key:cloneKey}).lean();
@@ -67,6 +67,24 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       }
     }catch(e){return ctx.reply('❌ Tekshirish xatosi: '+String(e.message||e).slice(0,190),menu());}
     finally{if(client)await client.disconnect().catch(()=>{});}
+  });
+  bot.hears('🎨 Post formati',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const cfg=await load();
+    return ctx.reply('🎨 Post ko‘rinishi: '+((cfg?.clone_format||'branded')==='original'?'Original':'Branded')+
+      '\n\nOriginal: Telegram imkon berganda matn, custom emoji va formatlashni saqlaydi.\nBranded: bot va kanal nomini qo‘shadi; ayrim custom emoji formatlari yo‘qolishi mumkin.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✨ Original format','clone:format:original')],
+        [Markup.button.callback('📢 Branded format','clone:format:branded')]
+      ]));
+  });
+  bot.action(/^clone:format:(original|branded)$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    await Config.updateOne({bot_key:cloneKey},{$set:{clone_format:ctx.match[1]}},{upsert:true});
+    ctx.session.step=null;
+    return ctx.reply('✅ Post formati: '+ctx.match[1]+'. Bu sozlama faqat yangi nusxalanadigan postlarga qo‘llanadi.',menu());
   });
   bot.hears('📊 Holat',async ctx=>{
     if(!permitted(ctx))return;const c=await load();const sent=await Log.countDocuments({bot_key:cloneKey,status:'sent'});
@@ -160,7 +178,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     const handle=telegramHandle(ctx.message.text);
     if(!handle)return ctx.reply('❌ Ommaviy @username kiriting.',menu());
