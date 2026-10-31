@@ -143,39 +143,95 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{publish_interval_minutes:value,next_publish_at:value?new Date(Date.now()+value*60000):null}},{upsert:true});
     return ctx.reply('✅ Interval: '+(value?value+' daqiqa':'intervalsiz')+'. Tarixiy navbat shu tezlikda chiqariladi.',menu());
   });
+  // Avoid blocking Telegram webhook updates while MTProto statistics are read.
+  // Large ID batches caused FloodWait and 90-second webhook timeouts.
+  const topCalculating=new Set();
+  const TOP_CACHE_MS=15*60*1000;
+  function topOutput(rows,limit,channel,total){
+    const link=p=>channel?'https://t.me/'+channel+'/'+p.id:'Post ID: '+p.id;
+    const viewsTop=[...rows].sort((a,b)=>b.views-a.views).slice(0,limit);
+    const reactionsTop=[...rows].sort((a,b)=>b.reactions-a.reactions).slice(0,limit);
+    return '🏆 TOP '+limit+' (so‘nggi '+total+' ta yuborilgan post asosida)\n\n'+
+      '👁 KO‘RISH BO‘YICHA\n'+
+      viewsTop.map((p,i)=>(i+1)+'. '+p.views+' ko‘rish | '+p.reactions+' reaksiya\n'+link(p)).join('\n')+
+      '\n\n❤️ REAKSIYA BO‘YICHA\n'+
+      reactionsTop.map((p,i)=>(i+1)+'. '+p.reactions+' reaksiya | '+p.views+' ko‘rish\n'+link(p)).join('\n')+
+      '\n\nℹ️ Natija 15 daqiqagacha keshda saqlanadi.';
+  }
+  async function sendTopText(telegram,chatId,text){
+    // Telegram messages are capped at 4096 characters. Split only at line breaks.
+    while(text.length){
+      if(text.length<=3900){
+        await telegram.sendMessage(chatId,text,{disable_web_page_preview:true});
+        break;
+      }
+      const at=text.lastIndexOf('\n',3900);
+      const cut=at>500?at:3900;
+      await telegram.sendMessage(chatId,text.slice(0,cut),{disable_web_page_preview:true});
+      text=text.slice(cut).trimStart();
+    }
+  }
   async function showTop(ctx,limit){
     if(!permitted(ctx))return;
+    const route=routeKey(ctx);
     const cfg=await load(ctx);
     if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va sessiya sozlanmagan.',menu());
-    const logs=await Log.find({bot_key:routeKey(ctx),status:'sent',target_message_id:{$gt:0}}).sort({createdAt:-1}).limit(1000).lean();
-    if(!logs.length)return ctx.reply('📭 Hali yuborilgan postlar yo‘q.',menu());
-    let client;
-    try{
-      const {TelegramClient}=require('teleproto');
-      const {StringSession}=require('teleproto/sessions');
-      client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
-      await client.connect();
-      const peer=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
-      const rows=[];
-      for(let i=0;i<logs.length;i+=100){
-        const chunk=logs.slice(i,i+100),ids=chunk.map(x=>Number(x.target_message_id));
+    const chatId=ctx.chat.id;
+    const channel=String(cfg.target_username||'').replace(/^@/,'');
+    const cache=cfg.top_metrics_cache;
+    if(cache?.rows?.length&&new Date(cache.at).getTime()+TOP_CACHE_MS>Date.now()&&cache.channel===channel){
+      return sendTopText(ctx.telegram,chatId,topOutput(cache.rows,limit,channel,cache.total||cache.rows.length));
+    }
+    if(topCalculating.has(route)){
+      return ctx.reply('🔄 Ushbu kanal reytingi allaqachon hisoblanmoqda. Natija tayyor bo‘lgach shu chatga yuboriladi.',menu());
+    }
+    // Acknowledge immediately so webhook does not wait for Telegram FloodWait.
+    await ctx.reply('🔎 TOP '+limit+' statistikasi hisoblanmoqda. Shu paytda boshqa menyularni ishlatishingiz mumkin.',menu());
+    topCalculating.add(route);
+    const telegram=ctx.telegram;
+    void (async()=>{
+      let client;
+      try{
+        // A small batch avoids multi-minute Telegram MTProto FloodWait.
+        const logs=await Log.find({bot_key:route,status:'sent',target_message_id:{$gt:0}})
+          .sort({createdAt:-1}).limit(60).select('target_message_id').lean();
+        if(!logs.length){
+          await telegram.sendMessage(chatId,'📭 Hali yuborilgan postlar yo‘q.');
+          return;
+        }
+        const {TelegramClient}=require('teleproto');
+        const {StringSession}=require('teleproto/sessions');
+        client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
+          Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:2});
+        await client.connect();
+        const peer=channel?'@'+channel:cfg.target_chat_id;
+        const ids=[...new Set(logs.map(x=>Number(x.target_message_id)).filter(x=>x>0))];
         const messages=await client.getMessages(peer,{ids});
+        const rows=[];
         for(const m of Array.isArray(messages)?messages:[messages]){
           if(!m?.id)continue;
-          const reactions=(m.reactions?.results||[]).reduce((n,r)=>n+Number(r.count||0),0);
+          const reactions=(m.reactions?.results||[]).reduce((n,p)=>n+Number(p.count||0),0);
           rows.push({id:Number(m.id),views:Number(m.views||0),reactions});
         }
+        if(!rows.length){
+          await telegram.sendMessage(chatId,'⚠️ Yuborilgan postlar bor, lekin ularning ko‘rish va reaksiya statistikasi Telegram sessiyasiga ko‘rinmayapti.');
+          return;
+        }
+        await Config.updateOne({bot_key:route},{$set:{
+          top_metrics_cache:{at:new Date(),rows,channel,total:logs.length}
+        }});
+        await sendTopText(telegram,chatId,topOutput(rows,limit,channel,logs.length));
+      }catch(e){
+        const reason=String(e.message||e).slice(0,170);
+        console.warn('[clone top] metrics unavailable',route,reason);
+        await telegram.sendMessage(chatId,
+          '⚠️ TOP statistikasini hozir olish imkoni yo‘q: '+reason+
+          '\nTelegram FloodWait qo‘ygan bo‘lsa, birozdan so‘ng qayta urinib ko‘ring.').catch(()=>{});
+      }finally{
+        topCalculating.delete(route);
+        if(client)await client.disconnect().catch(()=>{});
       }
-      const channel=String(cfg.target_username||'').replace(/^@/,'');
-      const link=p=>channel?'https://t.me/'+channel+'/'+p.id:'Post ID: '+p.id;
-      const viewsTop=[...rows].sort((a,b)=>b.views-a.views).slice(0,limit);
-      const reactionsTop=[...rows].sort((a,b)=>b.reactions-a.reactions).slice(0,limit);
-      const output='🏆 TOP '+limit+' POSTLAR (oxirgi '+logs.length+' ta jurnal)\n\n'
-        +'👁 KO‘RISH BO‘YICHA\n'+viewsTop.map((p,i)=>(i+1)+'. '+p.views+' ko‘rish | '+p.reactions+' reaksiya\n'+link(p)).join('\n')
-        +'\n\n❤️ REAKSIYA BO‘YICHA\n'+reactionsTop.map((p,i)=>(i+1)+'. '+p.reactions+' reaksiya | '+p.views+' ko‘rish\n'+link(p)).join('\n');
-      for(let i=0;i<output.length;i+=3700)await ctx.reply(output.slice(i,i+3700),{disable_web_page_preview:true});
-    }catch(e){await ctx.reply('⚠️ TOP hisoblash xatosi: '+String(e.message||e).slice(0,160),menu());}
-    finally{if(client)await client.disconnect().catch(()=>{});}
+    })();
   }
   bot.hears('🏆 TOP 10',ctx=>showTop(ctx,10));
   bot.hears('🏆 TOP 20',ctx=>showTop(ctx,20));
