@@ -71,6 +71,13 @@ async function scanLive({client,cfg,deliver,log=console}) {
   if(!handle)return;
   const entity='@'+handle;
   const cursor=Number(cfg.source_cursor||0);
+  // With a configured route interval, old and new posts share ONE delivery
+  // schedule. Do not relay live posts ahead of the historic backlog.
+  const interval=Number(cfg.publish_interval_minutes||0);
+  if(cursor && interval>0){
+    if(cfg.history_enabled && cfg.history_completed!==true)return;
+    if(cfg.next_publish_at && new Date(cfg.next_publish_at).getTime()>Date.now())return;
+  }
   const messages=cursor
     ? await client.getMessages(entity,{limit:LIVE_BATCH_SIZE,minId:cursor,reverse:true})
     : await client.getMessages(entity,{limit:1});
@@ -97,6 +104,11 @@ async function scanLive({client,cfg,deliver,log=console}) {
     }
     await deliver({type:'cursor',cfg,cursor:Number(message.id),result});
     cfg.source_cursor=Number(message.id);
+    if(result?.status==='sent' && interval>0){
+      // Only one successful live post at a time for interval routes.
+      cfg.next_publish_at=new Date(Date.now()+interval*60000);
+      break;
+    }
   }
 }
 async function scanHistory({client,cfg,deliver,log=console}){
