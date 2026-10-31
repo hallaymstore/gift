@@ -2096,10 +2096,15 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       return ctx.reply('⚠️ Tarixiy postlarni olish uchun user sessiyali public kanal rejimi kerak.',relayMenu());
     if(!sessionConfigured())
       return ctx.reply('❌ Telegram akkaunt sessiyasi serverda sozlanmagan.',relayMenu());
+    if(cfg.history_enabled && !cfg.history_completed) {
+      return ctx.reply('🔄 Tarixiy sinxronlash allaqachon davom etmoqda. Bir xil post qayta yuborilmaydi.',relayMenu());
+    }
+    // Re-scan from the oldest post, but NEVER delete the persistent relay log.
+    // The unique (bot_key, source_key) index prevents already-sent posts from
+    // being copied twice, even across process restarts.
     await ChannelRelayConfig.updateOne({bot_key:config.key},{
       $set:{history_enabled:true,history_completed:false,history_cursor:0,
-        history_ceiling:0,history_sent:0,history_skipped:0,history_last_error:'',
-        auto_enabled:true}
+        history_ceiling:0,history_last_error:'',auto_enabled:true}
     });
     // Trigger next history scan immediately instead of waiting a full minute.
     if(publicSourceWatcher?.scanHistory)void publicSourceWatcher.scanHistory();
