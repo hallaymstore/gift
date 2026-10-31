@@ -1845,6 +1845,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     ['📢 Joylash kanalini ulash', '🤖 Ulangan botlar'],
     ['📥 Forward → kanal', '📡 Manba kanalni kuzatish'],
     ['📚 Eski postlarni sinxronlash', '⏸ Tarixni to‘xtatish'],
+    ['🛠 Kanal postlarini tuzatish'],
     ['⛔ Avto kuzatuvni o‘chirish', '📋 Postlash holati'],
     ['✅ Postlashni yakunlash', '🏠 Bosh menyu']
   ]).resize();
@@ -2087,6 +2088,74 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
       {$set:{auto_enabled:false,history_enabled:false,source_chat_id:'',source_username:'',source_mode:'bot_api',source_cursor:0}});
     return ctx.reply('⛔ Avtomatik kuzatuv o‘chirildi. Qo‘lda forward davom etadi.', relayMenu());
   });
+  // Existing channel posts: edit in place, never re-send; tracked by relay logs.
+  let relayCaptionRepairRunning = false;
+  bot.hears('🛠 Kanal postlarini tuzatish', async ctx => {
+    if (!isAdmin(ctx.from?.id) || ctx.chat?.type !== 'private') return;
+    if (relayCaptionRepairRunning) return ctx.reply('🔄 Kanal postlari allaqachon tahrirlanmoqda.', relayMenu());
+    const cfg = await relaySettings();
+    if (!cfg?.target_chat_id) return ctx.reply('❌ Avval joylash kanalini ulang.',relayMenu());
+    if (!sessionConfigured()) return ctx.reply('❌ Telegram akkaunt sessiyasi sozlanmagan.',relayMenu());
+    relayCaptionRepairRunning = true;
+    await ctx.reply('🛠 Avvalgi postlar mavjud joyida tahrirlanadi; qayta yuborilmaydi. Natija jarayon oxirida chiqadi.');
+    void (async () => {
+      let client;
+      const counts={checked:0,edited:0,unchanged:0,failed:0};
+      try {
+        const {TelegramClient}=require('teleproto');
+        const {StringSession}=require('teleproto/sessions');
+        client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
+          Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
+        await client.connect();
+        const channel=cfg.target_username ? '@'+cfg.target_username : cfg.target_chat_id;
+        const botApi=ctx.telegram;
+        let lastId=null;
+        while(true) {
+          const query={bot_key:config.key,status:'sent',target_message_id:{$gt:0}};
+          if(lastId) query._id={$gt:lastId};
+          const logs=await ChannelRelayLog.find(query).sort({_id:1}).limit(50).lean();
+          if(!logs.length) break;
+          for (const item of logs) {
+            lastId=item._id;
+            counts.checked++;
+            try {
+              const m=await client.getMessages(channel,{ids:Number(item.target_message_id)});
+              const post=Array.isArray(m)?m[0]:m;
+              if(!post){counts.failed++;continue;}
+              const prior=String(post.message||'');
+              const next=prior.split('\n').filter(line=>!/^\\s*(?:📌\\s*)?Manba\\s*:/iu.test(line))
+                .join('\n').replace(/\n{3,}/g,'\n\n').trim();
+              if(next===prior.trim()){counts.unchanged++;continue;}
+              if(!next){counts.failed++;continue;}
+              try {
+                if(post.media) await botApi.editMessageCaption(cfg.target_chat_id,Number(item.target_message_id),undefined,next);
+                else await botApi.editMessageText(cfg.target_chat_id,Number(item.target_message_id),undefined,next,
+                  {disable_web_page_preview:true});
+              }catch(botError) {
+                // Posts authored by the linked user account are edited by that account.
+                await client.editMessage(channel,{message:Number(item.target_message_id),text:next});
+              }
+              counts.edited++;
+            }catch(e){
+              counts.failed++;
+              console.warn('relay caption repair failed',config.key,item.target_message_id,String(e.message||e).slice(0,180));
+            }
+            await new Promise(resolve=>setTimeout(resolve,350));
+          }
+        }
+        await ctx.reply('✅ Kanal postlarini tekshirish yakunlandi.\n'
+          +'🔎 Tekshirildi: '+counts.checked+'\n✏️ Tahrirlandi: '+counts.edited
+          +'\n✅ O‘zgartirish kerak emas: '+counts.unchanged+'\n⚠️ Xatolar: '+counts.failed,relayMenu());
+      }catch(e){
+        console.error('relay caption repair error',String(e.message||e));
+        await ctx.reply('❌ Tahrirlash xatosi: '+String(e.message||e).slice(0,160),relayMenu()).catch(()=>{});
+      }finally{
+        if(client)await client.disconnect().catch(()=>{});
+        relayCaptionRepairRunning=false;
+      }
+    })();
+  });
+
   bot.hears('📚 Eski postlarni sinxronlash', async ctx => {
     if(!isAdmin(ctx.from?.id) || ctx.chat?.type!=='private') return;
     const cfg=await relaySettings();
