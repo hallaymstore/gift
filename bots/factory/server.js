@@ -11,6 +11,7 @@ const { spawn } = require('child_process');
 const mongoose = require('mongoose');
 const { Telegraf, Markup, session, Telegram } = require('telegraf');
 const { guessTitle, brandedDelivery } = require('./auto-branding');
+const { copyOriginalBroadcast, originalCopyOptions } = require('./broadcast-original');
 const { importedMeta, extractPostCode } = require('./bulk-import');
 const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = require('./mini-games-core');
 const { attachMiniGames } = require('./mini-games-engine');
@@ -1643,18 +1644,12 @@ function createSharedUtils(bot, config, adminIds) {
     let failed = 0;
 
     await ctx.reply(`📢 Broadcast boshlandi. Jami foydalanuvchi: ${users.length} ta`);
-    const broadcastSource = config.engine === 'content' ? extractStoredMessage(ctx, config.key) : null;
-    const branded = broadcastSource
-      ? brandedDelivery(broadcastSource, ctx.botInfo?.username || config.telegramUsername, config)
-      : null;
+    // Broadcast is the administrator's own message, NOT a content catalog item.
+    // No brandedDelivery(): retain original paragraphs, links, emoji and media.
     for (const user of users) {
       try {
-        if (branded?.type === 'text') {
-          await ctx.telegram.sendMessage(user.user_id, branded.text);
-        } else {
-          await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, ctx.message.message_id,
-            branded?.type === 'caption' ? { caption: branded.caption } : {});
-        }
+        await copyOriginalBroadcast(ctx.telegram, user.user_id,
+          ctx.chat.id, ctx.message.message_id, ctx.message);
         success += 1;
         await sleep(45);
       } catch (error) {
@@ -9511,7 +9506,8 @@ async function buildGlobalBroadcastPayload(ctx, sourceBot) {
     text: msg?.text || '',
     entities: msg?.entities || undefined,
     caption: msg?.caption || undefined,
-    caption_entities: msg?.caption_entities || undefined
+    caption_entities: msg?.caption_entities || undefined,
+    reply_markup: originalCopyOptions(msg).reply_markup
   };
 
   if (payload.file_id && sourceBot?.telegram?.getFileLink) {
@@ -9530,7 +9526,8 @@ async function buildGlobalBroadcastPayload(ctx, sourceBot) {
 function captionExtraFromPayload(payload) {
   return {
     caption: payload.caption || undefined,
-    caption_entities: payload.caption_entities || undefined
+    caption_entities: payload.caption_entities || undefined,
+    reply_markup: payload.reply_markup || undefined
   };
 }
 
@@ -9538,24 +9535,24 @@ async function sendPayloadWithBot(targetBot, chatId, payload) {
   if (!payload || payload.type === 'unknown') throw new Error('Bu turdagi xabar broadcast uchun qo‘llab-quvvatlanmadi. Matn, rasm, video, fayl yoki forward yuboring.');
 
   if (payload.type === 'text') {
-    return targetBot.telegram.sendMessage(chatId, payload.text || ' ', { entities: payload.entities || undefined });
+    return targetBot.telegram.sendMessage(chatId, payload.text || ' ', { entities: payload.entities || undefined, reply_markup: payload.reply_markup || undefined });
   }
 
   const extra = captionExtraFromPayload(payload);
-  const urlInput = payload.file_url ? { url: payload.file_url, filename: payload.file_name || undefined } : payload.file_id;
-  if (!urlInput) {
-    if (payload.caption) return targetBot.telegram.sendMessage(chatId, payload.caption, { entities: payload.caption_entities || undefined });
-    throw new Error('Media faylni boshqa bot orqali yuborish uchun vaqtinchalik Telegram file link olinmadi. Qayta urinib ko‘ring.');
-  }
+  // File IDs belong to the source bot; they cannot be reused by another bot.
+  // Never downgrade media to a caption-only text message on a failed lookup.
+  if (!payload.file_url)
+    throw new Error('Media uchun asl botning fayl havolasi olinmadi; original reklama o‘zgartirilmasligi uchun yuborilmadi.');
+  const urlInput = { url: payload.file_url, filename: payload.file_name || undefined };
 
-  if (payload.type === 'photo') return targetBot.telegram.sendPhoto(chatId, payload.file_url || payload.file_id, extra);
+  if (payload.type === 'photo') return targetBot.telegram.sendPhoto(chatId, payload.file_url, extra);
   if (payload.type === 'video') return targetBot.telegram.sendVideo(chatId, urlInput, extra);
   if (payload.type === 'animation') return targetBot.telegram.sendAnimation(chatId, urlInput, extra);
   if (payload.type === 'document') return targetBot.telegram.sendDocument(chatId, urlInput, extra);
   if (payload.type === 'audio') return targetBot.telegram.sendAudio(chatId, urlInput, extra);
-  if (payload.type === 'voice') return targetBot.telegram.sendVoice(chatId, payload.file_url || payload.file_id, extra);
-  if (payload.type === 'sticker') return targetBot.telegram.sendSticker(chatId, payload.file_url || payload.file_id);
-  if (payload.type === 'video_note') return targetBot.telegram.sendVideoNote(chatId, payload.file_url || payload.file_id);
+  if (payload.type === 'voice') return targetBot.telegram.sendVoice(chatId, payload.file_url, extra);
+  if (payload.type === 'sticker') return targetBot.telegram.sendSticker(chatId, payload.file_url);
+  if (payload.type === 'video_note') return targetBot.telegram.sendVideoNote(chatId, payload.file_url);
 
   throw new Error(`Broadcast uchun qo‘llab-quvvatlanmagan xabar turi: ${payload.type}`);
 }
@@ -9591,7 +9588,7 @@ async function sendBroadcastToFactoryUsers(ctx, payload, sourceMessageId) {
   for (const user of users) {
     try {
       // FactoryBot o‘z foydalanuvchilariga aynan asl xabarni copy qiladi.
-      await ctx.telegram.copyMessage(user.user_id, ctx.chat.id, sourceMessageId);
+      await copyOriginalBroadcast(ctx.telegram, user.user_id, ctx.chat.id, sourceMessageId, ctx.message);
       stats.success += 1;
       await sleep(35);
     } catch (error) {
