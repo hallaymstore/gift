@@ -1,8 +1,8 @@
 'use strict';
 
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
-const LIVE_POLL_MS = 30000;
-const HISTORY_POLL_MS = 30000;
+const LIVE_POLL_MS = 12000;
+const HISTORY_POLL_MS = 20000;
 const LIVE_BATCH_SIZE = 20;
 const HISTORY_BATCH_SIZE = 3;
 
@@ -60,8 +60,8 @@ function orderedIds(messages) {
 }
 function canRepublish(message) {
   if(message?.action || (!message?.media && !String(message?.message||'').trim())) return false;
-  return !isProtected(message) && mediaKind(message)!=='unsupported' &&
-    true;
+  // Server-side Bot API copy can handle media larger than fallback upload limits.
+  return !isProtected(message) && mediaKind(message)!=='unsupported';
 }
 
 // Track independently: (1) the newest post ID already seen, and
@@ -205,7 +205,11 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
       for(const cfg of nextBatch(sources,'live')){
         if(stopped)break;
         try{await scanLive({client,cfg,deliver,log});}
-        catch(e){log.warn('[channel sync] live failed',cfg.bot_key,String(e.message||e).slice(0,160));}
+        catch(e){
+          const reason=String(e.message||e).slice(0,160);
+          log.warn('[channel sync] live failed',cfg.bot_key,reason);
+          await deliver({type:'live_error',cfg,error:reason}).catch(()=>{});
+        }
       }
     }catch(e){log.warn('[channel sync] source listing failed',String(e.message||e).slice(0,160));}
     finally{liveRunning=false;}
