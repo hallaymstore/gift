@@ -398,6 +398,10 @@ const relayConfigSchema = new mongoose.Schema({
   history_last_error: String,
   history_retry_at: Date,
   history_error_count: {type:Number,default:0},
+  protected_skipped: {type:Number,default:0},
+  protected_last_post_id: Number,
+  protected_last_at: Date,
+  protected_warning: String,
   top_metrics_cache: {type:mongoose.Schema.Types.Mixed,default:null},
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   promo_bot_username: {type:String,default:''},
@@ -10870,6 +10874,33 @@ let publicSourceWatcher = null;
 async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind,phase,result,ceiling,error}) {
   const selector={bot_key:cfg.bot_key,source_username:cfg.source_username,
     source_mode:'mtproto',auto_enabled:true};
+  async function registerProtectedSkip({claimed=false,sourceKey}={}){
+    const name=String(sourceUsername||cfg.source_username||'').toLowerCase();
+    const key=sourceKey||('public:'+name+':'+Number(message?.id)+':target:'+String(cfg.target_chat_id));
+    let inserted=claimed;
+    if(!claimed){
+      try{
+        await ChannelRelayLog.create({bot_key:cfg.bot_key,source_key:key,
+          target_chat_id:String(cfg.target_chat_id),status:'protected',
+          error:'Manba kanalida kontentni nusxalash cheklangan'});
+        inserted=true;
+      }catch(e){
+        if(e.code!==11000)throw e;
+      }
+    }
+    if(inserted){
+      await ChannelRelayConfig.updateOne(selector,{
+        $inc:{protected_skipped:1},
+        $set:{
+          protected_last_post_id:Number(message?.id)||0,
+          protected_last_at:new Date(),
+          protected_warning:'🔒 Manba kanal egasi nusxalashni cheklagan. Asl fayl yoki egasining ruxsati kerak.'
+        }
+      });
+    }
+    return {status:'protected'};
+  }
+  if(type==='protected')return registerProtectedSkip();
   if(type==='seed'){
     const set={source_cursor:Number(cursor)};
     if(cfg.history_enabled && !Number(cfg.history_ceiling))set.history_ceiling=Number(cursor);
@@ -10950,6 +10981,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     if (error.code !== 11000) throw error;
     const prior = await ChannelRelayLog.findOne({bot_key:cfg.bot_key,source_key:sourceKey}).lean();
     if (prior?.status === 'sent') return {status:'duplicate'};
+    if (prior?.status === 'protected') return {status:'protected'};
     // Do not hide previous failures as successful duplicates.
     if (prior?.status === 'failed') {
       const claim = await ChannelRelayLog.updateOne(
@@ -11001,7 +11033,12 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       } catch (botCopyError) {
         // The user-session account may post only where it has its own write rights.
         // Distinguish Bot API source access failures from MTProto destination rights.
-        const botErrorText=String(botCopyError.description||botCopyError.message||botCopyError).slice(0,120);
+        const botErrorText=String(botCopyError.description||botCopyError.message||botCopyError).slice(0,160);
+        if(/CHAT_FORWARDS_RESTRICTED|protected content|message is protected|copying is not allowed|forwards? (?:are |is )?(?:restricted|prohibited)/i.test(botErrorText)){
+          // Respect the source owner's no-forwarding protection; do not
+          // use MTProto re-send or media downloading as a bypass.
+          throw new Error('SOURCE_PROTECTED: manba postini nusxalash cheklangan');
+        }
         const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
         let copied;
         try {
@@ -11038,10 +11075,17 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
     return {status:'sent'};
   } catch(error) {
+    const reason=String(error.description||error.message||error);
+    if(/SOURCE_PROTECTED|CHAT_FORWARDS_RESTRICTED|protected content|message is protected/i.test(reason)){
+      const changed=await ChannelRelayLog.updateOne(
+        {bot_key:cfg.bot_key,source_key:sourceKey,status:{$ne:'protected'}},
+        {$set:{status:'protected',error:'Manba postini nusxalash cheklangan'}}).catch(()=>null);
+      return registerProtectedSkip({claimed:Boolean(changed?.modifiedCount),sourceKey});
+    }
     // Do not blindly retry on ambiguous network failures; a duplicate channel
     // post is worse than a logged failure. Admin can manually retry via forward.
     if (created) await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
-      {$set:{status:'failed',error:String(error.message||error).slice(0,160)}});
+      {$set:{status:'failed',error:reason.slice(0,160)}});
     console.warn('Public source post failed', cfg.bot_key, message.id,
       String(error.message||error).slice(0,160));
     return {status:'failed',error:String(error.message||error).slice(0,160)};
