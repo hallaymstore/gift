@@ -46,7 +46,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   }
   const routeLabel=(c,i)=>String(c.route_title||(c.bot_key===cloneKey?'Asosiy kanal':'Yo‘nalish '+i)).slice(0,40);
   const load=ctx=>Config.findOne({bot_key:routeKey(ctx)}).lean();
-  const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning.',menu());
+  const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning. 🔒 Himoyalangan postlar o‘tkazib yuboriladi; 📊 Holat bo‘limida hisobini ko‘rasiz.',menu());
   bot.start(async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.');});
   bot.command('cancel',async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return ctx.reply('✅ Amal bekor qilindi.',menu());});
   bot.hears('➕ Yangi yo‘nalish',async ctx=>{
@@ -108,6 +108,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\n'+(r.auto_enabled?'🟢 Ishlamoqda':'⏸ To‘xtagan')+
       ' · ⏱ '+Number(r.publish_interval_minutes||0)+' daq'+
       (r.promo_bot_username?' · 🤖 @'+r.promo_bot_username:'')+
+      (r.protected_skipped?'\n🔒 Himoyalangan, o‘tkazib yuborilgan: '+Number(r.protected_skipped):'')+
       (r.history_last_error?'\n⚠️ '+String(r.history_last_error).slice(0,100):''));
     return ctx.reply('📊 JAMI YO‘NALISHLAR: '+configs.length+
       '\n🟢 Faol: '+configs.filter(x=>x.auto_enabled).length+
@@ -383,11 +384,15 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       const messages=await client.getMessages('@'+c.source_username,{limit:20});
       const sample=messages.find(x=>x && !x.action && (x.media||x.message));
       if(!sample)return ctx.reply('⚠️ Manbadan nusxalanadigan post topilmadi.',menu());
+      if(sample.noforwards||sample.noForwards||sample.chat?.noforwards||sample.chat?.noForwards)
+        return ctx.reply('🔒 Manba kanal nusxalashdan himoyalangan. Ushbu postni avtomatik uzatish mumkin emas. Kanal egasidan ruxsat yoki asl fayllarni so‘rang.',menu());
       try {
         const test=await ctx.telegram.copyMessage(ctx.from.id,'@'+c.source_username,Number(sample.id),
           {caption:'🧪 Kanal klonlash sinovi (kanalingizga yuborilmadi)'});
         await ctx.reply('✅ Bot API manba postni nusxalashga ruxsat oldi. Maqsad botining admin huquqi ham bor. Sinov xabari: '+test.message_id,menu());
       } catch(e) {
+        if(/CHAT_FORWARDS_RESTRICTED|protected content|message is protected/i.test(String(e.description||e.message||e)))
+          return ctx.reply('🔒 Telegram nusxalashni rad etdi: manba egasi kontentni himoyalagan. Asl faylni yoki manba egasining ruxsatini oling.',menu());
         await ctx.reply('⚠️ Telegram akkaunti manbani o‘qiydi, lekin sizning bot Bot API orqali uni nusxalay olmaydi.\nSabab: '+String(e.description||e.message||e).slice(0,190)+
           '\n\nBunday manba uchun akkauntning maqsad kanalga postlash huquqi yoki ruxsatli boshqa uzatish mexanizmi kerak.',menu());
       }
@@ -420,6 +425,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\n⏱ Interval: '+humanInterval(c?.publish_interval_minutes)+
       (c?.next_publish_at&&Number(c.publish_interval_minutes)>0?'\n🕒 Navbatdagi vaqt (server): '+new Date(c.next_publish_at).toLocaleString('uz-UZ',{timeZone:'Asia/Tashkent'}):'')+
       '\nYuborilgan: '+sent+
+      '\n🔒 Himoyalangan postlar: '+Number(c?.protected_skipped||0)+
+      (c?.protected_last_at?'\n🔒 Oxirgi himoyalangan ID: '+Number(c?.protected_last_post_id||0):'')+
+      (c?.protected_warning?'\nℹ️ '+String(c.protected_warning).slice(0,190):'')+
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
       (c?.history_last_error?'\n⚠️ '+c.history_last_error:''),menu());
