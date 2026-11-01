@@ -17,8 +17,10 @@ function normalizePublicUsername(value) {
   return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(name) ? name : '';
 }
 function isProtected(message) {
+  // Telegram MTProto message and channel flag: noforwards.
   return Boolean(message?.noforwards || message?.noForwards ||
-    message?.chat?.noforwards || message?.chat?.noForwards);
+    message?.chat?.noforwards || message?.chat?.noForwards ||
+    message?.peer?.noforwards || message?.peer?.noForwards);
 }
 function mediaKind(message) {
   const media = message?.media;
@@ -93,7 +95,10 @@ async function scanLive({client,cfg,deliver,log=console}) {
   for(const message of ordered){
     if(Number(message.id)<=Number(cfg.source_cursor||0))continue;
     let result={status:'skipped'};
-    if(canRepublish(message)){
+    if(isProtected(message)){
+      result=await deliver({type:'protected',cfg,message,sourceUsername:handle,phase:'live'})
+        ||{status:'protected'};
+    }else if(canRepublish(message)){
       result=await deliver({type:'post',cfg,message,client,
         sourceUsername:handle,kind:mediaKind(message),phase:'live'})||result;
     }
@@ -137,11 +142,13 @@ async function scanHistory({client,cfg,deliver,log=console}){
     if(message.id<=before)continue;
     if(message.id>ceiling){ended=true;break;}
     let result={status:'skipped'};
-    if(canRepublish(message)){
+    if(isProtected(message)){
+      result=await deliver({type:'protected',cfg,message,sourceUsername:handle,phase:'history'})
+        ||{status:'protected'};
+    }else if(canRepublish(message)){
       result=await deliver({type:'post',cfg,message,client,
         sourceUsername:handle,kind:mediaKind(message),phase:'history'})||result;
-    }else log.warn('[channel sync] protected, unsupported or large historic item skipped',
-      handle,message.id);
+    }else log.warn('[channel sync] unsupported historic item skipped',handle,message.id);
     if(result?.status==='failed') {
       throw new Error('History post '+message.id+' could not be relayed: '+String(result.error||'see server logs'));
     }
