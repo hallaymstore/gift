@@ -1,0 +1,25 @@
+name: Broadcast original checks
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/server.js'
+      - 'bots/factory/broadcast-original.js'
+      - 'bots/factory/broadcast-original.test.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/broadcast-original-check.yml'
+  workflow_dispatch:
+
+jobs:
+  syntax-and-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check Factory JS syntax
+        run: |
+          node --check bots/factory/server.js
+          node --check bots/factory/broadcast-original.js
+      - name: Test broadcast fidelity
+        run: node --test bots/factory/broadcast-original.test.js
