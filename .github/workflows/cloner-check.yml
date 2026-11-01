@@ -1,0 +1,27 @@
+name: Cloner checks
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/public-channel-watcher.js'
+      - 'bots/factory/channel-history-sync.test.js'
+      - 'bots/factory/public-channel-watcher.test.js'
+      - '.github/workflows/cloner-check.yml'
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check
+        run: |
+          node --check bots/factory/channel-clone-bot.js
+          node --check bots/factory/public-channel-watcher.js
+          node --check bots/factory/server.js
+      - name: Regression tests for channel sync
+        run: |
+          node --test bots/factory/channel-history-sync.test.js bots/factory/public-channel-watcher.test.js

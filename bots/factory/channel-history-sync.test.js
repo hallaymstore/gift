@@ -75,9 +75,9 @@ test('history does not run without an explicit enabled setting',async()=>{
  await scanHistory(d);
  assert.equal(d.delivered.length,0);
 });
-test('protected, unsupported, oversize or empty post is not republished',()=>{
+test('protected, unsupported or empty post is not republished; large unprotected media can use server-side copy',()=>{
  assert.equal(canRepublish({message:'News',noforwards:true}),false);
- assert.equal(canRepublish({media:{document:{mimeType:'video/mp4',size:20*1024*1024}}}),false);
+ assert.equal(canRepublish({media:{document:{mimeType:'video/mp4',size:20*1024*1024}}}),true);
  assert.equal(canRepublish({media:{className:'MessageMediaUnknown'}}),false);
  assert.equal(canRepublish({action:{type:'MessageActionPinMessage'}}),false);
  assert.equal(canRepublish({message:'   '}),false);
