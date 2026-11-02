@@ -2,6 +2,7 @@
 const {Telegraf,Markup,session}=require('telegraf');
 const {telegramChatRef,telegramHandle}=require('./channel-publisher');
 const {countSourcePosts}=require('./channel-clone-count');
+const {describeRelayError}=require('./channel-clone-errors');
 const {contactUsername,adFooter,refreshClonePostText}=require('./channel-clone-branding');
 
 function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
@@ -33,6 +34,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
     ['🔄 Eski postlarni qayta tekshirish','📊 Holat'],
+    ['🔁 Xatoni qayta sinash'],
     ['🔢 Manba postlarini sanash','⏱ Postlash intervali'],
     ['🏆 TOP 10','🏆 TOP 20'],
     ['🧪 Ulanishni tekshirish','🎨 Post formati'],
@@ -112,7 +114,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       (r.promo_bot_username?' · 🤖 @'+r.promo_bot_username:'')+
        (r.promo_admin_username?' · 📩 @'+r.promo_admin_username:'')+
       (r.protected_skipped?'\n🔒 Himoyalangan, o‘tkazib yuborilgan: '+Number(r.protected_skipped):'')+
-      (r.history_last_error?'\n⚠️ '+String(r.history_last_error).slice(0,100):''));
+      (r.history_last_error?'\n⚠️ '+describeRelayError(r.history_last_error,100):''));
     return ctx.reply('📊 JAMI YO‘NALISHLAR: '+configs.length+
       '\n🟢 Faol: '+configs.filter(x=>x.auto_enabled).length+
       '\n⏸ To‘xtagan: '+configs.filter(x=>!x.auto_enabled).length+'\n\n'+lines.join('\n\n'),menu());
@@ -445,6 +447,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   });
   bot.hears('📊 Holat',async ctx=>{
     if(!permitted(ctx))return;const c=await load(ctx);const sent=await Log.countDocuments({bot_key:routeKey(ctx),target_chat_id:c?.target_chat_id,status:'sent'});
+    const retryAt=c?.history_retry_at?new Date(c.history_retry_at).getTime():0;
+    const retryMinutes=retryAt>Date.now()?Math.ceil((retryAt-Date.now())/60000):0;
     return ctx.reply('📊 CHANNEL CLONE\nYo‘nalish: '+(c?.route_title||'Asosiy')+'\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
       '\nKanal: '+(c?.target_username?'@'+c.target_username:'yo‘q')+
       '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+
@@ -459,7 +463,29 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
        (c?.promo_admin_username?'\n📩 Reklama admini: @'+c.promo_admin_username:'')+
        '\n🎨 Post formati: '+(c?.clone_format||'branded')+
        (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
-      (c?.history_last_error?'\n⚠️ '+c.history_last_error:''),menu());
+      (c?.history_last_error?'\n⚠️ '+describeRelayError(c.history_last_error,190):'')+
+      (retryMinutes?'\n⏳ Qayta urinish: taxminan '+retryMinutes+' daqiqadan keyin':'')+
+      (c?.history_error_count?'\n🔄 Ketma-ket xatolar: '+Number(c.history_error_count):'')+
+      (c?.history_enabled&&!c?.history_completed?'\n📚 Tarix sinxroni davom etmoqda':'')+
+      (retryMinutes?'\n💡 Hozir sinash: 🔁 Xatoni qayta sinash':'') ,menu());
+  });
+  bot.hears('🔁 Xatoni qayta sinash',async ctx=>{
+    if(!permitted(ctx))return;
+    const key=routeKey(ctx);
+    const current=await load(ctx);
+    if(!current?.source_username||!current?.target_chat_id)
+      return ctx.reply('❌ Bu yo‘nalish uchun manba va maqsad kanal belgilanmagan.',menu());
+    if(!current.auto_enabled)
+      return ctx.reply('⏸ Yo‘nalish to‘xtatilgan. Avval ▶️ Sinxronlash ni bosing.',menu());
+    if(!current.history_retry_at&&!current.history_last_error)
+      return ctx.reply('✅ Hozircha xatolik yo‘q, nazorat odatdagidek davom etmoqda.',menu());
+    await Config.updateOne({bot_key:key,auto_enabled:true},{$set:{
+      history_retry_at:null,history_error_count:0,history_last_error:''
+    }});
+    return ctx.reply('✅ '+(current.route_title||'Tanlangan yo‘nalish')+
+      ' qayta urinish navbatiga qo‘yildi.\n📚 Tarixiy ID: '+Number(current.history_cursor||0)+
+      '\n⚠️ Oldingi muvaffaqiyatli postlar qayta yuborilmaydi; xato bergan joydan davom etadi.'+
+      '\n🔎 Natijani 📊 Holat orqali tekshiring.',menu());
   });
   let repairing=false;
   bot.hears('🧹 Eski postlar matnini tuzatish',async ctx=>{
