@@ -1,7 +1,5 @@
 'use strict';
 
-const {Input}=require('telegraf');
-const {MAX_UPLOAD_BYTES}=require('./channel-clone-media');
 const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
 const {createOrReuseInvite}=require('./channel-clone-invite');
 
@@ -48,6 +46,8 @@ async function collectAlbumMembers(client,peer,message){
 }
 
 async function uploadMediaAlbum({client,telegram,chatId,messages,caption}){
+  const {Input}=require('telegraf');
+  const {MAX_UPLOAD_BYTES}=require('./channel-clone-media');
   if(messages.length<2||messages.length>MAX_ALBUM_ITEMS)
     throw new Error('Album uchun 2–10 ta foto/video kerak.');
   let bytes=0;
