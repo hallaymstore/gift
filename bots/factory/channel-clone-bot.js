@@ -3,7 +3,8 @@ const {Telegraf,Markup,session}=require('telegraf');
 const {telegramChatRef,telegramHandle}=require('./channel-publisher');
 const {countSourcePosts}=require('./channel-clone-count');
 const {describeRelayError}=require('./channel-clone-errors');
-const {contactUsername,adFooter,refreshClonePostText}=require('./channel-clone-branding');
+const {contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
+const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
 
 function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
   const cloneKey=config.key||'channel_clone';
@@ -38,7 +39,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🔢 Manba postlarini sanash','⏱ Postlash intervali'],
     ['🏆 TOP 10','🏆 TOP 20'],
     ['🧪 Ulanishni tekshirish','🎨 Post formati'],
-    ['📋 Post imzosi','🧹 Eski postlar matnini tuzatish']
+    ['📋 Post imzosi','🔗 Bizning taklif havolamiz'],
+    ['🧹 Eski postlar matnini tuzatish']
   ]).resize();
   const routeKey=ctx=>ctx?.session?.activeRoute||cloneKey;
   const routesQuery=()=>({$or:[{bot_key:cloneKey},{owner_bot_key:cloneKey}]});
@@ -165,9 +167,25 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const branded=(current?.clone_format||'branded')==='branded';
     return ctx.reply('📋 TANLANGAN YO‘NALISH POST IMZOSI\n\n'+
       (adFooter(current)||'Hozircha reklama havolalari yo‘q.')+
+      '\n\n🔗 Manba linki o‘rniga: '+(getTargetPostLink(current)||'Maqsad kanalni ulang')+
       '\n\n✏️ Faqat Branded formatda bu imzo post matni yoki captionga qo‘shiladi.'+
       (branded?'\n✅ Branded faol':'\n⚠️ Original format faol: post asl holicha saqlanadi, reklama imzosi qo‘shilmaydi.')+
       '\n\n🤖 Reklama botini ulash, 📩 Reklama admini va 📤 Bizning kanal orqali o‘zgartiring.',menu());
+  });
+  bot.hears('🔗 Bizning taklif havolamiz',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const cfg=await load(ctx);
+    if(!cfg?.target_chat_id)return ctx.reply('❌ Avval 📤 Bizning kanal ni ulang.',menu());
+    const saved=cfg.target_invite_chat_id&&String(cfg.target_invite_chat_id)===String(cfg.target_chat_id)?
+      cfg.target_invite_link:'';
+    const link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config,force:true});
+    const isInvite=/^https:\/\/t\.me\/(?:\+|joinchat\/)/.test(link);
+    return ctx.reply((isInvite?'✅ Kanalga taklif havolasi tayyor.':'ℹ️ Taklif havolasi yaratish huquqi yetarli bo‘lmagani uchun ommaviy kanal havolasidan foydalaniladi.')+
+      '\n🔗 '+(link||'Maqsad kanal havolasi topilmadi')+
+      '\n\n'+(isInvite?'Bir kanal uchun bitta saqlangan havola barcha postlarga ishlatiladi.':
+      'Maxsus taklif havolasi uchun botga Invite Users (foydalanuvchilarni taklif qilish) admin huquqini bering va tugmani qayta bosing.')+
+      '\n\nManba linki mavjud Branded postlar aynan shu havolaga almashtiriladi.',menu());
   });
   bot.hears('📥 Manba kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='source';return ctx.reply('Manba public kanal @username ni yuboring.');});
   bot.hears('📤 Bizning kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='target';return ctx.reply('O‘zingizga tegishli kanal @username ni yuboring. Botga post joylash huquqini bering.');});
@@ -461,6 +479,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.promo_bot_username?'\n🤖 Reklama boti: @'+c.promo_bot_username:'')+
        (c?.promo_admin_username?'\n📩 Reklama admini: @'+c.promo_admin_username:'')+
+       (c?.target_invite_link?'\n🔗 Kanal taklif havolasi tayyor':'')+
        '\n🎨 Post formati: '+(c?.clone_format||'branded')+
        (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
       (c?.history_last_error?'\n⚠️ '+describeRelayError(c.history_last_error,190):'')+
@@ -494,6 +513,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const cfg=await load(ctx);
     if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va Telegram sessiyasi kerak.',menu());
     repairing=true;
+    if((cfg.clone_format||'branded')==='branded') {
+      cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+    }
     await ctx.reply('🛠 Avval joylangan postlar qayta yuborilmasdan tahrirlanmoqda.',menu());
     void (async()=>{
       let client,edited=0,failed=0,checked=0;
@@ -565,7 +587,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const $set={auto_enabled:false,history_enabled:false,history_completed:false,
       history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0};
     if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_cursor:0});
-    if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:''});
+    if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:'',target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null});
     await Config.updateOne({bot_key:routeKey(ctx)},{$set},{upsert:true});
     ctx.session.step=null;
     return ctx.reply('✅ Ulanish uzildi. Avval yuborilgan postlar jurnali saqlandi; takroriy yuborilmaydi.',menu());
@@ -632,13 +654,14 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         const existingTarget=await load(ctx);
         const changedTarget=Boolean(existingTarget?.target_chat_id&&String(existingTarget.target_chat_id)!==String(chat.id));
         const newTargetData={target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle};
-        if(changedTarget)Object.assign(newTargetData,{
+        if(changedTarget){forgetRouteInvite({bot_key:routeKey(ctx),target_chat_id:existingTarget.target_chat_id});Object.assign(newTargetData,{
+          target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null,
           source_cursor:0,history_cursor:0,history_ceiling:0,
           history_completed:false,history_enabled:false,auto_enabled:false,
           history_sent:0,history_skipped:0,history_last_error:'',
           history_retry_at:null,history_error_count:0,top_metrics_cache:null,
           next_publish_at:null
-        });
+        });}
         await Config.updateOne({bot_key:routeKey(ctx)},{$set:newTargetData},{upsert:true});
         if(ctx.session.wizard){
           ctx.session.wizard=false;
