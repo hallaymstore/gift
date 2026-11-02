@@ -32,63 +32,112 @@ function joinWithFooter(body,footer,maxChars){
   return [trimmed,footer].filter(Boolean).join('\n\n');
 }
 
-// The source may promote its own channel with a public link, an invite link
-// (t.me/+... or t.me/joinchat/...), or a label directly above the link.
-// A branded repost replaces that promotional footer, while preserving the
-// advert details (price, phone, car model, seller description, etc.).
+// Source channel promotion links may be public t.me handles or private
+// t.me/+ /joinchat invitations. Replace their actual URLs with a link
+// targeting our destination, rather than leaving a competing source link.
 const TELEGRAM_SOURCE_LINK=/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/(?:\+[A-Za-z0-9_-]+|joinchat\/[A-Za-z0-9_-]+|[A-Za-z][A-Za-z0-9_]{4,31}(?:\/\d+)?)(?:\?[^\s)]*)?/giu;
 const SOURCE_FOOTER_HEADER=/^\s*(?:[📢🤖📩📌🔗✉️💬]\s*)?(?:kanalimiz|bizning\s+kanal|botimiz|reklama(?:\s+va\s+hamkorlik)?\s+uchun|manba|наш\s+канал|наш\s+бот|реклама|каналимиз|ботимиз|источник)\s*:?\s*(?:@[A-Za-z][A-Za-z0-9_]{4,31})?\s*$/iu;
 const SOURCE_CTA_LABEL=/^\s*(?:👇|👆|👉|➡️|📢|🔗|📌)\s*[^0-9\n]{1,90}\s*$/u;
 const TELEGRAM_HANDLE_ONLY=/^\s*@[A-Za-z][A-Za-z0-9_]{4,31}\s*$/;
+const SELLER_LINK_CONTEXT=/\b(?:sotuvchi|seller|aloqa|telefon|telegram|contact|сотувчи|продавец|связаться|контакт)\b/iu;
 
-function cleanSourceAdvertising(original){
+function validInviteLink(value){
+  const link=String(value||'').trim();
+  return /^https:\/\/t\.me\/(?:\+[A-Za-z0-9_-]+|joinchat\/[A-Za-z0-9_-]+)$/.test(link)?link:'';
+}
+function getTargetPostLink(cfg={}){
+  const target=String(cfg.target_chat_id||'');
+  const cached=validInviteLink(cfg.target_post_link || (
+    cfg.target_invite_chat_id && String(cfg.target_invite_chat_id)===target
+      ? cfg.target_invite_link:''
+  ));
+  if(cached)return cached;
+  // If the bot cannot create an invite, the public channel URL is still a
+  // reliable destination. Never make up a private invite token.
+  const handle=contactUsername(cfg.target_username);
+  return handle?'https://t.me/'+handle:'';
+}
+function hasSourcePromotionLink(text){
+  TELEGRAM_SOURCE_LINK.lastIndex=0;
+  return TELEGRAM_SOURCE_LINK.test(String(text||''));
+}
+
+function cleanSourceAdvertising(original,cfg={}){
   const lines=String(original||'').replace(/\r\n?/g,'\n').split('\n');
-  const skip=new Set();
-
-  // Handle source links first so that the call-to-action above them can be
-  // removed without guessing at the meaning of unrelated advert lines.
+  const result=[];
+  const replacement=getTargetPostLink(cfg);
   for(let i=0;i<lines.length;i++){
+    const line=lines[i];
     TELEGRAM_SOURCE_LINK.lastIndex=0;
-    if(!TELEGRAM_SOURCE_LINK.test(lines[i]))continue;
-    TELEGRAM_SOURCE_LINK.lastIndex=0;
-    const without=lines[i].replace(TELEGRAM_SOURCE_LINK,'').trim();
-    if(!without || SOURCE_CTA_LABEL.test(without) || SOURCE_FOOTER_HEADER.test(without) ||
-       /^[\s()[\]{}<>👇👆👉➡️🔗📢📌:;.,!-]*$/u.test(without)){
-      skip.add(i);
-    }else{
-      // An ordinary advertisement line might contain content before a link.
-      // Remove only the source link; keep actual price or seller details.
-      lines[i]=without;
-    }
-    let prev=i-1;
-    while(prev>=0 && !lines[prev].trim() && i-prev<=3)prev--;
-    if(prev>=0 && i-prev<=3 && !skip.has(prev) &&
-       (SOURCE_CTA_LABEL.test(lines[prev]) || SOURCE_FOOTER_HEADER.test(lines[prev])))
-      skip.add(prev);
-  }
-
-  // Remove existing source branding, including a separate @username line
-  // following "📢 Kanalimiz:" or similar headings.
-  for(let i=0;i<lines.length;i++){
-    if(skip.has(i))continue;
-    if(SOURCE_FOOTER_HEADER.test(lines[i])){
-      skip.add(i);
-      if(i+1<lines.length && TELEGRAM_HANDLE_ONLY.test(lines[i+1]))skip.add(i+1);
+    const matches=[...line.matchAll(TELEGRAM_SOURCE_LINK)];
+    if(!matches.length){
+      // Replace obsolete source call-to-action only when its next nonblank
+      // line is a Telegram promotion. Do not alter ordinary selling details.
+      if(SOURCE_FOOTER_HEADER.test(line)){
+        if(i+1<lines.length && TELEGRAM_HANDLE_ONLY.test(lines[i+1]))i++;
+        continue;
+      }
+      if(/^\s*(?:📌\s*)?(?:manba|источник)\s*:/iu.test(line))continue;
+      if(SOURCE_CTA_LABEL.test(line)){
+        let next=i+1;
+        while(next<lines.length && !lines[next].trim() && next-i<=3)next++;
+        if(next<lines.length && next-i<=3){
+          TELEGRAM_SOURCE_LINK.lastIndex=0;
+          if(TELEGRAM_SOURCE_LINK.test(lines[next])){
+            result.push('👇 Bizning kanal');
+            continue;
+          }
+        }
+      }
+      result.push(line);
       continue;
     }
-    if(/^\s*(?:📌\s*)?(?:manba|источник)\s*:/iu.test(lines[i]))skip.add(i);
+    // If this line contains a seller's own Telegram contact, preserve it.
+    // Only channel promo links are replaced, not sellers' contact details.
+    if(SELLER_LINK_CONTEXT.test(line) && !SOURCE_FOOTER_HEADER.test(line)
+       && !SOURCE_CTA_LABEL.test(line)){
+      result.push(line);
+      continue;
+    }
+    const trimmed=line.trim();
+    const onlyLink=matches.length===1 && trimmed===matches[0][0];
+    const isPromotional=onlyLink||SOURCE_CTA_LABEL.test(line)||
+      SOURCE_FOOTER_HEADER.test(line) || /(?:kanal|channel|канал|manba|источник)/iu.test(line);
+    if(!isPromotional){
+      // A URL embedded in the seller's description is not our promotion.
+      result.push(line);
+      continue;
+    }
+    if(replacement){
+      if(onlyLink)result.push(replacement);
+      else{
+        const remaining=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
+        if(remaining && !SOURCE_CTA_LABEL.test(remaining) &&
+          !SOURCE_FOOTER_HEADER.test(remaining)){
+          result.push(remaining);
+        } else {
+          // Inline source CTA becomes our own channel label.
+          const preceding=result[result.length-1]||'';
+          if(preceding!=='👇 Bizning kanal')result.push('👇 Bizning kanal');
+        }
+        result.push(replacement);
+      }
+    } else {
+      const rest=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
+      if(rest&&!SOURCE_CTA_LABEL.test(rest)&&!SOURCE_FOOTER_HEADER.test(rest))result.push(rest);
+    }
   }
-  return lines.filter((_,i)=>!skip.has(i)).join('\n')
-    .replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  return result.join('\n').replace(/[ \t]+\n/g,'\n')
+    .replace(/\n{3,}/g,'\n\n').trim();
 }
 
 function buildClonePostText(original,cfg,limit=1024){
-  return joinWithFooter(cleanSourceAdvertising(original),adFooter(cfg),limit);
+  return joinWithFooter(cleanSourceAdvertising(original,cfg),adFooter(cfg),limit);
 }
 
 function refreshClonePostText(existing,cfg,limit=1024){
-  // Reuse the same source-cleaning rules for already published branded posts.
-  // Strip our previous footer first; otherwise it would be appended again.
+  // Strip previous own footer before reapplying current branding. This also
+  // fixes earlier Cloner posts containing the source's original invite.
   const lines=String(existing||'').split('\n');
   const body=[];
   for(let i=0;i<lines.length;i++){
@@ -99,7 +148,7 @@ function refreshClonePostText(existing,cfg,limit=1024){
     }
     body.push(line);
   }
-  return joinWithFooter(cleanSourceAdvertising(body.join('\n')),adFooter(cfg),limit);
+  return joinWithFooter(cleanSourceAdvertising(body.join('\n'),cfg),adFooter(cfg),limit);
 }
 
-module.exports={contactUsername,adFooter,buildClonePostText,refreshClonePostText};
+module.exports={contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
