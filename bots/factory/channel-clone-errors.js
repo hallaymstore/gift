@@ -12,7 +12,7 @@ function redactTelegramSecrets(input) {
 
 function describeRelayError(error, maxLength=180) {
   const source=redactTelegramSecrets(error?.description || error?.message || error);
-  const id=source.match(/History post\\s+(\\d+)/i)?.[1];
+  const id=source.match(/History post\s+(\d+)/i)?.[1];
   const prefix=id?'History post '+id+': ':'';
   let description=source;
   if(/socket hang up|ECONNRESET|EPIPE/i.test(source))
