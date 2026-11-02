@@ -192,3 +192,79 @@ test('the same private group invite is replaced in a preexisting branded caption
   assert.equal(repaired.split('📩 Reklama uchun:').length-1,1);
   assert.equal(refreshClonePostText(repaired,cfg,1024),repaired);
 });
+
+
+test('greeting: delete source ad admin and phone, replace group invite, preserve poem and performer',()=>{
+  const source=[
+    '🌷 Ravon qilsin Allohim!',
+    '🌟 Taningizga sog‘likni.',
+    '🌷 Unvon qilsin Allohim!',
+    '',
+    '🌸 Gina g‘ubor yuvilsin,',
+    '🌷 Hamroh bo‘lsin ezgulik.',
+    '👇🌹 BIZ BILAN TELEGRAM ORQALI BOG‘LANING',
+    '',
+    '@Tabriklar_admin02',
+    'MUROJAAT UCHUN 👇🌹',
+    '',
+    '+998910021877',
+    '',
+    'GURUHIMIZGA QO‘SHILING 👇🌹',
+    '',
+    'https://t.me/+EprtVt19Keg5MWU5',
+    '',
+    '🎙 Boshlovchi: 🎤 ZULFIZAR QORYOG‘DIYEVA',
+    '🌹 TABRIKNOMA 🌷'
+  ].join('\n');
+  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'MyAdsAdmin'};
+  const text=buildClonePostText(source,conf,4096);
+  assert.ok(text.includes('Ravon qilsin Allohim'));
+  assert.ok(text.includes('Gina g‘ubor yuvilsin'));
+  assert.ok(text.includes('ZULFIZAR QORYOG‘DIYEVA'));
+  assert.ok(text.includes('TABRIKNOMA'));
+  assert.ok(!text.includes('Tabriklar_admin02'));
+  assert.ok(!text.includes('998910021877'));
+  assert.ok(!text.includes('EprtVt19Keg5MWU5'));
+  assert.ok(!text.includes('MUROJAAT UCHUN'));
+  assert.ok(!text.includes('BIZ BILAN TELEGRAM ORQALI BOG'));
+  assert.ok(!text.includes('GURUHIMIZGA QO'));
+  assert.ok(text.includes('👇 Bizning kanal\nhttps://t.me/yaqinlarimga_tabriklarim02'));
+  assert.ok(text.endsWith('📢 Kanalimiz: @yaqinlarimga_tabriklarim02\n📩 Reklama uchun: @MyAdsAdmin'));
+  assert.equal(refreshClonePostText(text,conf,4096),text);
+});
+
+test('post with ad contact and separate phone but no invite is cleaned',()=>{
+  const source='Original she’r.\n\n📩 Reklama uchun\n@source_admin\n\n☎️ +998 91 002 18 77\n\nIjrochi: Qodirova';
+  const text=buildClonePostText(source,{target_username:'our_greetings',promo_admin_username:'OurAds'},4096);
+  assert.ok(!text.includes('@source_admin'));
+  assert.ok(!text.includes('002 18 77'));
+  assert.ok(text.includes('Original she’r.'));
+  assert.ok(text.includes('Ijrochi: Qodirova'));
+  assert.ok(text.includes('@OurAds'));
+});
+
+test('car listing keeps actual seller phone and independent personal account',()=>{
+  const source=[
+    '🚘 Nexia sotiladi',
+    '💰 Narxi: 6500$',
+    '📞 Murojaat uchun:',
+    '+998994084749',
+    'Sotuvchi telegram: @NexiaOwner007',
+    '',
+    'GURUHIMIZGA QO‘SHILING',
+    'https://t.me/+OldGroupLink'
+  ].join('\n');
+  const text=buildClonePostText(source,{
+    target_username:'MOSHINA_BOZORI_NARXLARI',promo_admin_username:'Qoryogdiyev'},1024);
+  assert.ok(text.includes('+998994084749'));
+  assert.ok(text.includes('@NexiaOwner007'));
+  assert.ok(!text.includes('OldGroupLink'));
+  assert.ok(text.includes('https://t.me/MOSHINA_BOZORI_NARXLARI'));
+});
+
+test('preserve ordinary phone and @username in non-promotional content',()=>{
+  const source='Doktor telefon: +998901112233\nMuallif: @BaxromPoet\nTabriknoma shu yerda.';
+  const text=buildClonePostText(source,{target_username:'yangi_kanal'});
+  assert.ok(text.includes('+998901112233'));
+  assert.ok(text.includes('@BaxromPoet'));
+});

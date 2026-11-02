@@ -62,8 +62,56 @@ function hasSourcePromotionLink(text){
   return TELEGRAM_SOURCE_LINK.test(String(text||''));
 }
 
-function cleanSourceAdvertising(original,cfg={}){
+// Remove the source's marketing contacts, not every Telegram mention or number.
+// A vehicle listing's seller telephone must remain intact.
+const SOURCE_PROMO_CONTACT_CTA=/(?:\bbiz\s+bilan(?:\s+telegram\s+orqali)?\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\btelegram\s+orqali\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\bmurojaat\s+uchun\b|\breklama(?:lar)?\s+uchun\b|\bhamkorlik\s+uchun\b|\b(?:reklama|e['’ʼ‘]?lon)(?:lar)?\s+bo['’ʼ‘]?yicha\b|\b(?:админ|реклама)\s*(?:учун|для|га)\b)/iu;
+const SOURCE_PROMO_JOIN_CTA=/(?:\b(?:guruhimizga|guruhga|kanalimizga|kanalga)\s+(?:qo['’ʼ‘]?shiling|kiring|obuna\s+bo['’ʼ‘]?ling)\b|(?:групп(?:у|е)|канал)\s+(?:вступайте|подписывайтесь|присоединяйтесь)|\b(?:join\s+(?:our\s+)?(?:group|channel)|subscribe\s+to\s+our\s+channel)\b)/iu;
+const CONTACT_ONLY_HANDLE=/^\s*(?:[^\p{L}\p{N}@+]{0,12})?@[A-Za-z][A-Za-z0-9_]{4,31}\s*(?:[^\p{L}\p{N}]{0,8})?$/u;
+const CONTACT_ONLY_PHONE=/^\s*(?:[^\p{L}\p{N}+]{0,12})?(?:(?:tel(?:efon)?|telefon\s+raqam(?:i)?|phone|номер|raqam)\s*[:：-]?\s*)?\+?(?:998|8|[0-9]{2,3})[\d\s().-]{7,20}\s*(?:[^\p{L}\p{N}]{0,5})?$/iu;
+const CONTACT_ONLY_INLINE=/^\s*(?:telegram|admin|administrator|reklama|aloqa)\s*[:：-]\s*@[A-Za-z][A-Za-z0-9_]{4,31}\s*$/iu;
+const SALES_DESCRIPTION=/(?:\bnarxi\b|\bцена\b|\bсотилади\b|\bsotiladi\b|\bпробег\b|\bprobeg\b|\byurgan\b|\bмашина\b|\bavtomobil\b)/iu;
+function isSourceContactOnly(line){
+  const text=String(line||'').trim();
+  return CONTACT_ONLY_HANDLE.test(text)||CONTACT_ONLY_PHONE.test(text)||
+    CONTACT_ONLY_INLINE.test(text);
+}
+function stripSourceContactPromotions(original){
   const lines=String(original||'').replace(/\r\n?/g,'\n').split('\n');
+  const skipped=new Set(),replacements=new Map();
+  const marketplace=SALES_DESCRIPTION.test(String(original||''));
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    const join=SOURCE_PROMO_JOIN_CTA.test(line);
+    const explicit=SOURCE_PROMO_CONTACT_CTA.test(line);
+    // "Murojaat uchun" may introduce the actual car seller's number.
+    const sellerCTA=marketplace && /\bmurojaat\s+uchun\b/iu.test(line) &&
+      !/\breklama\b|\bbiz\s+bilan\b/iu.test(line);
+    if(join){
+      let next=i+1;
+      while(next<lines.length && next-i<=4 && !lines[next].trim())next++;
+      TELEGRAM_SOURCE_LINK.lastIndex=0;
+      if(next<lines.length&&next-i<=4&&TELEGRAM_SOURCE_LINK.test(lines[next])){
+        replacements.set(i,'👇 Bizning kanal');
+        for(let between=i+1;between<next;between++)
+          if(!lines[between].trim())skipped.add(between);
+      }else skipped.add(i);
+      continue;
+    }
+    if(!explicit||sellerCTA)continue;
+    skipped.add(i);
+    let n=i+1;
+    while(n<lines.length&&n-i<=5){
+      if(!lines[n].trim()){n++;continue;}
+      if(!isSourceContactOnly(lines[n]))break;
+      skipped.add(n++);
+    }
+  }
+  return lines.map((line,i)=>skipped.has(i)?null:(replacements.get(i)||line))
+    .filter(line=>line!==null).join('\n').replace(/\n{3,}/g,'\n\n').trim();
+}
+
+function cleanSourceAdvertising(original,cfg={}){
+  const lines=stripSourceContactPromotions(original).split('\n');
   const result=[];
   const replacement=getTargetPostLink(cfg);
   for(let i=0;i<lines.length;i++){
@@ -154,4 +202,4 @@ function refreshClonePostText(existing,cfg,limit=1024){
   return joinWithFooter(cleanSourceAdvertising(body.join('\n'),cfg),adFooter(cfg),limit);
 }
 
-module.exports={contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
+module.exports={contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,isSourceContactOnly,stripSourceContactPromotions,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
