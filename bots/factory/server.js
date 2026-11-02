@@ -17,6 +17,7 @@ const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = re
 const { attachMiniGames } = require('./mini-games-engine');
 const {attachGroupAnnouncer}=require('./group-announcements-bot');
 const {createChannelCloneBot}=require('./channel-clone-bot');
+const {describeRelayError}=require('./channel-clone-errors');
 const {buildClonePostText}=require('./channel-clone-branding');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
@@ -10933,7 +10934,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     return;
   }
   if(type==='history_error'||type==='live_error'){
-    const reason=String(error||'Nomaʼlum xato').slice(0,200);
+    const reason=describeRelayError(error,200);
     const denied=/You can't write in this chat|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL/i.test(reason);
     if(denied){
       // A permanent permissions error must NOT trigger another MTProto request
@@ -11022,7 +11023,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       } catch (botCopyError) {
         // The user-session account may post only where it has its own write rights.
         // Distinguish Bot API source access failures from MTProto destination rights.
-        const botErrorText=String(botCopyError.description||botCopyError.message||botCopyError).slice(0,160);
+        const botErrorText=describeRelayError(botCopyError,160);
         if(/CHAT_FORWARDS_RESTRICTED|protected content|message is protected|copying is not allowed|forwards? (?:are |is )?(?:restricted|prohibited)/i.test(botErrorText)){
           // Respect the source owner's no-forwarding protection; do not
           // use MTProto re-send or media downloading as a bypass.
@@ -11043,8 +11044,8 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
               caption:originalFormat?String(message.message||''):branded
             });
           } catch(uploadError) {
-            const uploadReason=String(uploadError.description||uploadError.message||uploadError).slice(0,165);
-            const userReason=String(userCopyError.message||userCopyError).slice(0,85);
+            const uploadReason=describeRelayError(uploadError,165);
+            const userReason=describeRelayError(userCopyError,85);
             throw new Error('Media upload: '+uploadReason+
               '; MTProto: '+userReason+'; copyMessage: '+botErrorText);
           }
@@ -11064,7 +11065,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       {$set:{status:'sent',target_message_id:sent?.message_id||null,error:''}});
     return {status:'sent'};
   } catch(error) {
-    const reason=String(error.description||error.message||error);
+    const reason=describeRelayError(error,240);
     if(/SOURCE_PROTECTED|CHAT_FORWARDS_RESTRICTED|protected content|message is protected/i.test(reason)){
       const changed=await ChannelRelayLog.updateOne(
         {bot_key:cfg.bot_key,source_key:sourceKey,status:{$ne:'protected'}},
@@ -11075,9 +11076,8 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     // post is worse than a logged failure. Admin can manually retry via forward.
     if (created) await ChannelRelayLog.updateOne({bot_key:cfg.bot_key,source_key:sourceKey},
       {$set:{status:'failed',error:reason.slice(0,160)}});
-    console.warn('Public source post failed', cfg.bot_key, message.id,
-      String(error.message||error).slice(0,160));
-    return {status:'failed',error:String(error.message||error).slice(0,160)};
+    console.warn('Public source post failed', cfg.bot_key, message.id,reason.slice(0,160));
+    return {status:'failed',error:reason.slice(0,160)};
   }
 }
 
