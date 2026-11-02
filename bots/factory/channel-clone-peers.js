@@ -72,10 +72,12 @@ async function resolveSourcePeer(client,cfg){
   return (await resolvePrivateSourceGroup(client,id)).peer;
 }
 function sourceRefLabel(cfg={}){
+  cfg=cfg||{};
   const handle=telegramHandle(cfg.source_username||'');
   return handle?'@'+handle:(cfg.source_title?cfg.source_title+' ('+cfg.source_chat_id+')':String(cfg.source_chat_id||''));
 }
 function sourceKey(cfg={}){
+  cfg=cfg||{};
   return telegramHandle(cfg.source_username||'').toLowerCase() || String(cfg.source_chat_id||'');
 }
 module.exports={parsePeerReference,peerIdFromDialog,isGroupEntity,isChannelEntity,
