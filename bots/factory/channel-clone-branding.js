@@ -90,9 +90,11 @@ function stripSourceContactPromotions(original){
       let next=i+1;
       while(next<lines.length && next-i<=4 && !lines[next].trim())next++;
       TELEGRAM_SOURCE_LINK.lastIndex=0;
-      if(next<lines.length&&next-i<=4&&TELEGRAM_SOURCE_LINK.test(lines[next]))
+      if(next<lines.length&&next-i<=4&&TELEGRAM_SOURCE_LINK.test(lines[next])){
         replacements.set(i,'👇 Bizning kanal');
-      else skipped.add(i);
+        for(let between=i+1;between<next;between++)
+          if(!lines[between].trim())skipped.add(between);
+      }else skipped.add(i);
       continue;
     }
     if(!explicit||sellerCTA)continue;
