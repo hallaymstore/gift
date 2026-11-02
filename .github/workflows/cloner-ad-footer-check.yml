@@ -1,0 +1,27 @@
+name: Cloner advertising footer checks
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/channel-clone-branding.js'
+      - 'bots/factory/channel-clone-branding.test.js'
+      - 'bots/factory/server.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/cloner-ad-footer-check.yml'
+  workflow_dispatch:
+
+jobs:
+  syntax-and-branding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check Factory and Cloner code syntax
+        run: |
+          node --check bots/factory/server.js
+          node --check bots/factory/channel-clone-bot.js
+          node --check bots/factory/channel-clone-branding.js
+      - name: Test per-route branding and edit idempotency
+        run: node --test bots/factory/channel-clone-branding.test.js
