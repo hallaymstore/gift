@@ -16,6 +16,12 @@ test('redact previously redacted paths and file/bot endpoint',()=>{
   assert.ok(!redactTelegramSecrets(input).includes('1234567890'));
 });
 
+test('failed post ID is preserved even for network errors',()=>{
+  const detail=describeRelayError('History post 12130 could not be relayed: request to https://api.telegram.org/bot1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg/sendPhoto failed, reason: socket hang up');
+  assert.match(detail,/History post 12130:/);
+  assert.ok(!detail.includes('1234567890'));
+});
+
 test('long captions are diagnosed clearly',()=>{
   assert.match(describeRelayError(new Error('The caption is too long. (caused by messages.SendMedia)')),/izohi.*uzun/);
 });
