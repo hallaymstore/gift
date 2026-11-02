@@ -177,8 +177,6 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ctx.session.step=null;
     const cfg=await load(ctx);
     if(!cfg?.target_chat_id)return ctx.reply('❌ Avval 📤 Bizning kanal ni ulang.',menu());
-    const saved=cfg.target_invite_chat_id&&String(cfg.target_invite_chat_id)===String(cfg.target_chat_id)?
-      cfg.target_invite_link:'';
     const link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config,force:true});
     const isInvite=/^https:\/\/t\.me\/(?:\+|joinchat\/)/.test(link);
     return ctx.reply((isInvite?'✅ Kanalga taklif havolasi tayyor.':'ℹ️ Taklif havolasi yaratish huquqi yetarli bo‘lmagani uchun ommaviy kanal havolasidan foydalaniladi.')+
@@ -513,10 +511,14 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const cfg=await load(ctx);
     if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va Telegram sessiyasi kerak.',menu());
     repairing=true;
-    if((cfg.clone_format||'branded')==='branded') {
-      cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+    try {
+      if((cfg.clone_format||'branded')==='branded')
+        cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+      await ctx.reply('🛠 Avval joylangan postlar qayta yuborilmasdan tahrirlanmoqda.',menu());
+    }catch(error){
+      repairing=false;
+      return ctx.reply('❌ Tahrirlash boshlanmadi: '+describeRelayError(error,160),menu());
     }
-    await ctx.reply('🛠 Avval joylangan postlar qayta yuborilmasdan tahrirlanmoqda.',menu());
     void (async()=>{
       let client,edited=0,failed=0,checked=0;
       try{
