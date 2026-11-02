@@ -26,21 +26,43 @@ function isGroupEntity(entity){
 function isChannelEntity(entity){
   return Boolean(entity && entity.className==='Channel' && entity.megagroup!==true);
 }
-async function listJoinedGroups(client,limit=500){
+const dialogsCache=new WeakMap();
+async function listJoinedGroups(client,limit=500,{fresh=false}={}){
+  const cached=dialogsCache.get(client);
+  if(!fresh&&cached&&Date.now()-cached.time<300000)return cached.groups;
   const dialogs=await client.getDialogs({limit});
-  return (dialogs||[]).filter(d=>isGroupEntity(d.entity))
+  const groups=(dialogs||[]).filter(d=>isGroupEntity(d.entity))
     .map(d=>({
       id:peerIdFromDialog(d),
       title:String(d.title||d.entity?.title||'Telegram guruhi'),
       peer:d.inputEntity||d.entity,
       username:telegramHandle(d.entity?.username||'')
     })).filter(x=>x.id&&x.peer);
+  dialogsCache.set(client,{time:Date.now(),groups});
+  return groups;
 }
 async function resolvePrivateSourceGroup(client,wanted){
   const groups=await listJoinedGroups(client);
   const group=groups.find(g=>g.id===String(wanted));
   if(!group)throw new Error('Manba guruh MTProto akkaunti aʼzo bo‘lgan guruhlar orasida topilmadi.');
   return group;
+}
+async function validateSourceReference(client,input){
+  const parsed=parsePeerReference(input);
+  if(!parsed)throw new Error('Ommaviy @username yoki o‘zingiz aʼzo bo‘lgan guruhning raqamli ID sini yuboring.');
+  if(parsed.kind==='id'){
+    const group=await resolvePrivateSourceGroup(client,parsed.id);
+    await client.getMessages(group.peer,{limit:1});
+    return {source_username:group.username,source_chat_id:group.id,
+      source_title:group.title,source_type:'group'};
+  }
+  const entity=await client.getEntity(parsed.peer);
+  if(!isGroupEntity(entity)&&!isChannelEntity(entity))
+    throw new Error('Manba Telegram kanal yoki guruh bo‘lishi kerak.');
+  await client.getMessages(parsed.peer,{limit:1});
+  return {source_username:parsed.username,source_chat_id:'',
+    source_title:String(entity.title||parsed.username),
+    source_type:isGroupEntity(entity)?'group':'channel'};
 }
 async function resolveSourcePeer(client,cfg){
   const handle=telegramHandle(cfg?.source_username||'');
@@ -57,4 +79,4 @@ function sourceKey(cfg={}){
   return telegramHandle(cfg.source_username||'').toLowerCase() || String(cfg.source_chat_id||'');
 }
 module.exports={parsePeerReference,peerIdFromDialog,isGroupEntity,isChannelEntity,
-  listJoinedGroups,resolvePrivateSourceGroup,resolveSourcePeer,sourceRefLabel,sourceKey};
+  listJoinedGroups,resolvePrivateSourceGroup,validateSourceReference,resolveSourcePeer,sourceRefLabel,sourceKey};
