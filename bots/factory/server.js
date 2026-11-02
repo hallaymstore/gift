@@ -17,6 +17,7 @@ const { newNumberRound, makeMathRound, resolveGuess, utcDay, DAILY_ROUNDS } = re
 const { attachMiniGames } = require('./mini-games-engine');
 const {attachGroupAnnouncer}=require('./group-announcements-bot');
 const {createChannelCloneBot}=require('./channel-clone-bot');
+const {buildClonePostText}=require('./channel-clone-branding');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
@@ -406,6 +407,7 @@ const relayConfigSchema = new mongoose.Schema({
   top_metrics_cache: {type:mongoose.Schema.Types.Mixed,default:null},
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   promo_bot_username: {type:String,default:''},
+  promo_admin_username: {type:String,default:''},
   publish_interval_minutes: {type:Number,default:0},
   next_publish_at: Date,
   auto_enabled: { type: Boolean, default: false },
@@ -10996,19 +10998,9 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
         .select('title code code_norm').lean() : null;
     const username = active.bot.botInfo?.username || active.config?.telegramUsername ||
       (await botTelegram.getMe()).username;
-    const branded = active?.config?.engine === 'channel_clone' || cfg.bot_key === 'channel_clone'
-      ? (() => {
-          const original=String(message.message||'');
-          const own=cfg.promo_bot_username?'@'+String(cfg.promo_bot_username).replace(/^@/,''):'';
-          const dest='@'+String(cfg.target_username||'').replace(/^@/,'');
-          const cleaned=original
-            .replace(/https?:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}(?:\?[^\s]*)?/gi,'')
-            .replace(/@[A-Za-z][A-Za-z0-9_]{4,31}/g,'')
-            .replace(/(?:📌\s*)?Manba\s*:[^\n]*/giu,'')
-            .replace(/\n{3,}/g,'\n\n').trim();
-          return [cleaned,own?'🤖 Botimiz: '+own:'',cfg.target_username?'📢 Kanalimiz: '+dest:'']
-            .filter(Boolean).join('\n\n').slice(0,1024);
-        })()
+    const cloneEngine=active?.config?.engine === 'channel_clone' || cfg.bot_key === 'channel_clone';
+    const branded = cloneEngine
+      ? buildClonePostText(String(message.message||''),cfg,kind==='text'?4096:1024)
       : buildChannelCaption({
           message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
             title:cfg.target_title}, botUsername:username,
