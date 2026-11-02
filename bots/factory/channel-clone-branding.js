@@ -104,7 +104,7 @@ function cleanSourceAdvertising(original,cfg={}){
       result.push(line);
       continue;
     }
-    const isPromotional=onlyLink||SOURCE_CTA_LABEL.test(line)||
+    const isPromotional=onlyLink||isChatInvite||SOURCE_CTA_LABEL.test(line)||
       SOURCE_FOOTER_HEADER.test(line) || /(?:kanal|channel|канал|manba|источник)/iu.test(line);
     if(!isPromotional){
       // A URL embedded in the seller's description is not our promotion.
