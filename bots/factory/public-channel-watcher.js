@@ -1,5 +1,7 @@
 'use strict';
 
+const {describeRelayError}=require('./channel-clone-errors');
+
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
 const LIVE_POLL_MS = 30000;
 const HISTORY_POLL_MS = 30000;
@@ -104,7 +106,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
     }
     if(result?.status==='failed') {
       log.warn('[channel sync] live relay failed; cursor stays at',message.id);
-      await deliver({type:'live_error',cfg,error:String(result.error||'Post relay failed')}).catch(()=>{});
+      await deliver({type:'live_error',cfg,error:describeRelayError(result.error||'Post relay failed')}).catch(()=>{});
       break;
     }
     await deliver({type:'cursor',cfg,cursor:Number(message.id),result});
@@ -150,7 +152,7 @@ async function scanHistory({client,cfg,deliver,log=console}){
         sourceUsername:handle,kind:mediaKind(message),phase:'history'})||result;
     }else log.warn('[channel sync] unsupported historic item skipped',handle,message.id);
     if(result?.status==='failed') {
-      throw new Error('History post '+message.id+' could not be relayed: '+String(result.error||'see server logs'));
+      throw new Error('History post '+message.id+' could not be relayed: '+describeRelayError(result.error||'see server logs'));
     }
     await deliver({type:'history_cursor',cfg,cursor:Number(message.id),result});
     cfg.history_cursor=Number(message.id);
@@ -205,7 +207,7 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
       for(const cfg of nextBatch(sources,'live')){
         if(stopped)break;
         try{await scanLive({client,cfg,deliver,log});}
-        catch(e){log.warn('[channel sync] live failed',cfg.bot_key,String(e.message||e).slice(0,160));}
+        catch(e){log.warn('[channel sync] live failed',cfg.bot_key,describeRelayError(e,160));}
       }
     }catch(e){log.warn('[channel sync] source listing failed',String(e.message||e).slice(0,160));}
     finally{liveRunning=false;}
@@ -219,7 +221,7 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
         if(stopped)break;
         try{await scanHistory({client,cfg,deliver,log});}
         catch(e){
-          log.warn('[channel sync] history failed',cfg.bot_key,String(e.message||e).slice(0,150));
+          log.warn('[channel sync] history failed',cfg.bot_key,describeRelayError(e,150));
           await deliver({type:'history_error',cfg,error:String(e.message||e).slice(0,160)})
             .catch(()=>{});
         }
