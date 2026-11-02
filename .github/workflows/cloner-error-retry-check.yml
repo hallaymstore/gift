@@ -1,0 +1,28 @@
+name: Cloner retry and token safety
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-errors.js'
+      - 'bots/factory/channel-clone-errors.test.js'
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/public-channel-watcher.js'
+      - 'bots/factory/server.js'
+      - '.github/workflows/cloner-error-retry-check.yml'
+  workflow_dispatch:
+
+jobs:
+  syntax-and-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate code syntax
+        run: |
+          node --check bots/factory/server.js
+          node --check bots/factory/channel-clone-bot.js
+          node --check bots/factory/channel-clone-errors.js
+          node --check bots/factory/public-channel-watcher.js
+      - name: Verify token-safe error diagnostics
+        run: node --test bots/factory/channel-clone-errors.test.js
