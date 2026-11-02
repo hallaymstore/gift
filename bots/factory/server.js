@@ -10934,10 +10934,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     return;
   }
   if(type==='history_error'||type==='live_error'){
-    const rawError=String(error||'');
-    const postId=rawError.match(/History post\s+(\d+)/i)?.[1];
-    const shortError=describeRelayError(rawError,160);
-    const reason=(postId?'History post '+postId+': ':'')+shortError;
+    const reason=describeRelayError(error,200);
     const denied=/You can't write in this chat|CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL/i.test(reason);
     if(denied){
       // A permanent permissions error must NOT trigger another MTProto request
