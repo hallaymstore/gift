@@ -36,7 +36,8 @@ async function listJoinedGroups(client,limit=500,{fresh=false}={}){
       id:peerIdFromDialog(d),
       title:String(d.title||d.entity?.title||'Telegram guruhi'),
       peer:d.inputEntity||d.entity,
-      username:telegramHandle(d.entity?.username||'')
+      username:telegramHandle(d.entity?.username||''),
+      protected:Boolean(d.entity?.noforwards||d.entity?.noForwards||d.entity?.restrictedSaveContent)
     })).filter(x=>x.id&&x.peer);
   dialogsCache.set(client,{time:Date.now(),groups});
   return groups;
@@ -52,11 +53,14 @@ async function validateSourceReference(client,input){
   if(!parsed)throw new Error('Ommaviy @username yoki o‘zingiz aʼzo bo‘lgan guruhning raqamli ID sini yuboring.');
   if(parsed.kind==='id'){
     const group=await resolvePrivateSourceGroup(client,parsed.id);
+    if(group.protected)throw new Error('Bu guruhda xabarlarni nusxalash cheklangan.');
     await client.getMessages(group.peer,{limit:1});
     return {source_username:group.username,source_chat_id:group.id,
       source_title:group.title,source_type:'group'};
   }
   const entity=await client.getEntity(parsed.peer);
+  if(entity?.noforwards||entity?.noForwards||entity?.restrictedSaveContent)
+    throw new Error('Bu manbada xabarlarni nusxalash cheklangan.');
   if(!isGroupEntity(entity)&&!isChannelEntity(entity))
     throw new Error('Manba Telegram kanal yoki guruh bo‘lishi kerak.');
   await client.getMessages(parsed.peer,{limit:1});
