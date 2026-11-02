@@ -93,7 +93,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ctx.session.step=null;
     ctx.session.wizard=false;
     return ctx.reply('✅ Faol yo‘nalish: '+(found.route_title||id)+'\n📥 '+(sourceRefLabel(found)||'ulanmagan')+
-      '\n📤 '+(found.target_username||'ulanmagan')+'\n⏱ '+Number(found.publish_interval_minutes||0)+' daqiqa',menu());
+      '\n📤 '+(found.target_username?'@'+found.target_username:found.target_title||found.target_chat_id||'ulanmagan')+'\n⏱ '+Number(found.publish_interval_minutes||0)+' daqiqa',menu());
   });
   bot.action(/^clone:delete:(yes|no)$/,async ctx=>{
     if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
@@ -247,7 +247,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     counting=true;
     let client;
     try{
-      await ctx.reply('🔎 Manba kanal tarixi sanalmoqda. Natijada jami va media turlari ko‘rsatiladi.',menu());
+      await ctx.reply('🔎 Manba kanal/guruh xabarlari sanalmoqda. Natijada jami va media turlari ko‘rsatiladi.',menu());
       const {TelegramClient}=require('teleproto');
       const {StringSession}=require('teleproto/sessions');
       client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
@@ -260,7 +260,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       await Config.updateOne({bot_key:selectedKey,source_username:cfg.source_username||'',source_chat_id:cfg.source_chat_id||'',target_chat_id:cfg.target_chat_id},
         {$set:{source_stats:result}});
       const sent=await Log.countDocuments({bot_key:selectedKey,status:'sent',target_chat_id:cfg.target_chat_id,
-        source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}});
+        source_key:{$regex:'^public:'+sourceKey(cfg).replace(/[.*+?^${}()|[\]\\]/g,'\\source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}')+':'}});
       await ctx.reply(formatCounts(result,sent),menu());
       return result;
     }catch(e){
@@ -271,7 +271,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.hears('🔢 Manba postlarini sanash',async ctx=>{
     if(!permitted(ctx))return;
     const cfg=await load(ctx);
-    if(!cfg?.source_username)return ctx.reply('❌ Avval manba kanalni ulang.',menu());
+    if(!sourceKey(cfg))return ctx.reply('❌ Avval manba kanal yoki guruhni ulang.',menu());
     void recount(ctx,cfg).catch(e=>console.warn('[clone] background source count:',String(e.message||e).slice(0,120)));
   });
   const humanInterval=mins=>{
