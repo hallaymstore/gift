@@ -97,8 +97,9 @@ function cleanSourceAdvertising(original,cfg={}){
     // otherwise every telegram.me/joinchat invite remains in cloned ads.
     const trimmed=line.trim();
     const onlyLink=matches.length===1 && trimmed===matches[0][0];
+    const isChatInvite=matches.some(match=>/\/(?:\+|joinchat\/)/i.test(match[0]));
     const surroundingText=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
-    if(!onlyLink && SELLER_LINK_CONTEXT.test(surroundingText) &&
+    if(!onlyLink && !isChatInvite && SELLER_LINK_CONTEXT.test(surroundingText) &&
        !SOURCE_FOOTER_HEADER.test(line) && !SOURCE_CTA_LABEL.test(line)){
       result.push(line);
       continue;
