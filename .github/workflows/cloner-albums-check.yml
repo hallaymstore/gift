@@ -1,0 +1,33 @@
+name: Cloner Telegram media album check
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-albums.js'
+      - 'bots/factory/channel-clone-albums.test.js'
+      - 'bots/factory/public-channel-watcher.js'
+      - 'bots/factory/server.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/cloner-albums-check.yml'
+  workflow_dispatch:
+
+jobs:
+  album-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Factory dependencies
+        working-directory: bots/factory
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Validate syntax
+        run: |
+          node --check bots/factory/channel-clone-albums.js
+          node --check bots/factory/public-channel-watcher.js
+          node --check bots/factory/server.js
+      - name: Run media album and watcher regressions
+        working-directory: bots/factory
+        run: |
+          node --test channel-clone-albums.test.js
+          node --test public-channel-watcher.test.js
