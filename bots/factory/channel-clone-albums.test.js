@@ -50,7 +50,7 @@ function logs(hasOld=false){
  const docs=new Map();
  return {docs,
  findOne(q){return {lean:async()=>q.source_key?.$in?(hasOld?{status:'sent'}:null):docs.get(q.source_key)||null};},
- async create(doc){docs.set(doc.source_key,{...doc});},
+ async create(doc){if(docs.has(doc.source_key)){const error=new Error('duplicate album log');error.code=11000;throw error;}docs.set(doc.source_key,{...doc});},
  async updateOne(q,u){Object.assign(docs.get(q.source_key),u.$set);return {modifiedCount:1};}};
 }
 test('four photos become one media group with one branded caption',async()=>{
