@@ -12,11 +12,18 @@ function redactTelegramSecrets(input) {
 
 function describeRelayError(error, maxLength=180) {
   const source=redactTelegramSecrets(error?.description || error?.message || error);
-  if(/socket hang up|ECONNRESET|EPIPE/i.test(source)) return 'Telegram bilan ulanish uzildi (socket hang up/ECONNRESET). Qayta urinish rejalashtirildi.';
-  if(/ETIMEDOUT|ESOCKETTIMEDOUT|timeout|network timeout|fetch failed/i.test(source)) return 'Telegram bilan aloqa vaqtincha uzildi (timeout). Qayta urinish rejalashtirildi.';
-  if(/caption is too long|caption_too_long/i.test(source)) return 'Rasm/video izohi Telegram ruxsat bergan hajmdan uzun.';
-  if(/Too Many Requests|FLOOD_WAIT|429|retry after/i.test(source)) return 'Telegram so‘rovlar sonini vaqtincha chekladi. Qayta urinish rejalashtirildi.';
-  return source.slice(0,Math.max(48,Number(maxLength)||180));
+  const id=source.match(/History post\\s+(\\d+)/i)?.[1];
+  const prefix=id?'History post '+id+': ':'';
+  let description=source;
+  if(/socket hang up|ECONNRESET|EPIPE/i.test(source))
+    description='Telegram bilan ulanish uzildi (socket hang up/ECONNRESET). Qayta urinish rejalashtirildi.';
+  else if(/ETIMEDOUT|ESOCKETTIMEDOUT|timeout|network timeout|fetch failed/i.test(source))
+    description='Telegram bilan aloqa vaqtincha uzildi (timeout). Qayta urinish rejalashtirildi.';
+  else if(/caption is too long|caption_too_long/i.test(source))
+    description='Rasm/video izohi Telegram ruxsat bergan hajmdan uzun.';
+  else if(/Too Many Requests|FLOOD_WAIT|429|retry after/i.test(source))
+    description='Telegram so‘rovlar sonini vaqtincha chekladi. Qayta urinish rejalashtirildi.';
+  return (prefix+description).slice(0,Math.max(48,Number(maxLength)||180));
 }
 
 module.exports={redactTelegramSecrets,describeRelayError};
