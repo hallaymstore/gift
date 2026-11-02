@@ -260,7 +260,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       await Config.updateOne({bot_key:selectedKey,source_username:cfg.source_username||'',source_chat_id:cfg.source_chat_id||'',target_chat_id:cfg.target_chat_id},
         {$set:{source_stats:result}});
       const sent=await Log.countDocuments({bot_key:selectedKey,status:'sent',target_chat_id:cfg.target_chat_id,
-        source_key:{$regex:'^public:'+sourceKey(cfg).replace(/[.*+?^${}()|[\]\\]/g,'\\source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}')+':'}});
+        source_key:{$regex:'^public:'+sourceKey(cfg)+':'}});
       await ctx.reply(formatCounts(result,sent),menu());
       return result;
     }catch(e){
