@@ -5,6 +5,7 @@ const {countSourcePosts}=require('./channel-clone-count');
 const {describeRelayError}=require('./channel-clone-errors');
 const {contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
 const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
+const {parsePeerReference,sourceRefLabel,sourceKey,resolveSourcePeer,listJoinedGroups,validateSourceReference}=require('./channel-clone-peers');
 
 function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
   const cloneKey=config.key||'channel_clone';
@@ -29,7 +30,9 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   const menu=()=>Markup.keyboard([
     ['➕ Yangi yo‘nalish','🗂 Yo‘nalishlar'],
     ['📊 Barcha yo‘nalishlar','⏸ Hammasini to‘xtatish'],
-    ['📥 Manba kanal','📤 Bizning kanal'],
+    ['📥 Manba kanal/guruh','📤 Bizning kanal/guruh'],
+    ['➕ Shu manzilga manba','🧭 Manbalar ro‘yxati'],
+    ['👥 Aʼzo bo‘lgan guruhlar'],
     ['🤖 Reklama botini ulash','📩 Reklama admini'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
@@ -52,7 +55,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   }
   const routeLabel=(c,i)=>String(c.route_title||(c.bot_key===cloneKey?'Asosiy kanal':'Yo‘nalish '+i)).slice(0,40);
   const load=ctx=>Config.findOne({bot_key:routeKey(ctx)}).lean();
-  const replyHelp=ctx=>ctx.reply('📡 CHANNEL CLONE BOT\n\nManba: ommaviy kanal (@username)\nMaqsad: o‘zingiz admin bo‘lgan kanal.\n\nManba postlar tarixidan olinadi, yangi postlar avtomatik kuzatiladi. Bir xil post takror joylanmaydi. Media serverga yuklanmaydi. Faqat ruxsat etilgan kontentdan foydalaning. 🔒 Himoyalangan postlar o‘tkazib yuboriladi; 📊 Holat bo‘limida hisobini ko‘rasiz.',menu());
+  const replyHelp=ctx=>ctx.reply('📡 CHANNEL / GROUP CLONE BOT\n\nManba: ochiq kanal/guruh @username yoki MTProto akkauntingiz aʼzo bo‘lgan xususiy guruh IDsi.\nMaqsad: o‘zingiz admin bo‘lgan kanal yoki guruh.\n\nBir nechta manbani bitta maqsadga biriktirish mumkin. Har bir manbaning tarixi va intervali alohida yuritiladi. Faqat ulashishga ruxsat etilgan kontentni ko‘chiring; himoyalangan xabarlar o‘tkazib yuboriladi.',menu());
   bot.start(async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return permitted(ctx)?replyHelp(ctx):ctx.reply('⛔ Ushbu xizmat uchun ruxsat yo‘q.');});
   bot.command('cancel',async ctx=>{ctx.session.step=null;ctx.session.wizard=false;return ctx.reply('✅ Amal bekor qilindi.',menu());});
   bot.hears('➕ Yangi yo‘nalish',async ctx=>{
@@ -69,7 +72,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const configs=await Config.find(routesQuery()).sort({createdAt:1}).limit(20).lean();
     if(!configs.length)return ctx.reply('Hozircha yo‘nalish yo‘q. ➕ Yangi yo‘nalish ni bosing.',menu());
     const rows=configs.map((r,i)=>[Markup.button.callback((r.bot_key===routeKey(ctx)?'✅ ':'')+
-      routeLabel(r,i+1)+' | '+(r.source_username?'@'+r.source_username:'manbasiz')+
+      routeLabel(r,i+1)+' | '+(sourceRefLabel(r)||'manbasiz')+
       ' → '+(r.target_username?'@'+r.target_username:'kanalsiz')+(r.auto_enabled?' 🟢':' ⏸'),'clone:route:'+r.bot_key)]);
     rows.push([Markup.button.callback('🗑 Tanlangan yo‘nalishni o‘chirish','clone:route:delete:ask')]);
     return ctx.reply('🗂 Yo‘nalishlar (tanlash uchun bosing):',Markup.inlineKeyboard(rows));
@@ -89,8 +92,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     await rememberRoute(ctx,id);
     ctx.session.step=null;
     ctx.session.wizard=false;
-    return ctx.reply('✅ Faol yo‘nalish: '+(found.route_title||id)+'\n📥 '+(found.source_username||'ulanmagan')+
-      '\n📤 '+(found.target_username||'ulanmagan')+'\n⏱ '+Number(found.publish_interval_minutes||0)+' daqiqa',menu());
+    return ctx.reply('✅ Faol yo‘nalish: '+(found.route_title||id)+'\n📥 '+(sourceRefLabel(found)||'ulanmagan')+
+      '\n📤 '+(found.target_username?'@'+found.target_username:found.target_title||found.target_chat_id||'ulanmagan')+'\n⏱ '+Number(found.publish_interval_minutes||0)+' daqiqa',menu());
   });
   bot.action(/^clone:delete:(yes|no)$/,async ctx=>{
     if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
@@ -109,7 +112,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!configs.length)return ctx.reply('📭 Yo‘nalishlar yo‘q. ➕ Yangi yo‘nalish tugmasini bosing.',menu());
     const lines=configs.map((r,i)=>
       (r.bot_key===routeKey(ctx)?'✅ ':'')+(i+1)+'. '+routeLabel(r,i+1)+
-      '\n📥 '+(r.source_username?'@'+r.source_username:'—')+
+      '\n📥 '+(sourceRefLabel(r)||'—')+
       ' → 📤 '+(r.target_username?'@'+r.target_username:'—')+
       '\n'+(r.auto_enabled?'🟢 Ishlamoqda':'⏸ To‘xtagan')+
       ' · ⏱ '+Number(r.publish_interval_minutes||0)+' daq'+
@@ -185,8 +188,48 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       'Maxsus taklif havolasi uchun botga Invite Users (foydalanuvchilarni taklif qilish) admin huquqini bering va tugmani qayta bosing.')+
       '\n\nManba linki mavjud Branded postlar aynan shu havolaga almashtiriladi.',menu());
   });
-  bot.hears('📥 Manba kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='source';return ctx.reply('Manba public kanal @username ni yuboring.');});
-  bot.hears('📤 Bizning kanal',async ctx=>{if(!permitted(ctx))return;ctx.session.step='target';return ctx.reply('O‘zingizga tegishli kanal @username ni yuboring. Botga post joylash huquqini bering.');});
+  bot.hears('📥 Manba kanal/guruh',async ctx=>{if(!permitted(ctx))return;ctx.session.step='source';return ctx.reply('📥 Manba: @kanal, @guruh yoki o‘zingiz aʼzo bo‘lgan xususiy guruh IDsi (-100...).\n👥 Aʼzo bo‘lgan guruhlar orqali ID ni toping.');});
+  bot.hears('📤 Bizning kanal/guruh',async ctx=>{if(!permitted(ctx))return;ctx.session.step='target';return ctx.reply('📤 O‘zingiz admin bo‘lgan kanal/guruh @username yoki guruh ID sini (-100...) yuboring. Kloner botni ham admin qiling.');});
+  async function withUserSession(fn){
+    if(!sessionReady())throw new Error('MTProto akkaunti sozlanmagan.');
+    const {TelegramClient}=require('teleproto');
+    const {StringSession}=require('teleproto/sessions');
+    const client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
+      Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
+    try{await client.connect();return await fn(client);}
+    finally{await client.disconnect().catch(()=>{});}
+  }
+  bot.hears('👥 Aʼzo bo‘lgan guruhlar',async ctx=>{
+    if(!permitted(ctx))return;
+    try{
+      const groups=await withUserSession(client=>listJoinedGroups(client,500,{fresh:true}));
+      if(!groups.length)return ctx.reply('📭 MTProto akkauntingiz aʼzo bo‘lgan guruhlar topilmadi.',menu());
+      const output=groups.slice(0,35).map((g,i)=>(i+1)+'. '+g.title.slice(0,45)+
+        '\n   '+(g.username?'@'+g.username:g.id));
+      return ctx.reply('👥 MTProto akkauntingiz aʼzo bo‘lgan guruhlar ('+groups.length+'):\n\n'+output.join('\n\n')+
+        '\n\n📥 Manba kanal/guruh tugmasini bosing va @username yoki guruh ID sini yuboring.',menu());
+    }catch(e){return ctx.reply('❌ Guruhlar ro‘yxati: '+describeRelayError(e,150),menu());}
+  });
+  bot.hears('➕ Shu manzilga manba',async ctx=>{
+    if(!permitted(ctx))return;
+    const selected=await load(ctx);
+    if(!selected?.target_chat_id)return ctx.reply('❌ Avval 📤 Bizning kanal/guruh ni ulang.',menu());
+    if(await Config.countDocuments(routesQuery())>=20)return ctx.reply('⚠️ 20 ta yo‘nalish limiti to‘lgan.',menu());
+    ctx.session.step='add_source';ctx.session.addSourceToRoute=routeKey(ctx);
+    return ctx.reply('➕ YANA BIR MANBA\n\n📤 Maqsad: '+(selected.target_username?'@'+selected.target_username:selected.target_title||selected.target_chat_id)+
+      '\n\nYangi manba @kanal, @guruh yoki aʼzo bo‘lgan guruh ID sini yuboring.\nHar bir manba alohida tarix va interval bilan ishlaydi.',menu());
+  });
+  bot.hears('🧭 Manbalar ro‘yxati',async ctx=>{
+    if(!permitted(ctx))return;
+    const selected=await load(ctx);
+    if(!selected?.target_chat_id)return ctx.reply('❌ Avval maqsad kanal yoki guruhni tanlang.',menu());
+    const routes=await Config.find({...routesQuery(),target_chat_id:selected.target_chat_id})
+      .sort({createdAt:1}).limit(20).lean();
+    return ctx.reply('🧭 BITTA MANZILGA ULANGAN MANBALAR\n📤 '+(selected.target_username?'@'+selected.target_username:selected.target_title||selected.target_chat_id)+
+      '\n\n'+routes.map((c,i)=>(i+1)+'. '+sourceRefLabel(c)+' '+(c.auto_enabled?'🟢':'⏸')+
+      ' | ⏱ '+humanInterval(c.publish_interval_minutes)).join('\n')+
+      '\n\n➕ Shu manzilga manba orqali yana qo‘shishingiz mumkin.',menu());
+  });
   let counting=false;
   const formatCounts=(n,sent=0)=>'📊 MANBA KANAL TAHLILI\n\n📚 Jami postlar: '+n.total+
     '\n🖼 Rasmlar: '+n.photo+'\n🎬 Videolar: '+n.video+
@@ -204,20 +247,20 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     counting=true;
     let client;
     try{
-      await ctx.reply('🔎 Manba kanal tarixi sanalmoqda. Natijada jami va media turlari ko‘rsatiladi.',menu());
+      await ctx.reply('🔎 Manba kanal/guruh xabarlari sanalmoqda. Natijada jami va media turlari ko‘rsatiladi.',menu());
       const {TelegramClient}=require('teleproto');
       const {StringSession}=require('teleproto/sessions');
       client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
         Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
       await client.connect();
-      const result=await countSourcePosts(client,cfg.source_username);
+      const result=await countSourcePosts(client,cfg);
       const current=await Config.findOne({bot_key:selectedKey}).lean();
-      if(current?.source_username!==cfg.source_username||current?.target_chat_id!==cfg.target_chat_id)
+      if(sourceKey(current)!==sourceKey(cfg)||current?.target_chat_id!==cfg.target_chat_id)
         throw new Error('Manba yoki maqsad kanal o‘zgardi. Qayta urinib ko‘ring.');
-      await Config.updateOne({bot_key:selectedKey,source_username:cfg.source_username,target_chat_id:cfg.target_chat_id},
+      await Config.updateOne({bot_key:selectedKey,source_username:cfg.source_username||'',source_chat_id:cfg.source_chat_id||'',target_chat_id:cfg.target_chat_id},
         {$set:{source_stats:result}});
       const sent=await Log.countDocuments({bot_key:selectedKey,status:'sent',target_chat_id:cfg.target_chat_id,
-        source_key:{$regex:'^public:'+cfg.source_username.toLowerCase()+':'}});
+        source_key:{$regex:'^public:'+sourceKey(cfg)+':'}});
       await ctx.reply(formatCounts(result,sent),menu());
       return result;
     }catch(e){
@@ -228,7 +271,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.hears('🔢 Manba postlarini sanash',async ctx=>{
     if(!permitted(ctx))return;
     const cfg=await load(ctx);
-    if(!cfg?.source_username)return ctx.reply('❌ Avval manba kanalni ulang.',menu());
+    if(!sourceKey(cfg))return ctx.reply('❌ Avval manba kanal yoki guruhni ulang.',menu());
     void recount(ctx,cfg).catch(e=>console.warn('[clone] background source count:',String(e.message||e).slice(0,120)));
   });
   const humanInterval=mins=>{
@@ -376,7 +419,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.hears('🏆 TOP 20',ctx=>showTop(ctx,20));
   bot.hears('▶️ Sinxronlash',async ctx=>{
     if(!permitted(ctx))return;const c=await load(ctx);
-    if(!c?.target_chat_id||!c?.source_username)return ctx.reply('Avval ikkala kanalni ulang.',menu());
+    if(!c?.target_chat_id||!sourceKey(c))return ctx.reply('Avval manba va maqsadni ulang.',menu());
     if(!sessionReady())return ctx.reply('Telegram sessiyasi mavjud emas.',menu());
     if(c.history_enabled&&!c.history_completed&&c.auto_enabled)return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
     if(counting)return ctx.reply('🔄 Postlar sanalayotgan paytda boshqa yo‘nalishni boshlash mumkin emas. Birozdan so‘ng qayta bosing.',menu());
@@ -388,13 +431,13 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       const stats=await recount(ctx,c);
       if(!stats)return;
       const saved=await Config.updateOne({
-        bot_key:selectedKey,source_username:c.source_username,target_chat_id:c.target_chat_id
+        bot_key:selectedKey,source_username:c.source_username||'',source_chat_id:c.source_chat_id||'',target_chat_id:c.target_chat_id
       },{$set:{auto_enabled:true,history_enabled:true,history_completed:false,
         history_last_error:'',history_retry_at:null,history_error_count:0}});
       if(!saved.matchedCount)return ctx.telegram.sendMessage(chatId,'⚠️ Kanal sozlamasi o‘zgargan, sinxronlash boshlanmadi.');
       await ctx.telegram.sendMessage(chatId,
-        '✅ '+(c.route_title||'Tanlangan yo‘nalish')+' ishga tushirildi!\n📥 @'+c.source_username+
-        '\n📤 @'+(c.target_username||'kanal')+'\n📚 '+stats.total+' ta tarixiy post tekshirildi. Dublikatlar yuborilmaydi.');
+        '✅ '+(c.route_title||'Tanlangan yo‘nalish')+' ishga tushirildi!\n📥 '+sourceRefLabel(c)+
+        '\n📤 '+(c.target_username?'@'+c.target_username:(c.target_title||c.target_chat_id))+'\n📚 '+stats.total+' ta tarixiy post tekshirildi. Dublikatlar yuborilmaydi.');
     })().catch(e=>{
       console.warn('[clone] start background:',String(e.message||e).slice(0,170));
       void ctx.telegram.sendMessage(chatId,'❌ Sinxronlash boshlanmadi: '+String(e.message||e).slice(0,150)).catch(()=>{});
@@ -404,7 +447,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.hears('⏸ To‘xtatish',async ctx=>{if(!permitted(ctx))return;await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:false,history_enabled:false}});return ctx.reply('⏸ Sinxronlash to‘xtatildi.',menu());});
   bot.hears('🔄 Eski postlarni qayta tekshirish',async ctx=>{
     if(!permitted(ctx))return;const c=await load(ctx);
-    if(!c?.source_username||!c?.target_chat_id)return ctx.reply('Avval kanallarni ulang.',menu());
+    if(!sourceKey(c)||!c?.target_chat_id)return ctx.reply('Avval manba va maqsadni ulang.',menu());
     if(c.history_enabled&&!c.history_completed)return ctx.reply('🔄 Sinxronlash davom etmoqda.',menu());
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{auto_enabled:true,history_enabled:true,history_completed:false,history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0}});
     return ctx.reply('✅ Tarix qayta tekshiriladi. Ilgari yuborilgan postlar MongoDB jurnalidan aniqlanadi.',menu());
@@ -412,12 +455,12 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.hears('🧪 Ulanishni tekshirish',async ctx=>{
     if(!permitted(ctx))return;
     const c=await load(ctx);
-    if(!c?.source_username||!c?.target_chat_id)return ctx.reply('❌ Manba va joylash kanallarini ulang.',menu());
+    if(!sourceKey(c)||!c?.target_chat_id)return ctx.reply('❌ Manba va maqsadni ulang.',menu());
     let client;
     try {
       const me=await ctx.telegram.getMe();
       const member=await ctx.telegram.getChatMember(c.target_chat_id,me.id);
-      if(member.status!=='creator'&&!(member.status==='administrator'&&member.can_post_messages))
+      if(member.status!=='creator'&&member.status!=='administrator')
         return ctx.reply('❌ Bot maqsad kanalga post joylay olmaydi. Botga Post Messages huquqini bering.',menu());
       if(!sessionReady())return ctx.reply('❌ Render user sessiyasi mavjud emas.',menu());
       const {TelegramClient}=require('teleproto');
@@ -425,20 +468,22 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       client=new TelegramClient(new StringSession(process.env.TELEGRAM_STRING_SESSION),
         Number(process.env.TELEGRAM_API_ID),process.env.TELEGRAM_API_HASH,{connectionRetries:3});
       await client.connect();
-      const messages=await client.getMessages('@'+c.source_username,{limit:20});
+      const messages=await client.getMessages(await resolveSourcePeer(client,c),{limit:20});
       const sample=messages.find(x=>x && !x.action && (x.media||x.message));
       if(!sample)return ctx.reply('⚠️ Manbadan nusxalanadigan post topilmadi.',menu());
       if(sample.noforwards||sample.noForwards||sample.chat?.noforwards||sample.chat?.noForwards)
         return ctx.reply('🔒 Manba kanal nusxalashdan himoyalangan. Ushbu postni avtomatik uzatish mumkin emas. Kanal egasidan ruxsat yoki asl fayllarni so‘rang.',menu());
       try {
-        const test=await ctx.telegram.copyMessage(ctx.from.id,'@'+c.source_username,Number(sample.id),
+        const test=await ctx.telegram.copyMessage(ctx.from.id,c.source_username?'@'+c.source_username:c.source_chat_id,Number(sample.id),
           {caption:'🧪 Kanal klonlash sinovi (kanalingizga yuborilmadi)'});
         await ctx.reply('✅ Bot API manba postni nusxalashga ruxsat oldi. Maqsad botining admin huquqi ham bor. Sinov xabari: '+test.message_id,menu());
       } catch(e) {
         if(/CHAT_FORWARDS_RESTRICTED|protected content|message is protected/i.test(String(e.description||e.message||e)))
           return ctx.reply('🔒 Telegram nusxalashni rad etdi: manba egasi kontentni himoyalagan. Asl faylni yoki manba egasining ruxsatini oling.',menu());
-        await ctx.reply('⚠️ Telegram akkaunti manbani o‘qiydi, lekin sizning bot Bot API orqali uni nusxalay olmaydi.\nSabab: '+String(e.description||e.message||e).slice(0,190)+
-          '\n\nBunday manba uchun akkauntning maqsad kanalga postlash huquqi yoki ruxsatli boshqa uzatish mexanizmi kerak.',menu());
+        const reason=describeRelayError(e,135);
+        await ctx.reply('ℹ️ MTProto akkauntingiz manba '+(c.source_type==='group'?'guruh':'kanal')+' xabarlarini o‘qiy oladi.'+
+          '\nBot API to‘g‘ridan-to‘g‘ri nusxa olmadi: '+reason+
+          '\n\nSinxronlash media fayllarini ruxsat doirasida bot orqali qayta yuborishni, matnlar uchun esa botning matn yuborish usulini sinaydi. Katta media va cheklangan postlar o‘tkazilmasligi mumkin.',menu());
       }
     }catch(e){return ctx.reply('❌ Tekshirish xatosi: '+String(e.message||e).slice(0,190),menu());}
     finally{if(client)await client.disconnect().catch(()=>{});}
@@ -465,8 +510,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;const c=await load(ctx);const sent=await Log.countDocuments({bot_key:routeKey(ctx),target_chat_id:c?.target_chat_id,status:'sent'});
     const retryAt=c?.history_retry_at?new Date(c.history_retry_at).getTime():0;
     const retryMinutes=retryAt>Date.now()?Math.ceil((retryAt-Date.now())/60000):0;
-    return ctx.reply('📊 CHANNEL CLONE\nYo‘nalish: '+(c?.route_title||'Asosiy')+'\nManba: '+(c?.source_username?'@'+c.source_username:'yo‘q')+
-      '\nKanal: '+(c?.target_username?'@'+c.target_username:'yo‘q')+
+    return ctx.reply('📊 CHANNEL / GROUP CLONE\nYo‘nalish: '+(c?.route_title||'Asosiy')+'\nManba: '+(sourceRefLabel(c)||'yo‘q')+
+      '\nMaqsad: '+(c?.target_username?'@'+c.target_username:(c?.target_title||'yo‘q'))+
       '\nKuzatuv: '+(c?.auto_enabled?'yoqilgan':'o‘chiq')+
       '\n⏱ Interval: '+humanInterval(c?.publish_interval_minutes)+
       (c?.next_publish_at&&Number(c.publish_interval_minutes)>0?'\n🕒 Navbatdagi vaqt (server): '+new Date(c.next_publish_at).toLocaleString('uz-UZ',{timeZone:'Asia/Tashkent'}):'')+
@@ -490,7 +535,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;
     const key=routeKey(ctx);
     const current=await load(ctx);
-    if(!current?.source_username||!current?.target_chat_id)
+    if(!sourceKey(current)||!current?.target_chat_id)
       return ctx.reply('❌ Bu yo‘nalish uchun manba va maqsad kanal belgilanmagan.',menu());
     if(!current.auto_enabled)
       return ctx.reply('⏸ Yo‘nalish to‘xtatilgan. Avval ▶️ Sinxronlash ni bosing.',menu());
@@ -588,7 +633,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(choice==='cancel')return ctx.reply('Bekor qilindi.',menu());
     const $set={auto_enabled:false,history_enabled:false,history_completed:false,
       history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0};
-    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_cursor:0});
+    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_title:'',source_type:'',source_cursor:0});
     if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:'',target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null});
     await Config.updateOne({bot_key:routeKey(ctx)},{$set},{upsert:true});
     ctx.session.step=null;
@@ -597,7 +642,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     if(step==='interval_custom'){
       const selected=ctx.session.intervalRoute||routeKey(ctx);
@@ -616,77 +661,149 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       await Config.create({bot_key:id,owner_bot_key:cloneKey,route_title:title,source_mode:'mtproto',auto_enabled:false});
       await rememberRoute(ctx,id);
       ctx.session.step='source';
-      return ctx.reply('✅ '+title+' yo‘nalishi yaratildi!\n\n1/3 📥 Manba kanal @username ni yuboring.',menu());
+      return ctx.reply('✅ '+title+' yo‘nalishi yaratildi!\n\n1/3 📥 Manba @kanal, @guruh yoki -100... guruh ID sini yuboring.',menu());
     }
-    const handle=telegramHandle(ctx.message.text);
-    if(!handle){ctx.session.step=step;return ctx.reply('❌ To‘g‘ri Telegram username kiriting: @username yoki https://t.me/username.',menu());}
+    const handle=telegramHandle(raw);
     if(step==='promo_admin'){
-      const contact=contactUsername(raw);
-      await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_admin_username:contact}},{upsert:true});
-      return ctx.reply('✅ Reklama admini: @'+contact+'\n\nYangi Branded postlar ostida: 📩 Reklama uchun: @'+contact+'\n\nAvval yuborilgan postlar uchun 🧹 Eski postlar matnini tuzatish ni bosing.',menu());
+      if(!handle){ctx.session.step=step;return ctx.reply('❌ Reklama adminining @username yoki t.me/username havolasini yuboring.',menu());}
+      await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_admin_username:contactUsername(raw)}},{upsert:true});
+      return ctx.reply('✅ Reklama admini: @'+handle+
+        '\nAvval yuborilgan postlar uchun 🧹 Eski postlar matnini tuzatish ni bosing.',menu());
     }
     if(step==='promo_bot'){
+      if(!handle){ctx.session.step=step;return ctx.reply('❌ Bot @username kiriting.',menu());}
       try{
         const botInfo=await ctx.telegram.getChat('@'+handle);
-        if(botInfo.type!=='private')return ctx.reply('❌ Bot username’ini yuboring (kanal emas).',menu());
+        if(botInfo.type!=='private'){ctx.session.step=step;return ctx.reply('❌ Bot username’ini yuboring (kanal yoki guruh emas).',menu());}
         await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_bot_username:handle}},{upsert:true});
         return ctx.reply('✅ Postlar ostida ko‘rsatiladigan bot: @'+handle,menu());
-      }catch(e){return ctx.reply('❌ Bot username’i tekshirib bo‘lmadi: '+String(e.message||e).slice(0,140),menu());}
+      }catch(e){ctx.session.step=step;return ctx.reply('❌ Bot username tekshiruvi: '+describeRelayError(e,140),menu());}
     }
-    if(step==='target'){
-      try{
-        const chat=await ctx.telegram.getChat('@'+handle);
-        const me=await ctx.telegram.getMe();
-        const rights=await ctx.telegram.getChatMember(chat.id,me.id);
-        const ownerRights=await ctx.telegram.getChatMember(chat.id,ctx.from.id);
-        if(!['creator','administrator'].includes(ownerRights.status))
-          return ctx.reply('❌ Maqsad kanalga faqat uning administratori ulanishi mumkin.',menu());
-        if(chat.type!=='channel'||!['creator','administrator'].includes(rights.status)||
-           (rights.status==='administrator'&&!rights.can_post_messages))
-          return ctx.reply('❌ Botni kanalga post joylash huquqi bilan admin qiling.',menu());
-        const sourceForRoute=(await load(ctx))?.source_username;
-        if(sourceForRoute){
-          const clash=await Config.findOne({
-            $and:[routesQuery(),{bot_key:{$ne:routeKey(ctx)}},
-              {source_username:sourceForRoute,target_chat_id:String(chat.id)}]
-          }).select('route_title').lean();
-          if(clash)return ctx.reply('⚠️ Shu manba va maqsad kanal juftligi boshqa yo‘nalishda mavjud: '+(clash.route_title||'Asosiy')+
-            '. Ikkita bir xil yo‘nalish kanalingizda takroriy postlar chiqarishi mumkin.',menu());
-        }
-        const existingTarget=await load(ctx);
-        const changedTarget=Boolean(existingTarget?.target_chat_id&&String(existingTarget.target_chat_id)!==String(chat.id));
-        const newTargetData={target_chat_id:String(chat.id),target_username:handle,target_title:chat.title||handle};
-        if(changedTarget){forgetRouteInvite({bot_key:routeKey(ctx),target_chat_id:existingTarget.target_chat_id});Object.assign(newTargetData,{
-          target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null,
-          source_cursor:0,history_cursor:0,history_ceiling:0,
-          history_completed:false,history_enabled:false,auto_enabled:false,
-          history_sent:0,history_skipped:0,history_last_error:'',
-          history_retry_at:null,history_error_count:0,top_metrics_cache:null,
-          next_publish_at:null
-        });}
-        await Config.updateOne({bot_key:routeKey(ctx)},{$set:newTargetData},{upsert:true});
-        if(ctx.session.wizard){
-          ctx.session.wizard=false;
-          return ctx.reply('✅ Yo‘nalish tayyor!\n📥 Manba: @'+(await load(ctx))?.source_username+
-            '\n📤 Kanal: @'+handle+
-            '\n\n3/3 🤖 Reklama botini ulash (ixtiyoriy), ⏱ Postlash intervali ni tanlang va ▶️ Sinxronlash tugmasini bosing.\n\nBoshqa kanal juftligini yaratish uchun ➕ Yangi yo‘nalish ni bosing.',menu());
-        }
-        return ctx.reply('✅ Joylash kanali: @'+handle+(changedTarget?'\n🔄 Yangi kanal uchun tarixiy navbat qayta boshlanadi. Oldingi kanal postlari o‘zgarmaydi.':'')+'\n▶️ Sinxronlash ni bosing.',menu());
-      }catch(e){return ctx.reply('❌ Kanal tekshiruvi: '+String(e.message||e).slice(0,140),menu());}
-    }
-    if(step==='source'){
-      if(!sessionReady())return ctx.reply('⚠️ Telegram user sessiyasi sozlanmagan. Render env: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_STRING_SESSION.',menu());
+    if(step==='source'||step==='add_source'){
+      if(!parsePeerReference(raw)){ctx.session.step=step;return ctx.reply('❌ @kanal, @guruh yoki xususiy guruhning -100... ID sini yuboring.',menu());}
+      let source;
+      try{source=await withUserSession(client=>validateSourceReference(client,raw));}
+      catch(e){ctx.session.step=step;return ctx.reply('❌ Manbaga kirish tekshiruvi: '+describeRelayError(e,180)+
+        '\nOchiq kanal/guruhni MTProto akkauntingiz o‘qiy olishi, xususiy guruhga esa aʼzo bo‘lishi kerak.',menu());}
+      if(step==='add_source'){
+        const originalKey=ctx.session.addSourceToRoute;ctx.session.addSourceToRoute=null;
+        const target=await Config.findOne({bot_key:originalKey,$or:[
+          {owner_bot_key:cloneKey},{bot_key:cloneKey}]}).lean();
+        if(!target?.target_chat_id)return ctx.reply('❌ Tanlangan manzil topilmadi. Qayta tanlang.',menu());
+        if(await Config.countDocuments(routesQuery())>=20)return ctx.reply('❌ 20 ta yo‘nalish limiti to‘lgan.',menu());
+        const existing=await Config.findOne({...routesQuery(),target_chat_id:target.target_chat_id,
+          ...(source.source_username?{source_username:source.source_username}:{source_chat_id:source.source_chat_id})
+        }).lean();
+        if(existing)return ctx.reply('⚠️ Shu manba bu manzilga allaqachon ulangan: '+(existing.route_title||existing.bot_key),menu());
+        const id=cloneKey+':r'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+        await Config.create({
+          bot_key:id,owner_bot_key:cloneKey,route_title:(source.source_title||'Manba').slice(0,40),
+          ...source,source_mode:'mtproto',
+          target_chat_id:target.target_chat_id,target_username:target.target_username||'',
+          target_title:target.target_title||'',target_type:target.target_type||'channel',
+          target_invite_link:target.target_invite_link||'',
+          target_invite_chat_id:target.target_invite_chat_id||'',
+          clone_format:target.clone_format||'branded',
+          promo_bot_username:target.promo_bot_username||'',
+          promo_admin_username:target.promo_admin_username||'',
+          publish_interval_minutes:Number(target.publish_interval_minutes)||0,
+          auto_enabled:false,history_enabled:false,history_completed:false,source_cursor:0,history_cursor:0
+        });
+        await rememberRoute(ctx,id);
+        return ctx.reply('✅ Yangi manba ulandi!\n📥 '+sourceRefLabel(source)+
+          '\n📤 '+(target.target_username?'@'+target.target_username:target.target_title||target.target_chat_id)+
+          '\n\nBu manba mustaqil yo‘nalish sifatida saqlandi. ▶️ Sinxronlash tugmasini bosing. Boshqa manbalar ishlashda davom etadi.',menu());
+      }
+      const current=await load(ctx);
+      if(sourceKey(current)===sourceKey(source))
+        return ctx.reply('✅ Bu manba allaqachon tanlangan: '+sourceRefLabel(source),menu());
+      if(current?.target_chat_id){
+        const existing=await Config.findOne({...routesQuery(),bot_key:{$ne:routeKey(ctx)},
+          target_chat_id:current.target_chat_id,
+          ...(source.source_username?{source_username:source.source_username}:{source_chat_id:source.source_chat_id})
+        }).lean();
+        if(existing)return ctx.reply('⚠️ Bu manba shu maqsadga boshqa yo‘nalishda ulangan: '+existing.route_title,menu());
+      }
       await Config.updateOne({bot_key:routeKey(ctx)},{$set:{
-        source_username:handle,source_mode:'mtproto',source_cursor:0,
+        ...source,source_mode:'mtproto',source_cursor:0,
         history_enabled:false,history_completed:false,history_cursor:0,history_ceiling:0,
-        auto_enabled:false
+        history_retry_at:null,history_error_count:0,auto_enabled:false
       }},{upsert:true});
       if(ctx.session.wizard){
         ctx.session.step='target';
-        return ctx.reply('✅ Manba: @'+handle+'\n\n2/3 📤 Endi O‘Z kanalingiz @username ni yuboring. Kloner bot kanal administratori bo‘lishi kerak.',menu());
+        return ctx.reply('✅ Manba: '+sourceRefLabel(source)+
+          '\n\n2/3 📤 Endi o‘zingiz admin bo‘lgan kanal/guruh @username yoki -100... ID sini yuboring. Bot ham admin bo‘lishi kerak.',menu());
       }
-      return ctx.reply('✅ Manba: @'+handle+'. Endi ▶️ Sinxronlash ni bosing.',menu());
+      return ctx.reply('✅ Manba: '+sourceRefLabel(source)+'. Endi ▶️ Sinxronlash ni bosing.',menu());
     }
+    if(step==='target'){
+      const parsed=parsePeerReference(raw);
+      if(!parsed){ctx.session.step=step;return ctx.reply('❌ Maqsad @kanal, @guruh yoki guruhning -100... ID si bo‘lishi kerak.',menu());}
+      try{
+        const chat=await ctx.telegram.getChat(parsed.peer);
+        if(!['channel','supergroup','group'].includes(chat.type)){
+          ctx.session.step=step;return ctx.reply('❌ Maqsad kanal yoki guruh bo‘lishi kerak.',menu());
+        }
+        const me=await ctx.telegram.getMe();
+        const [rights,ownerRights]=await Promise.all([
+          ctx.telegram.getChatMember(chat.id,me.id),
+          ctx.telegram.getChatMember(chat.id,ctx.from.id)
+        ]);
+        if(!['creator','administrator'].includes(ownerRights.status)){
+          ctx.session.step=step;return ctx.reply('❌ Siz bu kanal/guruhda administrator bo‘lishingiz kerak.',menu());
+        }
+        if(!['creator','administrator'].includes(rights.status) ||
+          (chat.type==='channel' && rights.status==='administrator' && !rights.can_post_messages)){
+          ctx.session.step=step;return ctx.reply('❌ Cloner botni shu kanal/guruhga post yozish huquqi bilan administrator qiling.',menu());
+        }
+        const activeRoute=await load(ctx);
+        if(sourceKey(activeRoute)){
+          const duplicate=await Config.findOne({...routesQuery(),bot_key:{$ne:routeKey(ctx)},
+            target_chat_id:String(chat.id),
+            ...(activeRoute.source_username
+              ?{source_username:activeRoute.source_username}
+              :{source_chat_id:activeRoute.source_chat_id})
+          }).lean();
+          if(duplicate){
+            ctx.session.step=step;
+            return ctx.reply('⚠️ Bu manba va maqsad juftligi boshqa yo‘nalishda allaqachon mavjud: '+
+              (duplicate.route_title||duplicate.bot_key),menu());
+          }
+        }
+        const existingTarget=activeRoute;
+        const changed=Boolean(existingTarget?.target_chat_id &&
+          String(existingTarget.target_chat_id)!==String(chat.id));
+        const newData={target_chat_id:String(chat.id),target_username:chat.username||parsed.username||'',
+          target_title:chat.title||chat.username||'Guruh',target_type:chat.type};
+        if(changed){
+          forgetRouteInvite({bot_key:routeKey(ctx),target_chat_id:existingTarget.target_chat_id});
+          Object.assign(newData,{
+            target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null,
+            source_cursor:0,history_cursor:0,history_ceiling:0,
+            history_completed:false,history_enabled:false,auto_enabled:false,
+            history_sent:0,history_skipped:0,history_last_error:'',
+            history_retry_at:null,history_error_count:0,top_metrics_cache:null,next_publish_at:null
+          });
+        }
+        await Config.updateOne({bot_key:routeKey(ctx)},{$set:newData},{upsert:true});
+        const destination=newData.target_username?'@'+newData.target_username:newData.target_title;
+        if(ctx.session.wizard){
+          ctx.session.wizard=false;
+          return ctx.reply('✅ Yo‘nalish tayyor!\n📥 '+sourceRefLabel(await load(ctx))+
+            '\n📤 '+destination+
+            '\n\n🤖 Reklama botini ulash, ⏱ Postlash intervali ni tanlash va ▶️ Sinxronlash mumkin.'+
+            '\n➕ Shu manzilga manba orqali yana kanal/guruhlar biriktiring.',menu());
+        }
+        return ctx.reply('✅ Maqsad: '+destination+
+          (changed?'\n🔄 Faqat shu yo‘nalish tarixiy navbati yangilandi.':'')+
+          '\n▶️ Sinxronlash ni bosing.',menu());
+      }catch(e){
+        ctx.session.step=step;
+        return ctx.reply('❌ Maqsad kanal/guruh tekshiruvi: '+describeRelayError(e,180)+
+          '\nBotni guruhga/kanaIga admin qilib qo‘shing, keyin ID yoki @username kiriting.',menu());
+      }
+    }
+
   });
   return {key:cloneKey,title:config.title||'Channel Clone Bot',bot,config};
 }

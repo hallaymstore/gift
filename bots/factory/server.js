@@ -389,8 +389,11 @@ const relayConfigSchema = new mongoose.Schema({
   target_chat_id: String,
   target_username: String,
   target_title: String,
+  target_type: {type:String,default:'channel'},
   source_chat_id: String,
   source_username: String,
+  source_title: String,
+  source_type: {type:String,default:'channel'},
   source_mode: { type: String, default: 'bot_api' },
   source_cursor: { type: Number, default: 0 },
   history_enabled: {type:Boolean,default:false},
@@ -10871,9 +10874,9 @@ Qayta token yuboring yoki /cancel bosing.`);
   return { key: 'factory', title: 'BotFactory', bot, config: { key: 'factory', title: 'BotFactory' } };
 }
 
-// Public-channel monitor via a user-owned Telegram MTProto session.
-// Only admin-configured public channels are read. Never reads private chats.
-// Channel ownership/posting rights are checked when the target is configured.
+// Explicitly configured public channels/groups, or user-joined private groups,
+// are read through an authorized MTProto session. Never scan private chats or DMs.
+// User ownership and bot post rights are checked before saving target groups/channels.
 let publicSourceWatcher = null;
 async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind,phase,result,ceiling,error}) {
   const selector={bot_key:cfg.bot_key,source_username:cfg.source_username,
@@ -10967,7 +10970,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     throw new Error('Nishon kino boti faol emas; keyingi so‘rovda qayta urinish');
   }
   const botTelegram = active.bot.telegram;
-  const legacySourceKey='public:'+sourceUsername.toLowerCase()+':'+message.id;
+  const legacySourceKey='public:'+String(sourceUsername).toLowerCase()+':'+message.id;
   // A route can be reconnected to a new destination. The same source post
   // is a new delivery there, but must not be reposted to the original channel.
   const sourceKey=legacySourceKey+':target:'+String(cfg.target_chat_id);
@@ -10996,7 +10999,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     if (!created) return {status:'failed',error:'Relay post pending or previously sent'};
   }
   try {
-    const caption = publicMessageData(message,sourceUsername);
+    const caption = publicMessageData(message,cfg.source_username||sourceUsername);
     const code = candidateCode(caption);
     const local = code
       ? await Content.findOne({bot_key:cfg.bot_key,code_norm:normalizeCode(code),is_active:true})
@@ -11029,7 +11032,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
       // copyMessage supports replacing media captions while keeping original media.
       try {
         sent = await botTelegram.copyMessage(
-          cfg.target_chat_id, '@' + sourceUsername, Number(message.id),
+          cfg.target_chat_id, cfg.source_username?'@'+cfg.source_username:cfg.source_chat_id, Number(message.id),
           originalFormat ? {} : {caption:branded}
         );
       } catch (botCopyError) {
@@ -11051,7 +11054,10 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
           // This avoids adding the shared account to every customer's channel.
           const {uploadSourceMedia}=require('./channel-clone-media');
           try {
-            sent=await uploadSourceMedia({
+            if(kind==='text'){
+              sent=await botTelegram.sendMessage(cfg.target_chat_id,
+                originalFormat?String(message.message||''):branded,{disable_web_page_preview:true});
+            } else sent=await uploadSourceMedia({
               client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,
               caption:originalFormat?String(message.message||''):branded
             });
@@ -11100,7 +11106,8 @@ async function launchPublicSourceMonitor() {
       listSources:async()=>{
         if (!(mongoReady && mongoose.connection.readyState===1)) return [];
         return ChannelRelayConfig.find({auto_enabled:true,source_mode:'mtproto',
-          source_username:{$exists:true,$ne:''},target_chat_id:{$exists:true,$ne:''}})
+          $or:[{source_username:{$exists:true,$ne:''}},{source_chat_id:{$exists:true,$ne:''}}],
+          target_chat_id:{$exists:true,$ne:''}})
           .sort({bot_key:1}).limit(200).lean();
       },
       deliver:routeExternalPublicPost

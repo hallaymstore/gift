@@ -1,6 +1,7 @@
 'use strict';
 
 const {describeRelayError}=require('./channel-clone-errors');
+const {resolveSourcePeer,sourceKey}=require('./channel-clone-peers');
 
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
 const LIVE_POLL_MS = 30000;
@@ -71,9 +72,9 @@ function canRepublish(message) {
 // ID taken when the historic sync starts. New posts are never blocked by backfill.
 async function scanLive({client,cfg,deliver,log=console}) {
   if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
-  const handle=normalizePublicUsername(cfg.source_username);
+  const handle=sourceKey(cfg);
   if(!handle)return;
-  const entity='@'+handle;
+  const entity=await resolveSourcePeer(client,cfg);
   const cursor=Number(cfg.source_cursor||0);
   // With a configured route interval, old and new posts share ONE delivery
   // schedule. Do not relay live posts ahead of the historic backlog.
@@ -122,15 +123,16 @@ async function scanHistory({client,cfg,deliver,log=console}){
   if(cfg.history_enabled!==true || cfg.history_completed===true)return;
   if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
   if(Number(cfg.publish_interval_minutes)>0 && cfg.next_publish_at && new Date(cfg.next_publish_at).getTime()>Date.now())return;
-  const handle=normalizePublicUsername(cfg.source_username);
+  const handle=sourceKey(cfg);
   if(!handle || Number(cfg.source_cursor||0)<=0)return; // live baseline first
+  const entity=await resolveSourcePeer(client,cfg);
   const ceiling=Number(cfg.history_ceiling||cfg.source_cursor);
   if(!Number(cfg.history_ceiling)){
     await deliver({type:'history_begin',cfg,ceiling});
     cfg.history_ceiling=ceiling;
   }
   const before=Number(cfg.history_cursor||0);
-  const batch=orderedIds(await client.getMessages('@'+handle,{
+  const batch=orderedIds(await client.getMessages(entity,{
     limit:HISTORY_BATCH_SIZE,reverse:true,minId:before
   }));
   if(!batch.length){

@@ -1,5 +1,6 @@
 'use strict';
 const {mediaKind}=require('./public-channel-watcher');
+const {resolveSourcePeer}=require('./channel-clone-peers');
 
 function emptyCounts(){
   return {total:0,photo:0,video:0,audio:0,document:0,sticker:0,animation:0,text:0,links:0,other:0};
@@ -9,9 +10,9 @@ function hasLink(m){
   return /(?:https?:\/\/|t\.me\/|www\.|@[A-Za-z][A-Za-z0-9_]{4,31})/i.test(t) ||
     (m.entities||[]).some(e=>/MessageEntity(?:TextUrl|Url)/.test(String(e.className||'')));
 }
-async function countSourcePosts(client,username,{onProgress,limitPages=10000}={}){
+async function countSourcePosts(client,source,{onProgress,limitPages=10000}={}){
   const counts=emptyCounts();
-  const peer='@'+String(username).replace(/^@/,'');
+  const peer=typeof source==='string'?'@'+String(source).replace(/^@/,''):await resolveSourcePeer(client,source);
   let offsetId=0, pages=0, lastId=0;
   while(pages++<limitPages){
     const opts={limit:100};
