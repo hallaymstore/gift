@@ -139,3 +139,56 @@ test('seller Telegram contact link inside text stays intact',()=>{
   assert.ok(text.includes('https://t.me/Kino_Channel'));
   assert.ok(!text.includes('OldPromo'));
 });
+
+
+test('real car ad: old telegram.me/joinchat group invite is replaced, price and phones preserved',()=>{
+  const source=[
+    '🚘 Moshina: #Hogqi eqm5',
+    '📍 Pozitsiya: Full',
+    '📡 Yil: 2024',
+    '💲 Narxi: 15300$',
+    '☎️ Tel: +998942892226',
+    '☎️ Tel: +998976330393',
+    '🚩 Tashkent',
+    '✅ Hamma qulayliklari bor',
+    '',
+    'https://telegram.me/joinchat/PP8gLRFIdeRlN2Qy'
+  ].join('\n');
+  const car={target_username:'MOSHINA_BOZORI_NARXLARI',promo_admin_username:'Qoryogdiyev'};
+  const result=buildClonePostText(source,car,1024);
+  assert.ok(result.includes('Narxi: 15300$'));
+  assert.ok(result.includes('+998942892226'));
+  assert.ok(result.includes('+998976330393'));
+  assert.ok(result.includes('https://t.me/MOSHINA_BOZORI_NARXLARI'));
+  assert.ok(!result.includes('telegram.me/joinchat'));
+  assert.ok(!result.includes('PP8gLRFIdeRlN2Qy'));
+  assert.ok(result.endsWith('📩 Reklama uchun: @Qoryogdiyev'));
+  assert.equal(refreshClonePostText(result,car,1024),result);
+});
+
+test('telegram.me private group invite with Telegram chat label also gets replaced',()=>{
+  const source='Salon eʼloni, 6500$\n\nTelegram chatimiz: https://telegram.me/joinchat/OldInviteKey';
+  const result=buildClonePostText(source,cfg,1024);
+  assert.ok(result.includes('Salon eʼloni, 6500$'));
+  assert.ok(!result.includes('OldInviteKey'));
+  assert.ok(result.includes('https://t.me/Kino_Channel'));
+});
+
+test('do not replace a seller personal contact just because domain is telegram.me',()=>{
+  const source='Narxi 6800$\nSotuvchi telegram: https://telegram.me/SellerContact777\n☎️ +998901112233\n\nhttps://telegram.me/joinchat/SourceGroup';
+  const result=buildClonePostText(source,cfg,1024);
+  assert.ok(result.includes('https://telegram.me/SellerContact777'));
+  assert.ok(result.includes('+998901112233'));
+  assert.ok(!result.includes('SourceGroup'));
+  assert.ok(result.includes('https://t.me/Kino_Channel'));
+});
+
+test('the same private group invite is replaced in a preexisting branded caption',()=>{
+  const source='Avtomobil 2024, 15300$\n\nhttps://telegram.me/joinchat/OldGroupInvite\n\n📢 Kanalimiz: @Kino_Channel\n📩 Reklama uchun: @ads_admin_uz';
+  const repaired=refreshClonePostText(source,cfg,1024);
+  assert.ok(!repaired.includes('OldGroupInvite'));
+  assert.ok(repaired.includes('https://t.me/Kino_Channel'));
+  assert.equal(repaired.split('📢 Kanalimiz:').length-1,1);
+  assert.equal(repaired.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(refreshClonePostText(repaired,cfg,1024),repaired);
+});

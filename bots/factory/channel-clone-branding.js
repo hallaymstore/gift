@@ -92,16 +92,19 @@ function cleanSourceAdvertising(original,cfg={}){
       result.push(line);
       continue;
     }
-    // If this line contains a seller's own Telegram contact, preserve it.
-    // Only channel promo links are replaced, not sellers' contact details.
-    if(SELLER_LINK_CONTEXT.test(line) && !SOURCE_FOOTER_HEADER.test(line)
-       && !SOURCE_CTA_LABEL.test(line)){
+    // "telegram.me" is a domain, not evidence this URL belongs to
+    // the seller. Exclude Telegram links before checking seller context:
+    // otherwise every telegram.me/joinchat invite remains in cloned ads.
+    const trimmed=line.trim();
+    const onlyLink=matches.length===1 && trimmed===matches[0][0];
+    const isChatInvite=matches.some(match=>/\/(?:\+|joinchat\/)/i.test(match[0]));
+    const surroundingText=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
+    if(!onlyLink && !isChatInvite && SELLER_LINK_CONTEXT.test(surroundingText) &&
+       !SOURCE_FOOTER_HEADER.test(line) && !SOURCE_CTA_LABEL.test(line)){
       result.push(line);
       continue;
     }
-    const trimmed=line.trim();
-    const onlyLink=matches.length===1 && trimmed===matches[0][0];
-    const isPromotional=onlyLink||SOURCE_CTA_LABEL.test(line)||
+    const isPromotional=onlyLink||isChatInvite||SOURCE_CTA_LABEL.test(line)||
       SOURCE_FOOTER_HEADER.test(line) || /(?:kanal|channel|канал|manba|источник)/iu.test(line);
     if(!isPromotional){
       // A URL embedded in the seller's description is not our promotion.
