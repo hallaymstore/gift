@@ -1,0 +1,32 @@
+name: Cloner source invite replacement
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-branding.js'
+      - 'bots/factory/channel-clone-branding.test.js'
+      - 'bots/factory/channel-clone-invite.js'
+      - 'bots/factory/channel-clone-invite.test.js'
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/server.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/cloner-source-invite-check.yml'
+  workflow_dispatch:
+
+jobs:
+  replace-source-link:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check syntax
+        run: |
+          node --check bots/factory/channel-clone-branding.js
+          node --check bots/factory/channel-clone-invite.js
+          node --check bots/factory/channel-clone-bot.js
+          node --check bots/factory/server.js
+      - name: Check source-link replacement and invite persistence
+        run: |
+          node --test bots/factory/channel-clone-branding.test.js
+          node --test bots/factory/channel-clone-invite.test.js
