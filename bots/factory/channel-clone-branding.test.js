@@ -46,3 +46,67 @@ test('repair can add ad contact to posts that have no footer',()=>{
   const result=refreshClonePostText('Yangilik!\n\n📌 Manba: @oldchannel',cfg);
   assert.equal(result,'Yangilik!\n\n'+adFooter(cfg));
 });
+
+
+test('real car listing drops old channel name and private invite URL while keeping seller details',()=>{
+  const source=[
+    'Нексия 2 донс супер Сотилади ❗',
+    '📅 2013 йил',
+    '🛠 Матор хадавой зўр расходи йўқ',
+    '💰 Нархи 6.800$ озгина ками бор',
+    '☎️ +998994084749',
+    '(Аниқ оладиганлар тел қилсин)',
+    '',
+    '👇 Машина Бозори',
+    'https://t.me/+xQQsHzvTwAMxZjMy',
+  ].join('\\n');
+  const carCfg={target_username:'MOSHINA_BOZORI_NARXLARI',promo_admin_username:'Qoryogdiyev'};
+  const text=buildClonePostText(source,carCfg,1024);
+  assert.ok(text.includes('Нексия 2 донс супер Сотилади ❗'));
+  assert.ok(text.includes('Нархи 6.800$'));
+  assert.ok(text.includes('+998994084749'));
+  assert.ok(!text.includes('👇 Машина Бозори'));
+  assert.ok(!text.includes('t.me/+'));
+  assert.ok(text.endsWith('📢 Kanalimiz: @MOSHINA_BOZORI_NARXLARI\\n📩 Reklama uchun: @Qoryogdiyev'));
+  assert.ok(text.length<=1024);
+  assert.equal(refreshClonePostText(text,carCfg,1024),text);
+});
+
+test('repair removes older channel invite footer and keeps the new brand footer once',()=>{
+  const existing=[
+    'Nexia 2, 2013 yil',
+    'Telefon: +998994084749',
+    '',
+    '👇 Машина Бозори',
+    'https://t.me/+xQQsHzvTwAMxZjMy',
+    '',
+    '📢 Kanalimiz:',
+    '@MOSHINA_BOZORI_NARXLARI',
+    '📩 Reklama uchun: @Qoryogdiyev'
+  ].join('\\n');
+  const carCfg={target_username:'MOSHINA_BOZORI_NARXLARI',promo_admin_username:'Qoryogdiyev'};
+  const result=refreshClonePostText(existing,carCfg);
+  assert.ok(result.startsWith('Nexia 2, 2013 yil\\nTelefon: +998994084749'));
+  assert.ok(!result.includes('Машина Бозори'));
+  assert.ok(!result.includes('t.me/+'));
+  assert.equal(result.split('@MOSHINA_BOZORI_NARXLARI').length-1,1);
+  assert.equal(result.split('@Qoryogdiyev').length-1,1);
+});
+
+test('joinchat URLs and plain public channel links are stripped with directional promo label',()=>{
+  const source='Avtomobil 5000$\\n\\n👇 Бизнинг канал\\nhttps://t.me/joinchat/AAAAAFakeInvite\\n\\n📌 Manba: @old_channel';
+  const result=buildClonePostText(source,cfg,1024);
+  assert.ok(result.startsWith('Avtomobil 5000$'));
+  assert.ok(!result.includes('joinchat'));
+  assert.ok(!result.includes('Бизнинг канал'));
+  assert.ok(!result.includes('@old_channel'));
+});
+
+test('seller phone, model and external contact remain intact, source t.me promotions do not',()=>{
+  const source='Narxi 6800$ | Sotuvchi: @my_seller\\n☎️ +998901112233\\nSayt: https://example.com/car/123\\n\\n👉 Kanal: https://t.me/OtherPublicChannel';
+  const result=buildClonePostText(source,cfg,1024);
+  assert.ok(result.includes('@my_seller'));
+  assert.ok(result.includes('+998901112233'));
+  assert.ok(result.includes('https://example.com/car/123'));
+  assert.ok(!result.includes('OtherPublicChannel'));
+});
