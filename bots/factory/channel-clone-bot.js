@@ -480,8 +480,10 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       } catch(e) {
         if(/CHAT_FORWARDS_RESTRICTED|protected content|message is protected/i.test(String(e.description||e.message||e)))
           return ctx.reply('🔒 Telegram nusxalashni rad etdi: manba egasi kontentni himoyalagan. Asl faylni yoki manba egasining ruxsatini oling.',menu());
-        await ctx.reply('⚠️ Telegram akkaunti manbani o‘qiydi, lekin sizning bot Bot API orqali uni nusxalay olmaydi.\nSabab: '+String(e.description||e.message||e).slice(0,190)+
-          '\n\nBunday manba uchun akkauntning maqsad kanalga postlash huquqi yoki ruxsatli boshqa uzatish mexanizmi kerak.',menu());
+        const reason=describeRelayError(e,135);
+        await ctx.reply('ℹ️ MTProto akkauntingiz manba '+(c.source_type==='group'?'guruh':'kanal')+' xabarlarini o‘qiy oladi.'+
+          '\nBot API to‘g‘ridan-to‘g‘ri nusxa olmadi: '+reason+
+          '\n\nSinxronlash media fayllarini ruxsat doirasida bot orqali qayta yuborishni, matnlar uchun esa botning matn yuborish usulini sinaydi. Katta media va cheklangan postlar o‘tkazilmasligi mumkin.',menu());
       }
     }catch(e){return ctx.reply('❌ Tekshirish xatosi: '+String(e.message||e).slice(0,190),menu());}
     finally{if(client)await client.disconnect().catch(()=>{});}
