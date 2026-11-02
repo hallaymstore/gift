@@ -20,6 +20,7 @@ const {createChannelCloneBot}=require('./channel-clone-bot');
 const {describeRelayError}=require('./channel-clone-errors');
 const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
 const {createOrReuseInvite}=require('./channel-clone-invite');
+const {relayCloneAlbum}=require('./channel-clone-albums');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
@@ -10878,7 +10879,7 @@ Qayta token yuboring yoki /cancel bosing.`);
 // are read through an authorized MTProto session. Never scan private chats or DMs.
 // User ownership and bot post rights are checked before saving target groups/channels.
 let publicSourceWatcher = null;
-async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUsername,kind,phase,result,ceiling,error}) {
+async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,sourceUsername,kind,phase,result,ceiling,error}) {
   const selector={bot_key:cfg.bot_key,source_username:cfg.source_username,
     source_mode:'mtproto',auto_enabled:true};
   async function registerProtectedSkip({claimed=false,sourceKey}={}){
@@ -10970,6 +10971,12 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     throw new Error('Nishon kino boti faol emas; keyingi so‘rovda qayta urinish');
   }
   const botTelegram = active.bot.telegram;
+  if(type==='album'){
+    return relayCloneAlbum({
+      cfg,messages,client,telegram:botTelegram,Log:ChannelRelayLog,
+      Config:ChannelRelayConfig
+    });
+  }
   const legacySourceKey='public:'+String(sourceUsername).toLowerCase()+':'+message.id;
   // A route can be reconnected to a new destination. The same source post
   // is a new delivery there, but must not be reposted to the original channel.

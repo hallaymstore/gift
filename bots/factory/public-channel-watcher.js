@@ -2,6 +2,7 @@
 
 const {describeRelayError}=require('./channel-clone-errors');
 const {resolveSourcePeer,sourceKey}=require('./channel-clone-peers');
+const {groupedId,albumType,albumYoung,collectAlbumMembers}=require('./channel-clone-albums');
 
 const MAX_MEDIA_BYTES = 18 * 1024 * 1024;
 const LIVE_POLL_MS = 30000;
@@ -67,6 +68,23 @@ function canRepublish(message) {
     true;
 }
 
+function isCloneRoute(cfg){
+  return cfg?.bot_key==='channel_clone'||cfg?.owner_bot_key==='channel_clone'||
+    String(cfg?.bot_key||'').startsWith('channel_clone:');
+}
+async function prepareAlbum({client,entity,message,cfg,phase,cursor}){
+  if(!isCloneRoute(cfg)||!groupedId(message)||!albumType(message))
+    return {isAlbum:false,messages:[message]};
+  const all=await collectAlbumMembers(client,entity,message);
+  if(phase==='live'&&albumYoung(all))return {isAlbum:true,defer:true,messages:all};
+  if(all.length<2)return {isAlbum:false,messages:[message]};
+  // Never repeat a partly processed album from an older deployed version.
+  if(all.some(m=>Number(m.id)<=Number(cursor||0)))
+    return {isAlbum:true,partial:true,messages:all};
+  if(all.some(m=>!albumType(m)))return {isAlbum:true,unsupported:true,messages:all};
+  return {isAlbum:true,messages:all};
+}
+
 // Track independently: (1) the newest post ID already seen, and
 // (2) an oldest-to-newest historic cursor, bounded by the source's snapshot
 // ID taken when the historic sync starts. New posts are never blocked by backfill.
@@ -97,8 +115,23 @@ async function scanLive({client,cfg,deliver,log=console}) {
   }
   for(const message of ordered){
     if(Number(message.id)<=Number(cfg.source_cursor||0))continue;
+    const album=await prepareAlbum({client,entity,message,cfg,phase:'live',cursor:cfg.source_cursor});
+    if(album.defer)break; // allow Telegram to finish assembling a freshly posted album
+    const lastId=album.isAlbum?Math.max(...album.messages.map(m=>Number(m.id))):Number(message.id);
     let result={status:'skipped'};
-    if(isProtected(message)){
+    if(album.partial) {
+      // A previous build may have copied an initial image already; do not
+      // publish the remaining images as a second partial album.
+      result={status:'duplicate'};
+    }else if(album.unsupported){
+      result={status:'failed',error:'Albomdagi media turlari Telegram albom sifatida yuborilmaydi.'};
+    }else if(album.isAlbum && album.messages.some(isProtected)){
+      result=await deliver({type:'protected',cfg,message,
+        sourceUsername:handle,phase:'live'})||{status:'protected'};
+    }else if(album.isAlbum){
+      result=await deliver({type:'album',cfg,message,client,
+        messages:album.messages,sourceUsername:handle,kind:'album',phase:'live'})||result;
+    }else if(isProtected(message)){
       result=await deliver({type:'protected',cfg,message,sourceUsername:handle,phase:'live'})
         ||{status:'protected'};
     }else if(canRepublish(message)){
@@ -110,10 +143,9 @@ async function scanLive({client,cfg,deliver,log=console}) {
       await deliver({type:'live_error',cfg,error:describeRelayError(result.error||'Post relay failed')}).catch(()=>{});
       break;
     }
-    await deliver({type:'cursor',cfg,cursor:Number(message.id),result});
-    cfg.source_cursor=Number(message.id);
+    await deliver({type:'cursor',cfg,cursor:lastId,result});
+    cfg.source_cursor=lastId;
     if(result?.status==='sent' && interval>0){
-      // Only one successful live post at a time for interval routes.
       cfg.next_publish_at=new Date(Date.now()+interval*60000);
       break;
     }
@@ -143,21 +175,33 @@ async function scanHistory({client,cfg,deliver,log=console}){
   }
   let ended=false;
   for(const message of batch){
-    if(message.id<=before)continue;
+    if(message.id<=Number(cfg.history_cursor||before))continue;
     if(message.id>ceiling){ended=true;break;}
+    const album=await prepareAlbum({client,entity,message,cfg,phase:'history',cursor:cfg.history_cursor||before});
+    const lastId=album.isAlbum?Math.max(...album.messages.map(m=>Number(m.id))):Number(message.id);
     let result={status:'skipped'};
-    if(isProtected(message)){
+    if(album.partial){
+      result={status:'duplicate'};
+    }else if(album.unsupported){
+      result={status:'failed',error:'Albomdagi media turlari Telegram albom sifatida yuborilmaydi.'};
+    }else if(album.isAlbum && album.messages.some(isProtected)){
+      result=await deliver({type:'protected',cfg,message,
+        sourceUsername:handle,phase:'history'})||{status:'protected'};
+    }else if(album.isAlbum){
+      result=await deliver({type:'album',cfg,message,client,
+        messages:album.messages,sourceUsername:handle,kind:'album',phase:'history'})||result;
+    }else if(isProtected(message)){
       result=await deliver({type:'protected',cfg,message,sourceUsername:handle,phase:'history'})
         ||{status:'protected'};
     }else if(canRepublish(message)){
       result=await deliver({type:'post',cfg,message,client,
         sourceUsername:handle,kind:mediaKind(message),phase:'history'})||result;
     }else log.warn('[channel sync] unsupported historic item skipped',handle,message.id);
-    if(result?.status==='failed') {
+    if(result?.status==='failed'){
       throw new Error('History post '+message.id+' could not be relayed: '+describeRelayError(result.error||'see server logs'));
     }
-    await deliver({type:'history_cursor',cfg,cursor:Number(message.id),result});
-    cfg.history_cursor=Number(message.id);
+    await deliver({type:'history_cursor',cfg,cursor:lastId,result});
+    cfg.history_cursor=lastId;
     if(result?.status==='sent' && Number(cfg.publish_interval_minutes)>0){
       cfg.next_publish_at=new Date(Date.now()+Number(cfg.publish_interval_minutes)*60000);
       break;
