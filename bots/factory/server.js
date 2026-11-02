@@ -18,7 +18,8 @@ const { attachMiniGames } = require('./mini-games-engine');
 const {attachGroupAnnouncer}=require('./group-announcements-bot');
 const {createChannelCloneBot}=require('./channel-clone-bot');
 const {describeRelayError}=require('./channel-clone-errors');
-const {buildClonePostText}=require('./channel-clone-branding');
+const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
+const {createOrReuseInvite}=require('./channel-clone-invite');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
@@ -409,6 +410,9 @@ const relayConfigSchema = new mongoose.Schema({
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   promo_bot_username: {type:String,default:''},
   promo_admin_username: {type:String,default:''},
+  target_invite_link: {type:String,default:''},
+  target_invite_chat_id: {type:String,default:''},
+  target_invite_attempt_at: Date,
   publish_interval_minutes: {type:Number,default:0},
   next_publish_at: Date,
   auto_enabled: { type: Boolean, default: false },
@@ -11000,15 +11004,23 @@ async function routeExternalPublicPost({type,cfg,cursor,message,client,sourceUse
     const username = active.bot.botInfo?.username || active.config?.telegramUsername ||
       (await botTelegram.getMe()).username;
     const cloneEngine=active?.config?.engine === 'channel_clone' || cfg.bot_key === 'channel_clone';
+    const originalFormat=cloneEngine && cfg.clone_format==='original';
+    const sourceText=String(message.message||'');
+    // Only issue a Telegram createChatInviteLink request for Branded posts
+    // which actually contain a source-channel URL that needs replacing.
+    const destinationLink=cloneEngine && !originalFormat && hasSourcePromotionLink(sourceText)
+      ? await createOrReuseInvite({cfg,telegram:botTelegram,Config:ChannelRelayConfig})
+      : '';
     const branded = cloneEngine
-      ? buildClonePostText(String(message.message||''),cfg,kind==='text'?4096:1024)
+      ? buildClonePostText(sourceText,
+          destinationLink?{...cfg,target_post_link:destinationLink}:cfg,
+          kind==='text'?4096:1024)
       : buildChannelCaption({
           message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
             title:cfg.target_title}, botUsername:username,
           otherBots:cfg.linked_bots||[],localContent:local
         });
     let sent;
-    const originalFormat=(active?.config?.engine==='channel_clone'||cfg.bot_key==='channel_clone') && cfg.clone_format==='original';
     if (kind === 'text' && !originalFormat) {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
         {disable_web_page_preview:true});
