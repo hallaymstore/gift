@@ -6,6 +6,7 @@ const {describeRelayError}=require('./channel-clone-errors');
 const {contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
 const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
 const {parsePeerReference,sourceRefLabel,sourceKey,resolveSourcePeer,listJoinedGroups,validateSourceReference}=require('./channel-clone-peers');
+const {normalizePhone,normalizeUsername,detectSourceAdminCandidates}=require('./channel-clone-contacts');
 
 function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
   const cloneKey=config.key||'channel_clone';
@@ -34,6 +35,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['➕ Shu manzilga manba','🧭 Manbalar ro‘yxati'],
     ['👥 Aʼzo bo‘lgan guruhlar'],
     ['🤖 Reklama botini ulash','📩 Reklama admini'],
+    ['🪪 Admin kontaktlari'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
@@ -171,6 +173,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const branded=(current?.clone_format||'branded')==='branded';
     return ctx.reply('📋 TANLANGAN YO‘NALISH POST IMZOSI\n\n'+
       (adFooter(current)||'Hozircha reklama havolalari yo‘q.')+
+      '\n\n🧑‍💼 Tasdiqlangan manba admin telefonlari: '+(current?.source_admin_phones||[]).length+
+      '\n👤 Tasdiqlangan manba admin username’lari: '+(current?.source_admin_usernames||[]).length+
       '\n\n🔗 Manba linki o‘rniga: '+(getTargetPostLink(current)||'Maqsad kanalni ulang')+
       '\n\n✏️ Faqat Branded formatda bu imzo post matni yoki captionga qo‘shiladi.'+
       (branded?'\n✅ Branded faol':'\n⚠️ Original format faol: post asl holicha saqlanadi, reklama imzosi qo‘shilmaydi.')+
@@ -523,6 +527,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.promo_bot_username?'\n🤖 Reklama boti: @'+c.promo_bot_username:'')+
        (c?.promo_admin_username?'\n📩 Reklama admini: @'+c.promo_admin_username:'')+
+       (c?.promo_admin_phone?'\n☎️ Bizning reklama telefoni: '+c.promo_admin_phone:'')+
+       '\n🪪 Manba adminlari: '+(c?.source_admin_phones||[]).length+' raqam / '+(c?.source_admin_usernames||[]).length+' username'+
        (c?.target_invite_link?'\n🔗 Kanal taklif havolasi tayyor':'')+
        '\n🎨 Post formati: '+(c?.clone_format||'branded')+
        (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
@@ -722,7 +728,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(choice==='cancel')return ctx.reply('Bekor qilindi.',menu());
     const $set={auto_enabled:false,history_enabled:false,history_completed:false,
       history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0};
-    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_title:'',source_type:'',source_cursor:0});
+    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_title:'',source_type:'',source_cursor:0,source_admin_phones:[],source_admin_usernames:[]});
     if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:'',target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null});
     await Config.updateOne({bot_key:routeKey(ctx)},{$set},{upsert:true});
     ctx.session.step=null;
@@ -795,6 +801,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
           clone_format:target.clone_format||'branded',
           promo_bot_username:target.promo_bot_username||'',
           promo_admin_username:target.promo_admin_username||'',
+          promo_admin_phone:target.promo_admin_phone||'',
+          source_admin_phones:[],source_admin_usernames:[],
           publish_interval_minutes:Number(target.publish_interval_minutes)||0,
           auto_enabled:false,history_enabled:false,history_completed:false,source_cursor:0,history_cursor:0
         });
@@ -814,7 +822,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         if(existing)return ctx.reply('⚠️ Bu manba shu maqsadga boshqa yo‘nalishda ulangan: '+existing.route_title,menu());
       }
       await Config.updateOne({bot_key:routeKey(ctx)},{$set:{
-        ...source,source_mode:'mtproto',source_cursor:0,
+        ...source,source_admin_phones:[],source_admin_usernames:[],source_mode:'mtproto',source_cursor:0,
         history_enabled:false,history_completed:false,history_cursor:0,history_ceiling:0,
         history_retry_at:null,history_error_count:0,auto_enabled:false
       }},{upsert:true});
