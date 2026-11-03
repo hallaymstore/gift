@@ -67,8 +67,8 @@ function replaceSourcePromotions(input,opts={}){
     if(SOURCE_MARK.test(line))continue; // Original "source" marker isn't our channel
     if(!trim){output.push(line);if(pending)age++;continue;}
     const seller=SELLER.test(line) || (market && /\b(?:tel(?:efon)?|raqam|murojaat\s+uchun)\b/iu.test(line));
-    const current=ADMIN.test(line)?'admin':BOT.test(line)&&!CHANNEL.test(line)?'bot':
-      CHANNEL.test(line)?'channel':'';
+    const current=JOIN.test(line)?'channel':ADMIN.test(line)?'admin':
+      BOT.test(line)&&!CHANNEL.test(line)?'bot':CHANNEL.test(line)?'channel':'';
     const applicable=current==='admin' && market && !/\b(?:reklama|hamkorlik|biz\s+bilan|admin|lichka|navbat)\b/iu.test(line)
       ? '':current;
     const role=applicable||(age<=8?pending:'');
@@ -118,7 +118,8 @@ function replaceSourcePromotions(input,opts={}){
     if(role==='admin'&&!market && STANDALONE_PHONE.test(trim) && adminMention)
       line=adminMention;
 
-    if((JOIN.test(trim)||DIRECTIONAL.test(trim)) && !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
+    if((JOIN.test(trim)||(DIRECTIONAL.test(trim)&&applicable==='channel')) &&
+      !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
       const upcoming=lines.slice(i+1,i+5).some(x=> {
         URLS.lastIndex=0;return URLS.test(x)||STANDALONE_HANDLE.test(x);
       });
