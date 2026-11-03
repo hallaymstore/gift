@@ -64,7 +64,7 @@ function hasSourcePromotionLink(text){
 
 // Remove the source's marketing contacts, not every Telegram mention or number.
 // A vehicle listing's seller telephone must remain intact.
-const SOURCE_PROMO_CONTACT_CTA=/(?:\bbiz\s+bilan(?:\s+telegram\s+orqali)?\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\btelegram\s+orqali\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\bmurojaat\s+uchun\b|\breklama(?:lar)?\s+uchun\b|\bhamkorlik\s+uchun\b|\b(?:reklama|e['’ʼ‘]?lon)(?:lar)?\s+bo['’ʼ‘]?yicha\b|\b(?:админ|реклама)\s*(?:учун|для|га)\b)/iu;
+const SOURCE_PROMO_CONTACT_CTA=/(?:\bbiz\s+bilan(?:\s+telegram\s+orqali)?\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\btelegram\s+orqali\s+bog['’ʼ‘]?lan(?:ing|ish)\b|\bmurojaat\s+uchun\b|\breklama(?:lar)?\s+uchun\b|\bhamkorlik\s+uchun\b|\b(?:reklama|e['’ʼ‘]?lon)(?:lar)?\s+bo['’ʼ‘]?yicha\b|\bnavbat\s+olish\s+uchun\b[^\n]{0,65}\b(?:admin|lichka(?:si)?|yozing)\b|\b(?:admin\s+lichka(?:si)?|lichkaga\s+yozing)\b|\b(?:админ|реклама)\s*(?:учун|для|га)\b)/iu;
 const SOURCE_PROMO_JOIN_CTA=/(?:\b(?:guruhimizga|guruhga|kanalimizga|kanalga)\s+(?:qo['’ʼ‘]?shiling|kiring|obuna\s+bo['’ʼ‘]?ling)\b|(?:групп(?:у|е)|канал)\s+(?:вступайте|подписывайтесь|присоединяйтесь)|\b(?:join\s+(?:our\s+)?(?:group|channel)|subscribe\s+to\s+our\s+channel)\b)/iu;
 const CONTACT_ONLY_HANDLE=/^\s*(?:[^\p{L}\p{N}@+]{0,12})?@[A-Za-z][A-Za-z0-9_]{4,31}\s*(?:[^\p{L}\p{N}]{0,8})?$/u;
 const CONTACT_ONLY_PHONE=/^\s*(?:[^\p{L}\p{N}+]{0,12})?(?:(?:tel(?:efon)?|telefon\s+raqam(?:i)?|phone|номер|raqam)\s*[:：-]?\s*)?\+?(?:998|8|[0-9]{2,3})[\d\s().-]{7,20}\s*(?:[^\p{L}\p{N}]{0,5})?$/iu;
@@ -178,7 +178,18 @@ function cleanSourceAdvertising(original,cfg={}){
       if(rest&&!SOURCE_CTA_LABEL.test(rest)&&!SOURCE_FOOTER_HEADER.test(rest))result.push(rest);
     }
   }
-  return result.join('\n').replace(/[ \t]+\n/g,'\n')
+  // A source can advertise the same group two or more times in one post.
+  // Replace each foreign URL, but include our target link (and its CTA)
+  // only once. Retain seller links and the substantive message.
+  const seenOwnPromos=new Set();
+  return result.filter(line=>{
+    const value=String(line||'').trim();
+    if(replacement && (value===replacement || value==='👇 Bizning kanal')){
+      if(seenOwnPromos.has(value))return false;
+      seenOwnPromos.add(value);
+    }
+    return true;
+  }).join('\n').replace(/[ \t]+\n/g,'\n')
     .replace(/\n{3,}/g,'\n\n').trim();
 }
 
