@@ -88,9 +88,10 @@ function replaceSourcePromotions(input,opts={}){
       const last=url.match(/\/([A-Za-z][A-Za-z0-9_]{4,31})(?:\/\d+)?(?:\?.*)?$/);
       const name=last?.[1]||'';
       const looksBot=/bot$/i.test(name);
-      const isPersonal=role==='admin' || /(?:admin|reklama|lichka)/i.test(name);
+      const isInvite=/\/(?:\+|joinchat\/)/i.test(url);
+      const isPersonal=!isInvite && (role==='admin' || /(?:admin|reklama|lichka)/i.test(name));
       // An explicit seller or author link never enters this branch.
-      const selected=isPersonal?adminMention:role==='bot'||looksBot?botMention:channelLink;
+      const selected=isInvite?channelLink:isPersonal?adminMention:role==='bot'||looksBot?botMention:channelLink;
       if(!selected)return '';
       replacedUrl=true;
       if(selected.startsWith('@'))return 'https://t.me/'+selected.slice(1);
@@ -118,7 +119,7 @@ function replaceSourcePromotions(input,opts={}){
     if(role==='admin'&&!market && STANDALONE_PHONE.test(trim) && adminMention)
       line=adminMention;
 
-    if((JOIN.test(trim)||(DIRECTIONAL.test(trim)&&applicable==='channel')) &&
+    if((JOIN.test(trim)||(DIRECTIONAL.test(trim)&&!ADMIN.test(trim))) &&
       !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
       const upcoming=lines.slice(i+1,i+5).some(x=> {
         URLS.lastIndex=0;return URLS.test(x)||STANDALONE_HANDLE.test(x);
@@ -155,7 +156,9 @@ function replaceSourcePromotions(input,opts={}){
     if(value===friendlyChannelLabel(cfg)&&cleaned.some(x=>normalizeLine(x)===value))continue;
     cleaned.push(line);
   }
-  return cleaned.join('\n').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  return cleaned.join('\n').replace(/[ \t]+\n/g,'\n')
+    .replace(/(👇 Bizning (?:kanal|guruh))\n(?:\s*\n)+(?=https:\/\/t\.me\/)/gu,'$1\n')
+    .replace(/\n{3,}/g,'\n\n').trim();
 }
 
 module.exports={replaceSourcePromotions};
