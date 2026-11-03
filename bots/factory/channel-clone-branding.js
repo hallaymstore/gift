@@ -1,6 +1,7 @@
 'use strict';
 
 const {telegramHandle}=require('./channel-publisher');
+const {replaceSourcePromotions}=require('./channel-clone-promos');
 
 // Only Telegram public usernames (not arbitrary links) can be saved in the footer.
 function contactUsername(input){
@@ -114,86 +115,14 @@ function stripSourceContactPromotions(original){
 }
 
 function cleanSourceAdvertising(original,cfg={}){
-  const lines=stripSourceContactPromotions(original).split('\n');
-  const result=[];
-  const replacement=getTargetPostLink(cfg);
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    TELEGRAM_SOURCE_LINK.lastIndex=0;
-    const matches=[...line.matchAll(TELEGRAM_SOURCE_LINK)];
-    if(!matches.length){
-      // Replace obsolete source call-to-action only when its next nonblank
-      // line is a Telegram promotion. Do not alter ordinary selling details.
-      if(SOURCE_FOOTER_HEADER.test(line)){
-        if(i+1<lines.length && TELEGRAM_HANDLE_ONLY.test(lines[i+1]))i++;
-        continue;
-      }
-      if(/^\s*(?:📌\s*)?(?:manba|источник)\s*:/iu.test(line))continue;
-      if(SOURCE_CTA_LABEL.test(line)){
-        let next=i+1;
-        while(next<lines.length && !lines[next].trim() && next-i<=3)next++;
-        if(next<lines.length && next-i<=3){
-          TELEGRAM_SOURCE_LINK.lastIndex=0;
-          if(TELEGRAM_SOURCE_LINK.test(lines[next])){
-            result.push('👇 Bizning kanal');
-            continue;
-          }
-        }
-      }
-      result.push(line);
-      continue;
-    }
-    // "telegram.me" is a domain, not evidence this URL belongs to
-    // the seller. Exclude Telegram links before checking seller context:
-    // otherwise every telegram.me/joinchat invite remains in cloned ads.
-    const trimmed=line.trim();
-    const onlyLink=matches.length===1 && trimmed===matches[0][0];
-    const isChatInvite=matches.some(match=>/\/(?:\+|joinchat\/)/i.test(match[0]));
-    const surroundingText=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
-    if(!onlyLink && !isChatInvite && SELLER_LINK_CONTEXT.test(surroundingText) &&
-       !SOURCE_FOOTER_HEADER.test(line) && !SOURCE_CTA_LABEL.test(line)){
-      result.push(line);
-      continue;
-    }
-    const isPromotional=onlyLink||isChatInvite||SOURCE_CTA_LABEL.test(line)||
-      SOURCE_FOOTER_HEADER.test(line) || /(?:kanal|channel|канал|manba|источник)/iu.test(line);
-    if(!isPromotional){
-      // A URL embedded in the seller's description is not our promotion.
-      result.push(line);
-      continue;
-    }
-    if(replacement){
-      if(onlyLink)result.push(replacement);
-      else{
-        const remaining=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
-        if(remaining && !SOURCE_CTA_LABEL.test(remaining) &&
-          !SOURCE_FOOTER_HEADER.test(remaining)){
-          result.push(remaining);
-        } else {
-          // Inline source CTA becomes our own channel label.
-          const preceding=result[result.length-1]||'';
-          if(preceding!=='👇 Bizning kanal')result.push('👇 Bizning kanal');
-        }
-        result.push(replacement);
-      }
-    } else {
-      const rest=line.replace(TELEGRAM_SOURCE_LINK,'').trim();
-      if(rest&&!SOURCE_CTA_LABEL.test(rest)&&!SOURCE_FOOTER_HEADER.test(rest))result.push(rest);
-    }
-  }
-  // A source can advertise the same group two or more times in one post.
-  // Replace each foreign URL, but include our target link (and its CTA)
-  // only once. Retain seller links and the substantive message.
-  const seenOwnPromos=new Set();
-  return result.filter(line=>{
-    const value=String(line||'').trim();
-    if(replacement && (value===replacement || value==='👇 Bizning kanal')){
-      if(seenOwnPromos.has(value))return false;
-      seenOwnPromos.add(value);
-    }
-    return true;
-  }).join('\n').replace(/[ \t]+\n/g,'\n')
-    .replace(/\n{3,}/g,'\n\n').trim();
+  return replaceSourcePromotions(original,{
+    sourceUsername:cfg.source_username,
+    targetLink:getTargetPostLink(cfg),
+    channelUsername:cfg.target_username,
+    adminUsername:cfg.promo_admin_username,
+    botUsername:cfg.promo_bot_username,
+    target_type:cfg.target_type
+  });
 }
 
 function buildClonePostText(original,cfg,limit=1024){
@@ -201,19 +130,9 @@ function buildClonePostText(original,cfg,limit=1024){
 }
 
 function refreshClonePostText(existing,cfg,limit=1024){
-  // Strip previous own footer before reapplying current branding. This also
-  // fixes earlier Cloner posts containing the source's original invite.
-  const lines=String(existing||'').split('\n');
-  const body=[];
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    if(/^\s*(?:🤖\s*Botimiz|📢\s*Kanalimiz|📩\s*Reklama(?:\s+va\s+hamkorlik)?\s+uchun|📩\s*Reklama\s+va\s+hamkorlik)\s*:/iu.test(line)){
-      if(/:\s*$/.test(line) && i+1<lines.length && TELEGRAM_HANDLE_ONLY.test(lines[i+1]))i++;
-      continue;
-    }
-    body.push(line);
-  }
-  return joinWithFooter(cleanSourceAdvertising(body.join('\n'),cfg),adFooter(cfg),limit);
+  // The shared source transformer removes any old footer first; its output
+  // remains unchanged if a previously edited post is repaired again.
+  return buildClonePostText(existing,cfg,limit);
 }
 
 module.exports={contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,isSourceContactOnly,stripSourceContactPromotions,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
