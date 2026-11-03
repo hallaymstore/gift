@@ -1,0 +1,26 @@
+name: Cloner in-place promotion replacement
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-promos.js'
+      - 'bots/factory/channel-clone-branding.js'
+      - 'bots/factory/channel-clone-branding.test.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/cloner-promos-inplace-check.yml'
+  workflow_dispatch:
+
+jobs:
+  test-replacement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax validation
+        run: |
+          node --check bots/factory/channel-clone-promos.js
+          node --check bots/factory/channel-clone-branding.js
+          node --check bots/factory/channel-clone-branding.test.js
+      - name: Verify in-place links/admins and regression cases
+        run: node --test bots/factory/channel-clone-branding.test.js
