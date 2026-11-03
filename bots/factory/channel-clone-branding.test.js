@@ -317,3 +317,84 @@ test('do not remove seller booking phone when the source is a car listing',()=>{
   assert.ok(output.includes('Sotuvchi telefon: +998909876543'));
   assert.ok(output.includes('Narxi 6500$'));
 });
+
+
+test('real screenshot: source channel handle is replaced in place, duplicated own footer collapsed',()=>{
+  const source=[
+    '🎬 Video lahzalar — quvonch va hayajon!',
+    '',
+    '▶️ Videoni ko‘rish / audiolarni tinglash uchun kanalga o‘ting:',
+    '@SAMIMIY_DILNOMALAR',
+    '',
+    '#1yoshda #TugilganKun #YaqinlarimgaTabriklarim #ilkMehmon',
+    '',
+    '📢 Kanalimiz: @yaqinlarimga_tabriklarim02',
+    '📩 Reklama uchun: @Qoryogdiyev',
+    '',
+    'Hamma shu yerdami😎',
+    '',
+    '📢 Kanalimiz:',
+    '@yaqinlarimga_tabriklarim02',
+    '📩 Reklama uchun: @Qoryogdiyev'
+  ].join('\n');
+  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'Qoryogdiyev'};
+  const post=buildClonePostText(source,conf,4096);
+  assert.ok(post.includes('kanalga o‘ting:\n@yaqinlarimga_tabriklarim02'));
+  assert.ok(!post.includes('@SAMIMIY_DILNOMALAR'));
+  assert.ok(post.includes('Hamma shu yerdami😎'));
+  assert.ok(post.includes('#TugilganKun'));
+  assert.equal(post.split('📢 Kanalimiz:').length-1,1);
+  assert.equal(post.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(refreshClonePostText(post,conf,4096),post);
+});
+
+test('real screenshot: both source booking admins are replaced at the original location',()=>{
+  const source=[
+    '🌷 Tavallud kuningiz muborak bo‘lsin',
+    '',
+    '🌹🌷 👇 BIZ BILAN TELEGRAM ORQALI BOG‘LANING 👇🌷🌹',
+    '',
+    '@Tabriklar_admin02',
+    '',
+    '🍀🌺🌸🌷🌹🌸🍀',
+    '',
+    'Navbat olish uchun admin lichkasi :',
+    '@Tabriklar_admin',
+    '',
+    '📢 Kanalimiz: @yaqinlarimga_tabriklarim02',
+    '📩 Reklama uchun: @Qoryogdiyev',
+  ].join('\n');
+  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'Qoryogdiyev'};
+  const text=buildClonePostText(source,conf,4096);
+  assert.ok(text.includes('BOG‘LANING 👇🌷🌹\n\n@Qoryogdiyev'));
+  assert.ok(text.includes('admin lichkasi :\n@Qoryogdiyev'));
+  assert.ok(!text.includes('Tabriklar_admin'));
+  assert.equal(text.split('📢 Kanalimiz:').length-1,1);
+  assert.equal(text.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(refreshClonePostText(text,conf,4096),text);
+});
+
+test('channel/group invites are replaced in place, repeated foreign links show one owned URL',()=>{
+  const conf={target_username:'our_group',target_type:'supergroup',
+    target_chat_id:'-1001234567890',target_invite_chat_id:'-1001234567890',
+    target_invite_link:'https://t.me/+ourUniqueInvite',promo_admin_username:'Advertiser'};
+  const source='GURUHIMIZGA QO‘SHILING 👇\n\nhttps://telegram.me/joinchat/old123\nhttps://t.me/+old456\n\nAdmin: @oldadmin01';
+  const output=buildClonePostText(source,conf,4096);
+  assert.ok(output.includes('👇 Bizning guruh\n\nhttps://t.me/+ourUniqueInvite') ||
+    output.includes('👇 Bizning guruh\nhttps://t.me/+ourUniqueInvite'));
+  assert.equal(output.split('https://t.me/+ourUniqueInvite').length-1,1);
+  assert.ok(output.includes('Admin: @Advertiser'));
+  assert.ok(!output.includes('old123'));
+  assert.ok(!output.includes('old456'));
+});
+
+test('author and marketplace seller data remain unchanged despite source links',()=>{
+  const conf={target_username:'auto_market',promo_admin_username:'Ad_Manager'};
+  const source='🚗 Nexia sotiladi\nNarxi 6500$\nSotuvchi telegram: @NexiaOwner007\n📞 Telefon: +998901112233\nMuallif: @PhotographerABC\n\n👇 Mashina Bozori\nhttps://t.me/+oldSourceInvite';
+  const text=buildClonePostText(source,conf,1024);
+  assert.ok(text.includes('@NexiaOwner007'));
+  assert.ok(text.includes('+998901112233'));
+  assert.ok(text.includes('@PhotographerABC'));
+  assert.ok(text.includes('https://t.me/auto_market'));
+  assert.ok(!text.includes('oldSourceInvite'));
+});
