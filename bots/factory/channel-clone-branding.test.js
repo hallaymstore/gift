@@ -268,3 +268,52 @@ test('preserve ordinary phone and @username in non-promotional content',()=>{
   assert.ok(text.includes('+998901112233'));
   assert.ok(text.includes('@BaxromPoet'));
 });
+
+
+test('greeting screenshot: both source admin mentions and duplicate group invites are removed',()=>{
+  const source=[
+    '🌷 Dun­yoda g‘am ko‘rmang hech vaqt,',
+    '🌷 Tavallud kuningiz muborak bo‘lsin.',
+    '',
+    '🌹🌷 👇 BIZ BILAN TELEGRAM ORQALI BOG‘LANING 👇🌷🌹',
+    '',
+    '@Tabriklar_admin02',
+    '',
+    '🍀🌺🌸🌷🌹🌸🍀',
+    '',
+    'https://t.me/+EprtVt19Keg5MWU5',
+    'https://t.me/+EprtVt19Keg5MWU5',
+    '',
+    'Navbat olish uchun admin lichkasi :',
+    '@Tabriklar_admin02',
+  ].join('\n');
+  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'Qoryogdiyev'};
+  const output=buildClonePostText(source,conf,4096);
+  assert.ok(output.includes('Tavallud kuningiz muborak'));
+  assert.ok(!output.includes('@Tabriklar_admin02'));
+  assert.ok(!output.includes('admin lichkasi'));
+  assert.ok(!output.includes('EprtVt19Keg5MWU5'));
+  assert.equal(output.split('https://t.me/yaqinlarimga_tabriklarim02').length-1,1);
+  assert.equal(output.split('📩 Reklama uchun: @Qoryogdiyev').length-1,1);
+  assert.equal(refreshClonePostText(output,conf,4096),output);
+});
+
+test('repeated source t.me joinchat and t.me plus links are replaced only once',()=>{
+  const conf={target_username:'our_greetings',promo_admin_username:'OurAdmin'};
+  const source='Tabrik matni\n\nhttps://t.me/joinchat/oldInviteOne\nhttps://telegram.me/joinchat/oldInviteOne\nhttps://t.me/+anotherOldInvite';
+  const output=buildClonePostText(source,conf,4096);
+  assert.ok(output.includes('Tabrik matni'));
+  assert.ok(!output.includes('oldInviteOne'));
+  assert.ok(!output.includes('anotherOldInvite'));
+  assert.equal(output.split('https://t.me/our_greetings').length-1,1);
+  assert.equal(refreshClonePostText(output,conf,4096),output);
+});
+
+test('do not remove seller booking phone when the source is a car listing',()=>{
+  const conf={target_username:'car_market',promo_admin_username:'sales_admin'};
+  const source='🚘 Nexia sotiladi\n💰 Narxi 6500$\nNavbat olish uchun admin lichkasi: @sales_source\n☎️ Tel: +998901231234\nSotuvchi telefon: +998909876543';
+  const output=buildClonePostText(source,conf,4096);
+  assert.ok(output.includes('☎️ Tel: +998901231234'));
+  assert.ok(output.includes('Sotuvchi telefon: +998909876543'));
+  assert.ok(output.includes('Narxi 6500$'));
+});
