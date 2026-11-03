@@ -34,7 +34,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['📥 Manba kanal/guruh','📤 Bizning kanal/guruh'],
     ['➕ Shu manzilga manba','🧭 Manbalar ro‘yxati'],
     ['👥 Aʼzo bo‘lgan guruhlar'],
-    ['🤖 Reklama botini ulash','📩 Reklama admini'],
+    ['🤖 Reklama botini ulash','👤 Admin username'],
     ['🪪 Admin kontaktlari'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
@@ -154,11 +154,11 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_bot_username:''}},{upsert:true});
     return ctx.reply('✅ Reklama boti havolasi uzildi. Yangi postlarda kloner bot havolasi chiqmaydi.',menu());
   });
-  bot.hears('📩 Reklama admini',async ctx=>{
+  bot.hears(['👤 Admin username','📩 Reklama admini'],async ctx=>{
     if(!permitted(ctx))return;
     ctx.session.step='promo_admin';
     const current=await load(ctx);
-    return ctx.reply('📩 Reklama va e’lonlar uchun bog‘lanadigan Telegram username’ni yuboring.\n\nMisol: @admin_username yoki https://t.me/admin_username\n\nHozir: '+(current?.promo_admin_username?'@'+current.promo_admin_username:'ulanmagan')+'\nPostga: 📩 Reklama uchun: @admin_username',menu());
+    return ctx.reply('👤 Postlar ostida ko‘rsatiladigan admin username’ni yuboring.\n\nMisol: @admin_username yoki https://t.me/admin_username\n\nHozir: '+(current?.promo_admin_username?'@'+current.promo_admin_username:'ulanmagan')+'\nPostga: 👤 Admin: @admin_username',menu());
   });
   bot.hears('🗑 Admin havolasini uzish',async ctx=>{
     if(!permitted(ctx))return;
@@ -175,8 +175,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const users=(cfg.source_admin_usernames||[]).map(x=>'👤 @'+x);
     return ctx.reply('🪪 HAR BIR MANBA UCHUN ADMIN KONTAKTLARI\n\n'+
       '📥 Manba: '+sourceRefLabel(cfg)+'\n'+
-      '📤 Bizning reklama admini: '+(cfg.promo_admin_username?'@'+cfg.promo_admin_username:'sozlanmagan')+
-      '\n☎️ Bizning reklama telefonimiz: '+(cfg.promo_admin_phone||'sozlanmagan')+
+      '📤 Bizning admin: '+(cfg.promo_admin_username?'@'+cfg.promo_admin_username:'sozlanmagan')+
+      '\n☎️ Bizning admin telefonimiz: '+(cfg.promo_admin_phone||'sozlanmagan')+
       '\n\n🔎 TASDIQLANGAN MANBA KONTAKTLARI:\n'+
       ([...phones,...users].join('\n')||'Hozircha yo‘q')+
       '\n\n⚠️ Bot hech qachon barcha telefonlarni ko‘r-ko‘rona almashtirmaydi. Faqat shu manba uchun SIZ tasdiqlagan raqam va username’lar almashtiriladi. Sotuvchilar/mijozlar raqamlari saqlanadi.',
@@ -279,7 +279,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\n\n🔗 Manba linki o‘rniga: '+(getTargetPostLink(current)||'Maqsad kanalni ulang')+
       '\n\n✏️ Faqat Branded formatda bu imzo post matni yoki captionga qo‘shiladi.'+
       (branded?'\n✅ Branded faol':'\n⚠️ Original format faol: post asl holicha saqlanadi, reklama imzosi qo‘shilmaydi.')+
-      '\n\n🤖 Reklama botini ulash, 📩 Reklama admini va 📤 Bizning kanal orqali o‘zgartiring.',menu());
+      '\n\n🤖 Reklama botini ulash, 👤 Admin username va 📤 Bizning kanal/guruh orqali o‘zgartiring.',menu());
   });
   bot.hears('🔗 Bizning taklif havolamiz',async ctx=>{
     if(!permitted(ctx))return;
@@ -628,7 +628,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.promo_bot_username?'\n🤖 Reklama boti: @'+c.promo_bot_username:'')+
        (c?.promo_admin_username?'\n📩 Reklama admini: @'+c.promo_admin_username:'')+
-       (c?.promo_admin_phone?'\n☎️ Bizning reklama telefoni: '+c.promo_admin_phone:'')+
+       (c?.promo_admin_phone?'\n☎️ Admin telefoni: '+c.promo_admin_phone:'')+
        '\n🪪 Manba adminlari: '+(c?.source_admin_phones||[]).length+' raqam / '+(c?.source_admin_usernames||[]).length+' username'+
        (c?.target_invite_link?'\n🔗 Kanal taklif havolasi tayyor':'')+
        '\n🎨 Post formati: '+(c?.clone_format||'branded')+
@@ -704,7 +704,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         '📤 '+(cfg.target_username?'@'+cfg.target_username:cfg.target_title||cfg.target_chat_id)+
         '\n📚 Tekshiriladigan Cloner xabarlari: '+total+
         '\n\n📢 Manba kanal/guruh → bizning kanal/guruh\n'+
-        '📩 Manba reklama admini → @'+(cfg.promo_admin_username||'sozlanmagan')+
+        '👤 Manba admini → @'+(cfg.promo_admin_username||'sozlanmagan')+
         '\n🤖 Manba bot → '+(cfg.promo_bot_username?'@'+cfg.promo_bot_username:'o‘z kanalimiz')+
         '\n\nCloner yuborgan xabarlar matni/captioni tahrirlanadi; media qayta yuklanmaydi.';
       if(sample)description+='\n\nOLDIN:\n'+brief(sample.before)+

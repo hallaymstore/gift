@@ -17,8 +17,8 @@ function adFooter(cfg={}){
   return [
     bot?'🤖 Botimiz: @'+bot:'',
     channel?'📢 Kanalimiz: @'+channel:'',
-    admin?'📩 Reklama uchun: @'+admin:'',
-    phone?'☎️ Reklama telefoni: '+phone:''
+    admin?'👤 Admin: @'+admin:'',
+    phone?'☎️ Admin telefoni: '+phone:''
   ].filter(Boolean).join('\n');
 }
 

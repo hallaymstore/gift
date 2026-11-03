@@ -1,0 +1,32 @@
+name: Cloner neutral admin footer
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-branding.js'
+      - 'bots/factory/channel-clone-promos.js'
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/channel-clone-branding.test.js'
+      - 'bots/factory/channel-clone-contacts.test.js'
+      - '.github/workflows/cloner-neutral-admin.yml'
+  workflow_dispatch:
+jobs:
+  neutral-admin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        working-directory: bots/factory
+        run: npm install --no-audit --no-fund
+      - name: Check syntax
+        working-directory: bots/factory
+        run: |
+          node --check channel-clone-branding.js
+          node --check channel-clone-promos.js
+          node --check channel-clone-bot.js
+          node --check server.js
+      - name: Verify all footer and contact regressions
+        working-directory: bots/factory
+        run: node --test channel-clone-branding.test.js channel-clone-contacts.test.js channel-clone-invite.test.js channel-clone-albums.test.js

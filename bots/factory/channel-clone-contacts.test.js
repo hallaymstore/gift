@@ -27,7 +27,7 @@ test('without manual approval, both customer and source admin numbers remain unt
   const result=buildClonePostText(text,cfg,4096);
   assert.ok(result.includes('+998910021877'));
   assert.ok(result.includes('+998901112233'));
-  assert.ok(result.endsWith('☎️ Reklama telefoni: +998907778899'));
+  assert.ok(result.endsWith('☎️ Admin telefoni: +998907778899'));
 });
 
 test('approved source admin phone is replaced exactly, client phone remains unchanged',()=>{
@@ -56,7 +56,7 @@ test('approved source admin phone is replaced exactly, client phone remains unch
   assert.ok(!result.includes('@Tabriklar_admin02'));
   assert.ok(result.includes('@Qoryogdiyev'));
   assert.ok(result.includes('ZULFIZAR QORYOG‘DIYEVA'));
-  assert.equal(result.split('☎️ Reklama telefoni:').length-1,1);
+  assert.equal(result.split('☎️ Admin telefoni:').length-1,1);
   assert.equal(refreshClonePostText(result,cfg,4096),result);
 });
 
