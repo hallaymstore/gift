@@ -838,7 +838,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭|🪪)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     if(step==='interval_custom'){
       const selected=ctx.session.intervalRoute||routeKey(ctx);
@@ -858,6 +858,58 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       await rememberRoute(ctx,id);
       ctx.session.step='source';
       return ctx.reply('✅ '+title+' yo‘nalishi yaratildi!\n\n1/3 📥 Manba @kanal, @guruh yoki -100... guruh ID sini yuboring.',menu());
+    }
+    if(step.startsWith('contact_')){
+      const key=ctx.session.contactRoute;
+      if(!key||key!==routeKey(ctx)){
+        ctx.session.contactRoute=null;
+        return ctx.reply('⚠️ Yo‘nalish o‘zgargan. 🪪 Admin kontaktlari bo‘limini qayta oching.',menu());
+      }
+      const action=step.slice('contact_'.length);
+      if(action==='ownphone'){
+        const phone=raw==='-'?'':normalizePhone(raw);
+        if(raw!=='-'&&!phone){
+          ctx.session.step=step;
+          return ctx.reply('❌ +998901234567 kabi haqiqiy raqam kiriting. O‘chirish: -',menu());
+        }
+        await Config.updateOne({bot_key:key},{$set:{promo_admin_phone:phone}});
+        return ctx.reply(phone?'✅ Bizning reklama adminimiz telefoni: '+phone+
+          '\nBu raqam ommaviy post imzosiga qo‘shiladi va tasdiqlangan manba raqamlari o‘rnida ishlatiladi.':
+          '✅ Reklama admin telefoni o‘chirildi. Manba admin raqamlari endi avtomatik o‘zgartirilmaydi.',menu());
+      }
+      if(action==='addphone'){
+        const phone=normalizePhone(raw);
+        if(!phone){
+          ctx.session.step=step;
+          return ctx.reply('❌ Manbaning raqamini +998901234567 shaklida yuboring.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$addToSet:{source_admin_phones:phone}});
+        return ctx.reply('✅ Shu MANBANING reklama admin raqami tasdiqlandi: '+phone+
+          '\n📱 Postlarda faqat aynan shu raqam bizning admin telefonimizga almashtiriladi.'+
+          '\nSotuvchilar/mijozlarning boshqa raqamlari o‘zgarishsiz qoladi.',menu());
+      }
+      if(action==='adduser'){
+        const username=normalizeUsername(raw);
+        if(!username){
+          ctx.session.step=step;
+          return ctx.reply('❌ @admin_username shaklida yuboring.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$addToSet:{source_admin_usernames:username}});
+        return ctx.reply('✅ Shu manbaning reklama admin username’i tasdiqlandi: @'+username+
+          '\nO‘rniga bizning 📩 Reklama admini username’imiz qo‘yiladi.',menu());
+      }
+      if(action==='remove'){
+        const phone=normalizePhone(raw);
+        const user=normalizeUsername(raw);
+        if(!phone&&!user){
+          ctx.session.step=step;
+          return ctx.reply('❌ +998... raqam yoki @username kiriting.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$pull:phone?
+          {source_admin_phones:phone}:{source_admin_usernames:user}});
+        return ctx.reply('✅ Shu manbaning tasdiqlangan ro‘yxatidan olib tashlandi: '+(phone||'@'+user),menu());
+      }
+      return;
     }
     const handle=telegramHandle(raw);
     if(step==='promo_admin'){
