@@ -14,7 +14,8 @@ const MARKET=/\b(?:narxi|sotiladi|sotuvchi|цена|продается|mashina|a
 const ADMIN=/\b(?:biz\s+bilan(?:\s+telegram\s+orqali)?\s+bog['’ʼ‘]?lan(?:ing|ish)|telegram\s+orqali\s+bog['’ʼ‘]?lan(?:ing|ish)|murojaat\s+uchun|reklama\s+uchun|hamkorlik\s+uchun|navbat\s+olish\s+uchun|admin(?:istrator)?(?:\s+lichka(?:si)?)?|lichkasi|buyurtma\s+uchun|bog['’ʼ‘]?lanish\s+uchun|по\s+рекламе|админ(?:истратор)?)\b/iu;
 const CHANNEL=/\b(?:kanal(?:imiz|ga|i|ni)?|guruh(?:imizga|imiz|ga|i|ni)?|channel|group|obuna|join|follow|manba|источник|канал|групп(?:а|у|е)|подписаться)\b/iu;
 const BOT=/\b(?:bot(?:imiz|ga|i)?|бот(?:а|у)?)\b/iu;
-const JOIN=/\b(?:guruhimizga\s+qo['’ʼ‘]?shiling|kanalimizga\s+qo['’ʼ‘]?shiling|bizning\s+kanal|бизнинг\s+канал|наш\s+канал)\b/iu;
+const JOIN=/(?:\bguruhimizga\s+qo['’ʼ‘]?shiling\b|\bkanalimizga\s+qo['’ʼ‘]?shiling\b|\bbizning\s+kanal\b|бизнинг\s+канал|наш\s+канал)/iu;
+const DIRECTIONAL=/^\s*[👇👉👆➡️📢🔗📌]\s*[^\d@\n]{3,90}$/u;
 const SOURCE_MARK=/^\s*(?:📌\s*)?(?:manba|источник)\s*:/iu;
 
 function basicHandle(value){
@@ -117,7 +118,7 @@ function replaceSourcePromotions(input,opts={}){
     if(role==='admin'&&!market && STANDALONE_PHONE.test(trim) && adminMention)
       line=adminMention;
 
-    if(JOIN.test(trim) && !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
+    if((JOIN.test(trim)||DIRECTIONAL.test(trim)) && !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
       const upcoming=lines.slice(i+1,i+5).some(x=> {
         URLS.lastIndex=0;return URLS.test(x)||STANDALONE_HANDLE.test(x);
       });
@@ -130,7 +131,12 @@ function replaceSourcePromotions(input,opts={}){
     }else if(decoration(trim)){
       if(pending)age++;
     }else if(STANDALONE_HANDLE.test(trim)||replacedUrl||STANDALONE_PHONE.test(trim)){
-      pending='';age=0;
+      // An admin CTA can be followed by both an @handle and a phone. Keep
+      // its context across nearby decorated/blank lines until real prose.
+      if(role==='admin' && !market && STANDALONE_PHONE.test(trim)){
+        pending='';age=0;
+      }else if(role==='admin' && !market){pending='admin';age++;}
+      else{pending='';age=0;}
     }else{
       pending='';age=0;
     }
