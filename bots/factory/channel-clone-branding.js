@@ -102,6 +102,9 @@ function stripSourceContactPromotions(original){
     let n=i+1;
     while(n<lines.length&&n-i<=5){
       if(!lines[n].trim()){n++;continue;}
+      // In marketplace adverts, phone numbers after an admin CTA can still
+      // belong to the seller. Preserve them rather than guessing ownership.
+      if(marketplace && CONTACT_ONLY_PHONE.test(lines[n]))break;
       if(!isSourceContactOnly(lines[n]))break;
       skipped.add(n++);
     }
