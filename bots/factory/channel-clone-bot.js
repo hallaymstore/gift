@@ -166,6 +166,107 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_admin_username:''}},{upsert:true});
     return ctx.reply('✅ Reklama admini olib tashlandi. Yangi postlarda admin username chiqmaydi.',menu());
   });
+  bot.hears('🪪 Admin kontaktlari',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const cfg=await load(ctx);
+    if(!cfg)return ctx.reply('❌ Avval yo‘nalishni tanlang.',menu());
+    const phones=(cfg.source_admin_phones||[]).map(x=>'☎️ '+x);
+    const users=(cfg.source_admin_usernames||[]).map(x=>'👤 @'+x);
+    return ctx.reply('🪪 HAR BIR MANBA UCHUN ADMIN KONTAKTLARI\n\n'+
+      '📥 Manba: '+sourceRefLabel(cfg)+'\n'+
+      '📤 Bizning reklama admini: '+(cfg.promo_admin_username?'@'+cfg.promo_admin_username:'sozlanmagan')+
+      '\n☎️ Bizning reklama telefonimiz: '+(cfg.promo_admin_phone||'sozlanmagan')+
+      '\n\n🔎 TASDIQLANGAN MANBA KONTAKTLARI:\n'+
+      ([...phones,...users].join('\n')||'Hozircha yo‘q')+
+      '\n\n⚠️ Bot hech qachon barcha telefonlarni ko‘r-ko‘rona almashtirmaydi. Faqat shu manba uchun SIZ tasdiqlagan raqam va username’lar almashtiriladi. Sotuvchilar/mijozlar raqamlari saqlanadi.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📱 Bizning admin raqamimiz','clone:contacts:ownphone')],
+        [Markup.button.callback('➕ Manba admin raqami','clone:contacts:addphone'),
+          Markup.button.callback('➕ Manba admin username','clone:contacts:adduser')],
+        [Markup.button.callback('🔎 Manbadan adminlarni aniqlash','clone:contacts:scan')],
+        [Markup.button.callback('➖ Manba kontaktini olib tashlash','clone:contacts:remove')],
+        [Markup.button.callback('🗑 Barcha manba kontaktlarini tozalash','clone:contacts:clear')]
+      ]));
+  });
+  bot.action(/^clone:contacts:(ownphone|addphone|adduser|remove|scan|clear|clearok|cancel)$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const action=ctx.match[1],key=routeKey(ctx);
+    if(action==='cancel'){
+      ctx.session.step=null;ctx.session.contactCandidates=null;
+      return ctx.reply('✅ Amal bekor qilindi.',menu());
+    }
+    const cfg=await load(ctx);
+    if(!cfg)return ctx.reply('❌ Yo‘nalish topilmadi.',menu());
+    if(action==='clear'){
+      return ctx.reply('⚠️ Faqat '+(cfg.route_title||sourceRefLabel(cfg))+
+        ' manbasining tasdiqlangan admin raqamlari va username’larini o‘chiramizmi?'+
+        '\nBizning admin telefonimiz saqlanadi.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🗑 Ha, tozalash','clone:contacts:clearok')],
+          [Markup.button.callback('Bekor qilish','clone:contacts:cancel')]
+        ]));
+    }
+    if(action==='clearok'){
+      await Config.updateOne({bot_key:key},{$set:{
+        source_admin_phones:[],source_admin_usernames:[]
+      }});
+      return ctx.reply('✅ Faqat shu manbaning tasdiqlangan admin kontaktlari tozalandi.',menu());
+    }
+    if(['ownphone','addphone','adduser','remove'].includes(action)){
+      ctx.session.contactRoute=key;
+      ctx.session.step='contact_'+action;
+      const help={
+        ownphone:'📱 O‘Z reklama adminimizning raqamini yuboring.\nMasalan: +998901234567\n«-» — raqamni o‘chirish.\n⚠️ Raqam post imzosida ommaga ko‘rinadi.',
+        addphone:'☎️ MANBA ADMIN RAQAMI\nManbaning reklama/admin raqamini aniq kiriting.\nMasalan: +998910021877\nFaqat shu raqam postlarda bizning reklama raqamimizga almashtiriladi. Sotuvchi va mijoz raqamlari o‘zgarmaydi.',
+        adduser:'👤 MANBA ADMIN USERNAME\nManbaning reklama admini username’ini kiriting.\nMasalan: @Tabriklar_admin02\nFaqat shu manbada bizning admin username’imizga almashtiriladi.',
+        remove:'➖ OLIB TASHLASH\nTasdiqlangan manba kontakti — telefon yoki @username kiriting. Shu manbaning tasdiqlangan ro‘yxatidan o‘chiriladi.'
+      };
+      return ctx.reply(help[action]+'\n\nBekor qilish: /cancel',menu());
+    }
+    if(action==='scan'){
+      if(!sourceKey(cfg)||!sessionReady())
+        return ctx.reply('❌ Manba kanal/guruh va MTProto sessiyasi talab etiladi.',menu());
+      try{
+        const candidates=await withUserSession(async client=>{
+          const peer=await resolveSourcePeer(client,cfg);
+          const recent=await client.getMessages(peer,{limit:80});
+          return detectSourceAdminCandidates(recent);
+        });
+        if(!candidates.length)return ctx.reply('🔎 So‘nggi 80 xabardan ishonchli reklama admin kontakti topilmadi.'+
+          '\n➕ Manba admin raqami yoki username orqali qo‘lda qo‘shishingiz mumkin.',menu());
+        ctx.session.contactRoute=key;
+        ctx.session.contactCandidates=candidates;
+        return ctx.reply('🔎 MANBA ADMINLARIDAN TOPILGAN NOMZODLAR\n\n'+
+          candidates.map((c,i)=>(i+1)+'. '+(c.kind==='phone'?'☎️ ':'👤 ')+c.value+
+            ' ('+c.count+' marta)\n   '+String(c.example||'').slice(0,100)).join('\n\n').slice(0,3300)+
+          '\n\n⚠️ Bu avtomatik TOPILGAN nomzodlar, hali tasdiqlanmagan. Faqat haqiqiy reklama/admin kontaktini tanlang. Sotuvchining raqamini tasdiqlamang.',
+          Markup.inlineKeyboard(candidates.map((c,i)=>[
+            Markup.button.callback('✅ '+(c.kind==='phone'?'☎️ ':'👤 ')+c.value,
+              'clone:contacts:approve:'+i)
+          ])));
+      }catch(error){
+        return ctx.reply('❌ Manba kontaktlarini aniqlab bo‘lmadi: '+describeRelayError(error,160),menu());
+      }
+    }
+  });
+  bot.action(/^clone:contacts:approve:(\d{1,2})$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const key=routeKey(ctx);
+    if(ctx.session.contactRoute!==key)
+      return ctx.reply('⚠️ Yo‘nalish o‘zgargan. Kandidatlarni qayta aniqlang.',menu());
+    const candidate=ctx.session.contactCandidates?.[Number(ctx.match[1])];
+    if(!candidate)return ctx.reply('⚠️ Nomzod eskirgan, yana 🔎 Manbadan adminlarni aniqlash tugmasini bosing.',menu());
+    const field=candidate.kind==='phone'?'source_admin_phones':'source_admin_usernames';
+    const value=candidate.kind==='phone'?normalizePhone(candidate.value):normalizeUsername(candidate.value);
+    if(!value)return ctx.reply('❌ Noto‘g‘ri kontakt.',menu());
+    await Config.updateOne({bot_key:key},{$addToSet:{[field]:value}});
+    return ctx.reply('✅ Tasdiqlandi: '+(candidate.kind==='phone'?'☎️ ':'👤 ')+value+
+      '\nFaqat shu manbaning postlarida almashtiriladi.'+
+      (candidate.kind==='phone'?'\n📱 Bizning admin telefonimiz ham belgilangan bo‘lishi kerak.':''),menu());
+  });
   bot.hears('📋 Post imzosi',async ctx=>{
     if(!permitted(ctx))return;
     ctx.session.step=null;
