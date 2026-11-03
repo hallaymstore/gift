@@ -87,6 +87,9 @@ function replaceSourcePromotions(input,opts={}){
     const changedUrls=line.replace(URLS,(url)=>{
       const last=url.match(/\/([A-Za-z][A-Za-z0-9_]{4,31})(?:\/\d+)?(?:\?.*)?$/);
       const name=last?.[1]||'';
+      // Idempotence: an already replaced own channel/admin/bot link must not
+      // change roles when this post is repaired for the second time.
+      if(url===channelLink || (name && isOwnContact(name)))return url;
       const looksBot=/bot$/i.test(name);
       const isInvite=/\/(?:\+|joinchat\/)/i.test(url);
       const isPersonal=!isInvite && (role==='admin' || /(?:admin|reklama|lichka)/i.test(name));
