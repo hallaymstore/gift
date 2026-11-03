@@ -225,8 +225,8 @@ test('greeting: delete source ad admin and phone, replace group invite, preserve
   assert.ok(!text.includes('Tabriklar_admin02'));
   assert.ok(!text.includes('998910021877'));
   assert.ok(!text.includes('EprtVt19Keg5MWU5'));
-  assert.ok(!text.includes('MUROJAAT UCHUN'));
-  assert.ok(!text.includes('BIZ BILAN TELEGRAM ORQALI BOG'));
+  assert.ok(text.includes('MUROJAAT UCHUN'));
+  assert.ok(text.includes('BIZ BILAN TELEGRAM ORQALI BOG'));
   assert.ok(!text.includes('GURUHIMIZGA QO'));
   assert.ok(text.includes('👇 Bizning kanal\nhttps://t.me/yaqinlarimga_tabriklarim02'));
   assert.ok(text.endsWith('📢 Kanalimiz: @yaqinlarimga_tabriklarim02\n📩 Reklama uchun: @MyAdsAdmin'));
@@ -291,7 +291,7 @@ test('greeting screenshot: both source admin mentions and duplicate group invite
   const output=buildClonePostText(source,conf,4096);
   assert.ok(output.includes('Tavallud kuningiz muborak'));
   assert.ok(!output.includes('@Tabriklar_admin02'));
-  assert.ok(!output.includes('admin lichkasi'));
+  assert.ok(output.includes('admin lichkasi :\n@Qoryogdiyev'));
   assert.ok(!output.includes('EprtVt19Keg5MWU5'));
   assert.equal(output.split('https://t.me/yaqinlarimga_tabriklarim02').length-1,1);
   assert.equal(output.split('📩 Reklama uchun: @Qoryogdiyev').length-1,1);
