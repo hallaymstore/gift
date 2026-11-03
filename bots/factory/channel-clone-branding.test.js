@@ -189,7 +189,7 @@ test('the same private group invite is replaced in a preexisting branded caption
   assert.ok(!repaired.includes('OldGroupInvite'));
   assert.ok(repaired.includes('https://t.me/Kino_Channel'));
   assert.equal(repaired.split('📢 Kanalimiz:').length-1,1);
-  assert.equal(repaired.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(repaired.split('👤 Admin:').length-1,1);
   assert.equal(refreshClonePostText(repaired,cfg,1024),repaired);
 });
 
@@ -347,7 +347,7 @@ test('real screenshot: source channel handle is replaced in place, duplicated ow
   assert.ok(post.includes('Hamma shu yerdami😎'));
   assert.ok(post.includes('#TugilganKun'));
   assert.equal(post.split('📢 Kanalimiz:').length-1,1);
-  assert.equal(post.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(post.split('👤 Admin:').length-1,1);
   assert.equal(refreshClonePostText(post,conf,4096),post);
 });
 
@@ -373,7 +373,7 @@ test('real screenshot: both source booking admins are replaced at the original l
   assert.ok(text.includes('admin lichkasi :\n@Qoryogdiyev'));
   assert.ok(!text.includes('Tabriklar_admin'));
   assert.equal(text.split('📢 Kanalimiz:').length-1,1);
-  assert.equal(text.split('📩 Reklama uchun:').length-1,1);
+  assert.equal(text.split('👤 Admin:').length-1,1);
   assert.equal(refreshClonePostText(text,conf,4096),text);
 });
 
