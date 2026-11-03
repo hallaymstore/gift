@@ -1,0 +1,32 @@
+name: Cloner per-source admin contact safety
+on:
+  pull_request:
+    paths:
+      - 'bots/factory/channel-clone-contacts.js'
+      - 'bots/factory/channel-clone-contacts.test.js'
+      - 'bots/factory/channel-clone-promos.js'
+      - 'bots/factory/channel-clone-branding.js'
+      - 'bots/factory/channel-clone-branding.test.js'
+      - 'bots/factory/channel-clone-bot.js'
+      - 'bots/factory/server.js'
+      - 'bots/factory/package.json'
+      - '.github/workflows/cloner-admin-phone-check.yml'
+  workflow_dispatch:
+
+jobs:
+  admin-contact-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check syntax
+        run: |
+          node --check bots/factory/channel-clone-contacts.js
+          node --check bots/factory/channel-clone-promos.js
+          node --check bots/factory/channel-clone-branding.js
+          node --check bots/factory/channel-clone-bot.js
+          node --check bots/factory/server.js
+      - name: Source admin phone and older branding regressions
+        run: node --test bots/factory/channel-clone-contacts.test.js bots/factory/channel-clone-branding.test.js

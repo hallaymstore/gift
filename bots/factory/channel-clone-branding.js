@@ -2,6 +2,7 @@
 
 const {telegramHandle}=require('./channel-publisher');
 const {replaceSourcePromotions}=require('./channel-clone-promos');
+const {normalizePhone}=require('./channel-clone-contacts');
 
 // Only Telegram public usernames (not arbitrary links) can be saved in the footer.
 function contactUsername(input){
@@ -12,10 +13,12 @@ function adFooter(cfg={}){
   const bot=contactUsername(cfg.promo_bot_username);
   const channel=contactUsername(cfg.target_username);
   const admin=contactUsername(cfg.promo_admin_username);
+  const phone=normalizePhone(cfg.promo_admin_phone);
   return [
     bot?'🤖 Botimiz: @'+bot:'',
     channel?'📢 Kanalimiz: @'+channel:'',
-    admin?'📩 Reklama uchun: @'+admin:''
+    admin?'📩 Reklama uchun: @'+admin:'',
+    phone?'☎️ Reklama telefoni: '+phone:''
   ].filter(Boolean).join('\n');
 }
 
@@ -120,6 +123,9 @@ function cleanSourceAdvertising(original,cfg={}){
     targetLink:getTargetPostLink(cfg),
     channelUsername:cfg.target_username,
     adminUsername:cfg.promo_admin_username,
+    adminPhone:cfg.promo_admin_phone,
+    sourceAdminPhones:cfg.source_admin_phones,
+    sourceAdminUsernames:cfg.source_admin_usernames,
     botUsername:cfg.promo_bot_username,
     target_type:cfg.target_type
   });

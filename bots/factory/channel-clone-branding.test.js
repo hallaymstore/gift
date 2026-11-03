@@ -216,7 +216,8 @@ test('greeting: delete source ad admin and phone, replace group invite, preserve
     '🎙 Boshlovchi: 🎤 ZULFIZAR QORYOG‘DIYEVA',
     '🌹 TABRIKNOMA 🌷'
   ].join('\n');
-  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'MyAdsAdmin'};
+  const conf={target_username:'yaqinlarimga_tabriklarim02',promo_admin_username:'MyAdsAdmin',
+    promo_admin_phone:'+998901234567',source_admin_phones:['+998910021877']};
   const text=buildClonePostText(source,conf,4096);
   assert.ok(text.includes('Ravon qilsin Allohim'));
   assert.ok(text.includes('Gina g‘ubor yuvilsin'));
@@ -224,18 +225,20 @@ test('greeting: delete source ad admin and phone, replace group invite, preserve
   assert.ok(text.includes('TABRIKNOMA'));
   assert.ok(!text.includes('Tabriklar_admin02'));
   assert.ok(!text.includes('998910021877'));
+  assert.ok(text.includes('+998901234567'));
   assert.ok(!text.includes('EprtVt19Keg5MWU5'));
   assert.ok(text.includes('MUROJAAT UCHUN'));
   assert.ok(text.includes('BIZ BILAN TELEGRAM ORQALI BOG'));
   assert.ok(!text.includes('GURUHIMIZGA QO'));
   assert.ok(text.includes('👇 Bizning kanal\nhttps://t.me/yaqinlarimga_tabriklarim02'));
-  assert.ok(text.endsWith('📢 Kanalimiz: @yaqinlarimga_tabriklarim02\n📩 Reklama uchun: @MyAdsAdmin'));
+  assert.ok(text.endsWith('📢 Kanalimiz: @yaqinlarimga_tabriklarim02\n📩 Reklama uchun: @MyAdsAdmin\n☎️ Reklama telefoni: +998901234567'));
   assert.equal(refreshClonePostText(text,conf,4096),text);
 });
 
 test('post with ad contact and separate phone but no invite is cleaned',()=>{
   const source='Original she’r.\n\n📩 Reklama uchun\n@source_admin\n\n☎️ +998 91 002 18 77\n\nIjrochi: Qodirova';
-  const text=buildClonePostText(source,{target_username:'our_greetings',promo_admin_username:'OurAds'},4096);
+  const text=buildClonePostText(source,{target_username:'our_greetings',promo_admin_username:'OurAds',
+    promo_admin_phone:'+998901234567',source_admin_phones:['+998910021877']},4096);
   assert.ok(!text.includes('@source_admin'));
   assert.ok(!text.includes('002 18 77'));
   assert.ok(text.includes('Original she’r.'));

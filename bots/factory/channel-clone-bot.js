@@ -6,6 +6,7 @@ const {describeRelayError}=require('./channel-clone-errors');
 const {contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
 const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
 const {parsePeerReference,sourceRefLabel,sourceKey,resolveSourcePeer,listJoinedGroups,validateSourceReference}=require('./channel-clone-peers');
+const {normalizePhone,normalizeUsername,detectSourceAdminCandidates}=require('./channel-clone-contacts');
 
 function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={key:'channel_clone'}}) {
   const cloneKey=config.key||'channel_clone';
@@ -34,6 +35,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['➕ Shu manzilga manba','🧭 Manbalar ro‘yxati'],
     ['👥 Aʼzo bo‘lgan guruhlar'],
     ['🤖 Reklama botini ulash','📩 Reklama admini'],
+    ['🪪 Admin kontaktlari'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
@@ -164,6 +166,107 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_admin_username:''}},{upsert:true});
     return ctx.reply('✅ Reklama admini olib tashlandi. Yangi postlarda admin username chiqmaydi.',menu());
   });
+  bot.hears('🪪 Admin kontaktlari',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    const cfg=await load(ctx);
+    if(!cfg)return ctx.reply('❌ Avval yo‘nalishni tanlang.',menu());
+    const phones=(cfg.source_admin_phones||[]).map(x=>'☎️ '+x);
+    const users=(cfg.source_admin_usernames||[]).map(x=>'👤 @'+x);
+    return ctx.reply('🪪 HAR BIR MANBA UCHUN ADMIN KONTAKTLARI\n\n'+
+      '📥 Manba: '+sourceRefLabel(cfg)+'\n'+
+      '📤 Bizning reklama admini: '+(cfg.promo_admin_username?'@'+cfg.promo_admin_username:'sozlanmagan')+
+      '\n☎️ Bizning reklama telefonimiz: '+(cfg.promo_admin_phone||'sozlanmagan')+
+      '\n\n🔎 TASDIQLANGAN MANBA KONTAKTLARI:\n'+
+      ([...phones,...users].join('\n')||'Hozircha yo‘q')+
+      '\n\n⚠️ Bot hech qachon barcha telefonlarni ko‘r-ko‘rona almashtirmaydi. Faqat shu manba uchun SIZ tasdiqlagan raqam va username’lar almashtiriladi. Sotuvchilar/mijozlar raqamlari saqlanadi.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📱 Bizning admin raqamimiz','clone:contacts:ownphone')],
+        [Markup.button.callback('➕ Manba admin raqami','clone:contacts:addphone'),
+          Markup.button.callback('➕ Manba admin username','clone:contacts:adduser')],
+        [Markup.button.callback('🔎 Manbadan adminlarni aniqlash','clone:contacts:scan')],
+        [Markup.button.callback('➖ Manba kontaktini olib tashlash','clone:contacts:remove')],
+        [Markup.button.callback('🗑 Barcha manba kontaktlarini tozalash','clone:contacts:clear')]
+      ]));
+  });
+  bot.action(/^clone:contacts:(ownphone|addphone|adduser|remove|scan|clear|clearok|cancel)$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const action=ctx.match[1],key=routeKey(ctx);
+    if(action==='cancel'){
+      ctx.session.step=null;ctx.session.contactCandidates=null;
+      return ctx.reply('✅ Amal bekor qilindi.',menu());
+    }
+    const cfg=await load(ctx);
+    if(!cfg)return ctx.reply('❌ Yo‘nalish topilmadi.',menu());
+    if(action==='clear'){
+      return ctx.reply('⚠️ Faqat '+(cfg.route_title||sourceRefLabel(cfg))+
+        ' manbasining tasdiqlangan admin raqamlari va username’larini o‘chiramizmi?'+
+        '\nBizning admin telefonimiz saqlanadi.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🗑 Ha, tozalash','clone:contacts:clearok')],
+          [Markup.button.callback('Bekor qilish','clone:contacts:cancel')]
+        ]));
+    }
+    if(action==='clearok'){
+      await Config.updateOne({bot_key:key},{$set:{
+        source_admin_phones:[],source_admin_usernames:[]
+      }});
+      return ctx.reply('✅ Faqat shu manbaning tasdiqlangan admin kontaktlari tozalandi.',menu());
+    }
+    if(['ownphone','addphone','adduser','remove'].includes(action)){
+      ctx.session.contactRoute=key;
+      ctx.session.step='contact_'+action;
+      const help={
+        ownphone:'📱 O‘Z reklama adminimizning raqamini yuboring.\nMasalan: +998901234567\n«-» — raqamni o‘chirish.\n⚠️ Raqam post imzosida ommaga ko‘rinadi.',
+        addphone:'☎️ MANBA ADMIN RAQAMI\nManbaning reklama/admin raqamini aniq kiriting.\nMasalan: +998910021877\nFaqat shu raqam postlarda bizning reklama raqamimizga almashtiriladi. Sotuvchi va mijoz raqamlari o‘zgarmaydi.',
+        adduser:'👤 MANBA ADMIN USERNAME\nManbaning reklama admini username’ini kiriting.\nMasalan: @Tabriklar_admin02\nFaqat shu manbada bizning admin username’imizga almashtiriladi.',
+        remove:'➖ OLIB TASHLASH\nTasdiqlangan manba kontakti — telefon yoki @username kiriting. Shu manbaning tasdiqlangan ro‘yxatidan o‘chiriladi.'
+      };
+      return ctx.reply(help[action]+'\n\nBekor qilish: /cancel',menu());
+    }
+    if(action==='scan'){
+      if(!sourceKey(cfg)||!sessionReady())
+        return ctx.reply('❌ Manba kanal/guruh va MTProto sessiyasi talab etiladi.',menu());
+      try{
+        const candidates=await withUserSession(async client=>{
+          const peer=await resolveSourcePeer(client,cfg);
+          const recent=await client.getMessages(peer,{limit:80});
+          return detectSourceAdminCandidates(recent);
+        });
+        if(!candidates.length)return ctx.reply('🔎 So‘nggi 80 xabardan ishonchli reklama admin kontakti topilmadi.'+
+          '\n➕ Manba admin raqami yoki username orqali qo‘lda qo‘shishingiz mumkin.',menu());
+        ctx.session.contactRoute=key;
+        ctx.session.contactCandidates=candidates;
+        return ctx.reply('🔎 MANBA ADMINLARIDAN TOPILGAN NOMZODLAR\n\n'+
+          candidates.map((c,i)=>(i+1)+'. '+(c.kind==='phone'?'☎️ ':'👤 ')+c.value+
+            ' ('+c.count+' marta)\n   '+String(c.example||'').slice(0,100)).join('\n\n').slice(0,3300)+
+          '\n\n⚠️ Bu avtomatik TOPILGAN nomzodlar, hali tasdiqlanmagan. Faqat haqiqiy reklama/admin kontaktini tanlang. Sotuvchining raqamini tasdiqlamang.',
+          Markup.inlineKeyboard(candidates.map((c,i)=>[
+            Markup.button.callback('✅ '+(c.kind==='phone'?'☎️ ':'👤 ')+c.value,
+              'clone:contacts:approve:'+i)
+          ])));
+      }catch(error){
+        return ctx.reply('❌ Manba kontaktlarini aniqlab bo‘lmadi: '+describeRelayError(error,160),menu());
+      }
+    }
+  });
+  bot.action(/^clone:contacts:approve:(\d{1,2})$/,async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const key=routeKey(ctx);
+    if(ctx.session.contactRoute!==key)
+      return ctx.reply('⚠️ Yo‘nalish o‘zgargan. Kandidatlarni qayta aniqlang.',menu());
+    const candidate=ctx.session.contactCandidates?.[Number(ctx.match[1])];
+    if(!candidate)return ctx.reply('⚠️ Nomzod eskirgan, yana 🔎 Manbadan adminlarni aniqlash tugmasini bosing.',menu());
+    const field=candidate.kind==='phone'?'source_admin_phones':'source_admin_usernames';
+    const value=candidate.kind==='phone'?normalizePhone(candidate.value):normalizeUsername(candidate.value);
+    if(!value)return ctx.reply('❌ Noto‘g‘ri kontakt.',menu());
+    await Config.updateOne({bot_key:key},{$addToSet:{[field]:value}});
+    return ctx.reply('✅ Tasdiqlandi: '+(candidate.kind==='phone'?'☎️ ':'👤 ')+value+
+      '\nFaqat shu manbaning postlarida almashtiriladi.'+
+      (candidate.kind==='phone'?'\n📱 Bizning admin telefonimiz ham belgilangan bo‘lishi kerak.':''),menu());
+  });
   bot.hears('📋 Post imzosi',async ctx=>{
     if(!permitted(ctx))return;
     ctx.session.step=null;
@@ -171,6 +274,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const branded=(current?.clone_format||'branded')==='branded';
     return ctx.reply('📋 TANLANGAN YO‘NALISH POST IMZOSI\n\n'+
       (adFooter(current)||'Hozircha reklama havolalari yo‘q.')+
+      '\n\n🧑‍💼 Tasdiqlangan manba admin telefonlari: '+(current?.source_admin_phones||[]).length+
+      '\n👤 Tasdiqlangan manba admin username’lari: '+(current?.source_admin_usernames||[]).length+
       '\n\n🔗 Manba linki o‘rniga: '+(getTargetPostLink(current)||'Maqsad kanalni ulang')+
       '\n\n✏️ Faqat Branded formatda bu imzo post matni yoki captionga qo‘shiladi.'+
       (branded?'\n✅ Branded faol':'\n⚠️ Original format faol: post asl holicha saqlanadi, reklama imzosi qo‘shilmaydi.')+
@@ -523,6 +628,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\nTarixiy ID: '+Number(c?.history_cursor||0)+
       (c?.promo_bot_username?'\n🤖 Reklama boti: @'+c.promo_bot_username:'')+
        (c?.promo_admin_username?'\n📩 Reklama admini: @'+c.promo_admin_username:'')+
+       (c?.promo_admin_phone?'\n☎️ Bizning reklama telefoni: '+c.promo_admin_phone:'')+
+       '\n🪪 Manba adminlari: '+(c?.source_admin_phones||[]).length+' raqam / '+(c?.source_admin_usernames||[]).length+' username'+
        (c?.target_invite_link?'\n🔗 Kanal taklif havolasi tayyor':'')+
        '\n🎨 Post formati: '+(c?.clone_format||'branded')+
        (c?.source_stats?'\n📚 Jami: '+c.source_stats.total+' | 🖼 '+c.source_stats.photo+' | 🎬 '+c.source_stats.video+' | 🎵 '+c.source_stats.audio+' | 📁 '+c.source_stats.document+' | 📎 '+c.source_stats.links:'')+
@@ -722,7 +829,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(choice==='cancel')return ctx.reply('Bekor qilindi.',menu());
     const $set={auto_enabled:false,history_enabled:false,history_completed:false,
       history_cursor:0,history_ceiling:0,history_last_error:'',history_retry_at:null,history_error_count:0};
-    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_title:'',source_type:'',source_cursor:0});
+    if(choice==='source'||choice==='all')Object.assign($set,{source_username:'',source_chat_id:'',source_title:'',source_type:'',source_cursor:0,source_admin_phones:[],source_admin_usernames:[]});
     if(choice==='target'||choice==='all')Object.assign($set,{target_chat_id:'',target_username:'',target_title:'',target_invite_link:'',target_invite_chat_id:'',target_invite_attempt_at:null});
     await Config.updateOne({bot_key:routeKey(ctx)},{$set},{upsert:true});
     ctx.session.step=null;
@@ -731,7 +838,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.on('text',async ctx=>{
     if(!permitted(ctx)||!ctx.session.step)return;
     const raw=String(ctx.message.text||'').trim();
-    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭)/u.test(raw))return;
+    if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭|🪪)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
     if(step==='interval_custom'){
       const selected=ctx.session.intervalRoute||routeKey(ctx);
@@ -751,6 +858,58 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       await rememberRoute(ctx,id);
       ctx.session.step='source';
       return ctx.reply('✅ '+title+' yo‘nalishi yaratildi!\n\n1/3 📥 Manba @kanal, @guruh yoki -100... guruh ID sini yuboring.',menu());
+    }
+    if(step.startsWith('contact_')){
+      const key=ctx.session.contactRoute;
+      if(!key||key!==routeKey(ctx)){
+        ctx.session.contactRoute=null;
+        return ctx.reply('⚠️ Yo‘nalish o‘zgargan. 🪪 Admin kontaktlari bo‘limini qayta oching.',menu());
+      }
+      const action=step.slice('contact_'.length);
+      if(action==='ownphone'){
+        const phone=raw==='-'?'':normalizePhone(raw);
+        if(raw!=='-'&&!phone){
+          ctx.session.step=step;
+          return ctx.reply('❌ +998901234567 kabi haqiqiy raqam kiriting. O‘chirish: -',menu());
+        }
+        await Config.updateOne({bot_key:key},{$set:{promo_admin_phone:phone}});
+        return ctx.reply(phone?'✅ Bizning reklama adminimiz telefoni: '+phone+
+          '\nBu raqam ommaviy post imzosiga qo‘shiladi va tasdiqlangan manba raqamlari o‘rnida ishlatiladi.':
+          '✅ Reklama admin telefoni o‘chirildi. Manba admin raqamlari endi avtomatik o‘zgartirilmaydi.',menu());
+      }
+      if(action==='addphone'){
+        const phone=normalizePhone(raw);
+        if(!phone){
+          ctx.session.step=step;
+          return ctx.reply('❌ Manbaning raqamini +998901234567 shaklida yuboring.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$addToSet:{source_admin_phones:phone}});
+        return ctx.reply('✅ Shu MANBANING reklama admin raqami tasdiqlandi: '+phone+
+          '\n📱 Postlarda faqat aynan shu raqam bizning admin telefonimizga almashtiriladi.'+
+          '\nSotuvchilar/mijozlarning boshqa raqamlari o‘zgarishsiz qoladi.',menu());
+      }
+      if(action==='adduser'){
+        const username=normalizeUsername(raw);
+        if(!username){
+          ctx.session.step=step;
+          return ctx.reply('❌ @admin_username shaklida yuboring.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$addToSet:{source_admin_usernames:username}});
+        return ctx.reply('✅ Shu manbaning reklama admin username’i tasdiqlandi: @'+username+
+          '\nO‘rniga bizning 📩 Reklama admini username’imiz qo‘yiladi.',menu());
+      }
+      if(action==='remove'){
+        const phone=normalizePhone(raw);
+        const user=normalizeUsername(raw);
+        if(!phone&&!user){
+          ctx.session.step=step;
+          return ctx.reply('❌ +998... raqam yoki @username kiriting.',menu());
+        }
+        await Config.updateOne({bot_key:key},{$pull:phone?
+          {source_admin_phones:phone}:{source_admin_usernames:user}});
+        return ctx.reply('✅ Shu manbaning tasdiqlangan ro‘yxatidan olib tashlandi: '+(phone||'@'+user),menu());
+      }
+      return;
     }
     const handle=telegramHandle(raw);
     if(step==='promo_admin'){
@@ -795,6 +954,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
           clone_format:target.clone_format||'branded',
           promo_bot_username:target.promo_bot_username||'',
           promo_admin_username:target.promo_admin_username||'',
+          promo_admin_phone:target.promo_admin_phone||'',
+          source_admin_phones:[],source_admin_usernames:[],
           publish_interval_minutes:Number(target.publish_interval_minutes)||0,
           auto_enabled:false,history_enabled:false,history_completed:false,source_cursor:0,history_cursor:0
         });
@@ -814,7 +975,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         if(existing)return ctx.reply('⚠️ Bu manba shu maqsadga boshqa yo‘nalishda ulangan: '+existing.route_title,menu());
       }
       await Config.updateOne({bot_key:routeKey(ctx)},{$set:{
-        ...source,source_mode:'mtproto',source_cursor:0,
+        ...source,source_admin_phones:[],source_admin_usernames:[],source_mode:'mtproto',source_cursor:0,
         history_enabled:false,history_completed:false,history_cursor:0,history_ceiling:0,
         history_retry_at:null,history_error_count:0,auto_enabled:false
       }},{upsert:true});

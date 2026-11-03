@@ -1,4 +1,5 @@
 'use strict';
+const {normalizePhone,replaceApprovedPhoneContacts,sourceAdminUsernameSet}=require('./channel-clone-contacts');
 
 // Transform only Telegram promotional contacts, not arbitrary names, prices,
 // phone numbers, external URLs or attribution to the original performer.
@@ -7,8 +8,8 @@ const URLS=/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/(?:\
 const HANDLES=/@[A-Za-z][A-Za-z0-9_]{4,31}/g;
 const STANDALONE_HANDLE=/^\s*@[A-Za-z][A-Za-z0-9_]{4,31}\s*$/u;
 const STANDALONE_PHONE=/^\s*(?:[^\p{L}\p{N}+]{0,12})?\+?998[\d\s()\-]{8,20}\s*$/u;
-const OLD_FOOTER=/^\s*(?:📢\s*kanalimiz|🤖\s*botimiz|📩\s*reklama(?:\s+va\s+hamkorlik)?\s+uchun)\s*:/iu;
-const FOOTER_ONLY=/^\s*(?:(?:📢|🤖|📩)\s*)?(?:kanalimiz|botimiz|reklama(?:\s+va\s+hamkorlik)?\s+uchun)\s*:\s*(?:@[A-Za-z][A-Za-z0-9_]{4,31})?\s*$/iu;
+const OLD_FOOTER=/^\s*(?:📢\s*kanalimiz|🤖\s*botimiz|📩\s*reklama(?:\s+va\s+hamkorlik)?\s+uchun|☎️\s*reklama\s+telefoni)\s*:/iu;
+const FOOTER_ONLY=/^\s*(?:(?:📢|🤖|📩|☎️)\s*)?(?:kanalimiz|botimiz|reklama(?:\s+va\s+hamkorlik)?\s+uchun|reklama\s+telefoni)\s*:\s*(?:@[A-Za-z][A-Za-z0-9_]{4,31}|\+?998\d{9})?\s*$/iu;
 const SELLER=/\b(?:sotuvchi|seller|продавец|sotiladi|savdo|narxi|цена|muallif|author|ijrochi|boshlo?vchi|doktor)\b/iu;
 const MARKET=/\b(?:narxi|sotiladi|sotuvchi|цена|продается|mashina|avtomobil|nexia|cobalt|телефон\s+продавца)\b/iu;
 const ADMIN=/\b(?:biz\s+bilan(?:\s+telegram\s+orqali)?\s+bog['’ʼ‘]?lan(?:ing|ish)|telegram\s+orqali\s+bog['’ʼ‘]?lan(?:ing|ish)|murojaat\s+uchun|reklama\s+uchun|hamkorlik\s+uchun|navbat\s+olish\s+uchun|admin(?:istrator)?(?:\s+lichka(?:si)?)?|lichkasi|buyurtma\s+uchun|bog['’ʼ‘]?lanish\s+uchun|по\s+рекламе|админ(?:истратор)?)\b/iu;
@@ -55,6 +56,8 @@ function replaceSourcePromotions(input,opts={}){
   const channelMention=channel?'@'+channel:String(cfg.targetLink||'');
   const channelLink=String(cfg.targetLink||'');
   const adminMention=admin?'@'+admin:'';
+  const adminPhone=normalizePhone(cfg.adminPhone);
+  const approvedAdminUsernames=sourceAdminUsernameSet(cfg.sourceAdminUsernames);
   const botMention=bot?'@'+bot:channelMention;
   const sourceText=String(input||'').replace(/\r\n?/g,'\n');
   const market=MARKET.test(sourceText);
@@ -82,6 +85,12 @@ function replaceSourcePromotions(input,opts={}){
       continue;
     }
 
+    // Only admin numbers explicitly approved for this source route can
+    // change. Arbitrary standalone phones, customer contacts and sellers
+    // remain as-is, even in greeting posts.
+    line=replaceApprovedPhoneContacts(line,{
+      adminPhone,sourceAdminPhones:cfg.sourceAdminPhones
+    });
     let replacedUrl=false;
     URLS.lastIndex=0;
     const changedUrls=line.replace(URLS,(url)=>{
@@ -109,6 +118,7 @@ function replaceSourcePromotions(input,opts={}){
       line=line.replace(HANDLES,(handle)=>{
         const raw=handle.slice(1);
         if(isOwnContact(raw))return handle;
+        if(approvedAdminUsernames.has(raw.toLowerCase())&&adminMention)return adminMention;
         if(preserveContact)return handle;
         const chosen=role==='admin'||/(?:admin|reklama|lichka)/i.test(raw)
           ?adminMention:role==='bot'||/bot$/i.test(raw)?botMention:
@@ -117,10 +127,8 @@ function replaceSourcePromotions(input,opts={}){
         return chosen||handle;
       });
     }
-    // Promotional phone belonging to an admin (not a car seller) should be
-    // replaced with the configured ad contact; never invent a phone number.
-    if(role==='admin'&&!market && STANDALONE_PHONE.test(trim) && adminMention)
-      line=adminMention;
+    // Do not guess that an unapproved number belongs to a promoter.
+    // Users approve discovered contact candidates per source route.
 
     if((JOIN.test(trim)||(DIRECTIONAL.test(trim)&&!ADMIN.test(trim))) &&
       !/@[A-Za-z]/.test(trim) && !/t\.me\//i.test(trim)){
