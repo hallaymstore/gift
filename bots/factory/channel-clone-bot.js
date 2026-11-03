@@ -43,7 +43,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🏆 TOP 10','🏆 TOP 20'],
     ['🧪 Ulanishni tekshirish','🎨 Post formati'],
     ['📋 Post imzosi','🔗 Bizning taklif havolamiz'],
-    ['🧹 Eski postlar matnini tuzatish']
+    ['🧹 Eski postlar matnini tuzatish'],
+    ['🔁 Eski username/linklarni almashtirish']
   ]).resize();
   const routeKey=ctx=>ctx?.session?.activeRoute||cloneKey;
   const routesQuery=()=>({$or:[{bot_key:cloneKey},{owner_bot_key:cloneKey}]});
@@ -550,22 +551,98 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       '\n🔎 Natijani 📊 Holat orqali tekshiring.',menu());
   });
   let repairing=false;
-  bot.hears('🧹 Eski postlar matnini tuzatish',async ctx=>{
+  const repairLabels=['🧹 Eski postlar matnini tuzatish','🔁 Eski username/linklarni almashtirish'];
+  const repairQuery=(key,target)=>({
+    bot_key:key,target_chat_id:target,status:'sent',target_message_id:{$gt:0}
+  });
+  const brief=(text,max=440)=>String(text||'').trim().slice(0,max);
+  async function previewOldPostRepair(ctx){
     if(!permitted(ctx))return;
-    if(repairing)return ctx.reply('🔄 Tahrirlash davom etmoqda.',menu());
+    if(repairing)return ctx.reply('🔄 Boshqa tahrirlash davom etmoqda.',menu());
     const cfg=await load(ctx);
-    if(!cfg?.target_chat_id||!sessionReady())return ctx.reply('❌ Kanal va Telegram sessiyasi kerak.',menu());
+    if(!cfg?.target_chat_id||!sessionReady())
+      return ctx.reply('❌ Oldingi xabarlarni tekshirish uchun maqsad kanal/guruh va Telegram sessiyasi kerak.',menu());
+    if((cfg.clone_format||'branded')!=='branded')
+      return ctx.reply('⚠️ Avval 🎨 Post formati orqali Branded rejimini tanlang.',menu());
+    try{
+      const key=routeKey(ctx);
+      const total=await Log.countDocuments(repairQuery(key,cfg.target_chat_id));
+      if(!total)return ctx.reply('📭 Ushbu yo‘nalish orqali yuborilgan va tahrirlashga mos postlar topilmadi.',menu());
+      cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+      const recent=await Log.find(repairQuery(key,cfg.target_chat_id))
+        .sort({_id:-1}).limit(12).lean();
+      const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
+      let sample=null;
+      try{
+        await withUserSession(async client=>{
+          for(const log of recent){
+            const found=await client.getMessages(target,{ids:Number(log.target_message_id)});
+            const post=Array.isArray(found)?found[0]:found;
+            if(!post)continue;
+            const before=String(post.message||'');
+            const after=refreshClonePostText(before,cfg,post.media?1024:4096);
+            if(after&&after!==before.trim()){
+              sample={before,after};
+              break;
+            }
+          }
+        });
+      }catch(error){
+        return ctx.reply('❌ Oldingi postlar namunasini o‘qib bo‘lmadi: '+
+          describeRelayError(error,170)+'\nBotingiz yoki MTProto akkauntingiz guruh/kanal xabarlarini o‘qiy olishini tekshiring.',menu());
+      }
+      ctx.session.repairRouteKey=key;
+      ctx.session.repairTarget=String(cfg.target_chat_id);
+      let description='🔎 ESKI XABARLARDAGI USERNAME VA HAVOLALARNI ALMASHTIRISH\n\n'+
+        '📤 '+(cfg.target_username?'@'+cfg.target_username:cfg.target_title||cfg.target_chat_id)+
+        '\n📚 Tekshiriladigan Cloner xabarlari: '+total+
+        '\n\n📢 Manba kanal/guruh → bizning kanal/guruh\n'+
+        '📩 Manba reklama admini → @'+(cfg.promo_admin_username||'sozlanmagan')+
+        '\n🤖 Manba bot → '+(cfg.promo_bot_username?'@'+cfg.promo_bot_username:'o‘z kanalimiz')+
+        '\n\nCloner yuborgan xabarlar matni/captioni tahrirlanadi; media qayta yuklanmaydi.';
+      if(sample)description+='\n\nOLDIN:\n'+brief(sample.before)+
+        '\n\nKEYIN:\n'+brief(sample.after);
+      else description+='\n\nℹ️ So‘nggi 12 ta postda o‘zgarish topilmadi; eski xabarlar tekshirilishi mumkin.';
+      return ctx.reply(description.slice(0,3900),Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Almashtirishni boshlash','clone:repair:confirm')],
+        [Markup.button.callback('❌ Bekor qilish','clone:repair:cancel')]
+      ]));
+    }catch(error){
+      return ctx.reply('❌ Tekshiruv xatosi: '+describeRelayError(error,175),menu());
+    }
+  }
+  bot.hears(repairLabels,previewOldPostRepair);
+  bot.action('clone:repair:cancel',async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    ctx.session.repairRouteKey=null;ctx.session.repairTarget=null;
+    return ctx.reply('✅ Ommaviy tahrirlash bekor qilindi. Hech bir post o‘zgartirilmadi.',menu());
+  });
+  bot.action('clone:repair:confirm',async ctx=>{
+    if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
+    await ctx.answerCbQuery();
+    const key=ctx.session.repairRouteKey;
+    const targetId=ctx.session.repairTarget;
+    ctx.session.repairRouteKey=null;ctx.session.repairTarget=null;
+    if(repairing)return ctx.reply('🔄 Tahrirlash davom etmoqda.',menu());
+    if(!key||routeKey(ctx)!==key)
+      return ctx.reply('⚠️ Tasdiqlash eskirgan. Avval menyudan qayta tekshiring.',menu());
+    const cfg=await Config.findOne({bot_key:key}).lean();
+    if(!cfg?.target_chat_id||String(cfg.target_chat_id)!==targetId)
+      return ctx.reply('❌ Maqsad kanali o‘zgargan. Tahrirlashni qayta tekshiring.',menu());
+    if((cfg.clone_format||'branded')!=='branded'||!sessionReady())
+      return ctx.reply('⚠️ Branded rejimi va MTProto sessiyasi kerak.',menu());
     repairing=true;
-    try {
-      if((cfg.clone_format||'branded')==='branded')
-        cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
-      await ctx.reply('🛠 Avval joylangan postlar qayta yuborilmasdan tahrirlanmoqda.',menu());
+    try{
+      cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+      await ctx.reply('🔁 Tahrirlash boshlandi. Faqat '+(cfg.route_title||'tanlangan')+
+        ' yo‘nalishining Cloner yuborgan eski postlari ko‘rib chiqiladi.',menu());
     }catch(error){
       repairing=false;
-      return ctx.reply('❌ Tahrirlash boshlanmadi: '+describeRelayError(error,160),menu());
+      return ctx.reply('❌ Tahrirlash boshlanmadi: '+describeRelayError(error,170),menu());
     }
     void (async()=>{
-      let client,edited=0,failed=0,checked=0;
+      let client,edited=0,failed=0,checked=0,unchanged=0;
       try{
         const {TelegramClient}=require('teleproto');
         const {StringSession}=require('teleproto/sessions');
@@ -575,37 +652,49 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
         let after=null;
         while(true){
-          const query={bot_key:routeKey(ctx),target_chat_id:cfg.target_chat_id,status:'sent',target_message_id:{$gt:0}};
+          const query=repairQuery(key,cfg.target_chat_id);
           if(after)query._id={$gt:after};
           const items=await Log.find(query).sort({_id:1}).limit(50).lean();
           if(!items.length)break;
           for(const item of items){
             after=item._id;checked++;
             try{
-              const result=await client.getMessages(target,{ids:Number(item.target_message_id)});
-              const post=Array.isArray(result)?result[0]:result;
-              if(!post)continue;
+              const found=await client.getMessages(target,{ids:Number(item.target_message_id)});
+              const post=Array.isArray(found)?found[0]:found;
+              if(!post){failed++;continue;}
               const before=String(post.message||'');
-              const afterText=(cfg.clone_format||'branded')==='branded'
-                ? refreshClonePostText(before,cfg,post.media?1024:4096)
-                : before.split('\n').filter(line=>!/^\s*(?:📌\s*)?Manba\s*:/iu.test(line))
-                  .join('\n').replace(/\n{3,}/g,'\n\n').trim();
-              if(afterText && afterText!==before.trim()){
-                try {
-                  if(post.media)await ctx.telegram.editMessageCaption(cfg.target_chat_id,item.target_message_id,undefined,afterText);
-                  else await ctx.telegram.editMessageText(cfg.target_chat_id,item.target_message_id,undefined,afterText);
-                } catch(e) {
-                  await client.editMessage(target,{message:Number(item.target_message_id),text:afterText});
-                }
-                edited++;
+              const updated=refreshClonePostText(before,cfg,post.media?1024:4096);
+              if(!updated||updated===before.trim()){unchanged++;continue;}
+              try{
+                if(post.media)
+                  await ctx.telegram.editMessageCaption(cfg.target_chat_id,item.target_message_id,undefined,updated);
+                else
+                  await ctx.telegram.editMessageText(cfg.target_chat_id,item.target_message_id,undefined,updated);
+              }catch(botError){
+                // Channel admins cannot necessarily edit posts sent by other
+                // accounts. MTProto fallback only works where Telegram permits.
+                await client.editMessage(target,{message:Number(item.target_message_id),text:updated});
               }
-            }catch(e){failed++;console.warn('clone post edit failed',item.target_message_id,String(e.message||e).slice(0,120));}
+              edited++;
+            }catch(error){
+              failed++;
+              console.warn('[clone] prior post text edit failed',String(item.target_message_id),
+                describeRelayError(error,130));
+            }
             await new Promise(resolve=>setTimeout(resolve,400));
           }
+          if(checked%500===0)
+            await ctx.reply('🔄 Tekshirildi: '+checked+' | ✏️ '+edited+' | ⚠️ '+failed).catch(()=>{});
         }
-        await ctx.reply('✅ Tekshirildi: '+checked+'\n✏️ Tahrirlandi: '+edited+'\n⚠️ Xato: '+failed,menu());
-      }catch(e){await ctx.reply('❌ Xato: '+String(e.message||e).slice(0,150),menu()).catch(()=>{});}
-      finally{if(client)await client.disconnect().catch(()=>{});repairing=false;}
+        await ctx.reply('✅ ESKI XABARLARNI TEKSHIRISH YAKUNLANDI\n\n'+
+          '📚 Tekshirildi: '+checked+'\n✏️ Almashtirildi: '+edited+
+          '\n➖ O‘zgarishsiz: '+unchanged+'\n⚠️ Xato: '+failed,menu());
+      }catch(error){
+        await ctx.reply('❌ Tahrirlash xatosi: '+describeRelayError(error,175),menu()).catch(()=>{});
+      }finally{
+        if(client)await client.disconnect().catch(()=>{});
+        repairing=false;
+      }
     })();
   });
   bot.hears('🔌 Ulangan kanallar',async ctx=>{
