@@ -4,7 +4,8 @@
 // (masalan 25 000 o'rniga 25 037 so'm). Kutilayotgan (pending) hisoblar orasida
 // bir xil summa bo'lmaydi, har bir tranzaksiya ID faqat bir marta ishlatiladi.
 
-const INVOICE_TTL_MIN = Number(process.env.PAY_INVOICE_TTL_MIN || 30);
+// Hamyon 5 daqiqada pul topmasa status=cancel yuboradi — hisob ham shuncha yashaydi.
+const INVOICE_TTL_MIN = Number(process.env.PAY_INVOICE_TTL_MIN || 5);
 const MAX_OFFSET = Number(process.env.PAY_UNIQUE_MAX_OFFSET || 999);
 
 function pickUniqueAmount(base, usedAmounts, rand = Math.random) {
@@ -29,14 +30,40 @@ function extractTransactions(json) {
   })).filter((t) => t.id && t.amount > 0 && t.incoming);
 }
 
+// Webhook (PREPARE_URL / COMPLETE_URL) tanasidan kerakli maydonlarni moslashuvchan o'qiydi.
+function parseWebhook(body = {}) {
+  const b = typeof body === 'object' && body ? body : {};
+  const d = b.data && typeof b.data === 'object' ? { ...b.data, ...b } : b;
+  const status = String(d.status ?? d.state ?? '').toLowerCase();
+  return {
+    status: ['paid', 'success', 'completed', 'done'].includes(status) ? 'paid' : ['cancel', 'canceled', 'cancelled', 'expired', 'failed'].includes(status) ? 'cancel' : status,
+    orderId: String(d.order_id ?? d.merchant_order_id ?? d.invoice_id ?? d.external_id ?? d.merchant_trans_id ?? d.comment ?? ''),
+    paymentId: String(d.payment_id ?? d.id ?? d.transaction_id ?? d.tx_id ?? ''),
+    amount: Math.round(Number(d.amount ?? d.sum ?? d.summa ?? 0)),
+    shopId: String(d.shop_id ?? d.shopId ?? '')
+  };
+}
+
 function createHamyonProvider(env = process.env, fetchImpl = globalThis.fetch) {
   const url = env.HAMYON_API_URL;
   const shopId = env.HAMYON_SHOP_ID;
   const shopKey = env.HAMYON_SHOP_KEY;
-  if (!url || !shopId || !shopKey) return null;
+  if (!shopId || !shopKey) return null;
   return {
     name: 'hamyon',
+    async createPayment(inv) {
+      if (!env.HAMYON_CREATE_URL) return null;
+      const res = await fetchImpl(env.HAMYON_CREATE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ shop_id: shopId, shop_key: shopKey, amount: inv.amount, order_id: String(inv._id) })
+      });
+      if (!res.ok) throw new Error(`Hamyon to‘lov yaratish: ${res.status}`);
+      const j = await res.json().catch(() => ({}));
+      return String(j.payment_id ?? j.id ?? j.data?.payment_id ?? j.data?.id ?? '') || null;
+    },
     async listIncoming() {
+      if (!url) return [];
       const method = String(env.HAMYON_API_METHOD || 'POST').toUpperCase();
       const params = { shop_id: shopId, shop_key: shopKey };
       const target = method === 'GET' ? `${url}${url.includes('?') ? '&' : '?'}${new URLSearchParams(params)}` : url;
@@ -61,7 +88,8 @@ function createAutoPay({ mongoose, provider, onPaid, logger = console }) {
     status: { type: String, enum: ['pending', 'paid', 'expired', 'cancelled'], default: 'pending', index: true },
     expires_at: Date,
     paid_at: Date,
-    provider_tx_id: { type: String, default: null }
+    provider_tx_id: { type: String, default: null },
+    provider_payment_id: { type: String, default: null, index: true }
   }, { timestamps: true, collection: 'factory_payment_invoices' });
   // Bir vaqtda ikki pending hisobda bir xil summa bo'lmaydi; bitta tranzaksiya ikki marta ishlatilmaydi.
   schema.index({ amount: 1 }, { unique: true, partialFilterExpression: { status: 'pending' } });
@@ -81,15 +109,46 @@ function createAutoPay({ mongoose, provider, onPaid, logger = console }) {
       const amount = pickUniqueAmount(Number(baseAmount), used);
       if (!amount) throw new Error('Hozir juda ko‘p kutilayotgan to‘lov bor, birozdan keyin urinib ko‘ring.');
       try {
-        return await Invoice.create({
+        const inv = await Invoice.create({
           managed_bot_id: record._id, owner_user_id: record.owner_user_id, base_amount: Number(baseAmount), amount, currency,
           expires_at: new Date(Date.now() + INVOICE_TTL_MIN * 60000)
         });
+        if (provider?.createPayment) {
+          const pid = await provider.createPayment(inv).catch((e) => { logger.error('Hamyon createPayment xatosi:', e.message); return null; });
+          if (pid) { inv.provider_payment_id = pid; await inv.save(); }
+        }
+        return inv;
       } catch (e) {
         if (e?.code !== 11000) throw e; // parallel so'rovda summa band bo'lsa — qayta tanlanadi
       }
     }
     throw new Error('Unikal summa tanlab bo‘lmadi, qayta urinib ko‘ring.');
+  }
+
+  async function markPaid(inv, txId) {
+    const done = await Invoice.findOneAndUpdate(
+      { _id: inv._id, status: { $in: ['pending', 'expired'] } },
+      { $set: { status: 'paid', paid_at: new Date(), provider_tx_id: txId || `inv_${inv._id}` } },
+      { new: true }
+    ).catch((e) => { if (e?.code === 11000) return null; throw e; });
+    if (done) await Promise.resolve(onPaid(done)).catch((e) => logger.error('AutoPay onPaid xatosi:', e.message));
+    return done;
+  }
+
+  // Hamyon webhook: status=prepare | paid | cancel.
+  async function handleWebhook(body, { shopId } = {}) {
+    const w = parseWebhook(body);
+    if (shopId && w.shopId && w.shopId !== String(shopId)) return { ok: false, error: 'shop_id mos emas' };
+    let inv = null;
+    if (/^[a-f0-9]{24}$/.test(w.orderId)) inv = await Invoice.findById(w.orderId);
+    if (!inv && w.paymentId) inv = await Invoice.findOne({ provider_payment_id: w.paymentId });
+    // ID bo'lmasa — unikal summa bo'yicha (pending orasida summa takrorlanmaydi).
+    if (!inv && w.amount > 0) inv = await Invoice.findOne({ amount: w.amount, status: { $in: ['pending', 'expired'] } }).sort({ createdAt: -1 });
+    if (!inv) return { ok: true, matched: false };
+    if (w.amount > 0 && w.amount !== inv.amount) return { ok: false, error: 'summa mos emas' };
+    if (w.status === 'paid') return { ok: true, matched: true, paid: Boolean(await markPaid(inv, w.paymentId || null)) };
+    if (w.status === 'cancel') await Invoice.updateOne({ _id: inv._id, status: 'pending' }, { $set: { status: 'expired' } });
+    return { ok: true, matched: true };
   }
 
   let running = false;
@@ -106,14 +165,7 @@ function createAutoPay({ mongoose, provider, onPaid, logger = console }) {
         const tx = txs.find((t) => t.amount === inv.amount && t.at >= new Date(new Date(inv.createdAt).getTime() - 60000));
         if (!tx) continue;
         // Atomik: faqat pending bo'lsa va tranzaksiya ID hali ishlatilmagan bo'lsa yopiladi.
-        const done = await Invoice.findOneAndUpdate(
-          { _id: inv._id, status: 'pending' },
-          { $set: { status: 'paid', paid_at: new Date(), provider_tx_id: tx.id } },
-          { new: true }
-        ).catch((e) => { if (e?.code === 11000) return null; throw e; });
-        if (!done) continue;
-        paid++;
-        await Promise.resolve(onPaid(done)).catch((e) => logger.error('AutoPay onPaid xatosi:', e.message));
+        if (await markPaid(inv, tx.id)) paid++;
       }
       return paid;
     } catch (e) {
@@ -125,13 +177,14 @@ function createAutoPay({ mongoose, provider, onPaid, logger = console }) {
   }
 
   function start(intervalMs = Number(process.env.PAY_CHECK_INTERVAL_MS || 20000)) {
-    if (!provider) { logger.warn('⚠️ Avto to‘lov o‘chiq: HAMYON_API_URL / HAMYON_SHOP_ID / HAMYON_SHOP_KEY berilmagan.'); return null; }
+    if (!provider) { logger.warn('⚠️ Avto to‘lov o‘chiq: HAMYON_SHOP_ID / HAMYON_SHOP_KEY berilmagan.'); return null; }
+    if (!process.env.HAMYON_API_URL) return null; // webhook rejimi: polling kerak emas
     const timer = setInterval(checkPending, intervalMs);
     timer.unref?.();
     return timer;
   }
 
-  return { Invoice, createInvoice, checkPending, start, enabled: Boolean(provider) };
+  return { Invoice, createInvoice, checkPending, handleWebhook, start, enabled: Boolean(provider) };
 }
 
-module.exports = { createAutoPay, createHamyonProvider, pickUniqueAmount, extractTransactions, INVOICE_TTL_MIN };
+module.exports = { createAutoPay, createHamyonProvider, pickUniqueAmount, extractTransactions, parseWebhook, INVOICE_TTL_MIN };

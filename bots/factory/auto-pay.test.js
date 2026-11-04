@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickUniqueAmount, extractTransactions, createHamyonProvider } = require('./auto-pay');
+const { pickUniqueAmount, extractTransactions, createHamyonProvider, parseWebhook } = require('./auto-pay');
 
 test('two simultaneous invoices never get the same amount', () => {
   const used = [];
@@ -35,4 +35,12 @@ test('provider is disabled until env is configured and sends shop credentials', 
   const txs = await p.listIncoming();
   assert.equal(txs[0].amount, 25001);
   assert.deepEqual(JSON.parse(sent.opts.body), { shop_id: '1', shop_key: 'k' });
+});
+
+test('parseWebhook normalizes Hamyon statuses and ids', () => {
+  assert.deepEqual(parseWebhook({ status: 'paid', order_id: 'abc', amount: '25037', shop_id: 209 }),
+    { status: 'paid', orderId: 'abc', paymentId: '', amount: 25037, shopId: '209' });
+  assert.equal(parseWebhook({ data: { status: 'cancel', payment_id: 'p1' } }).status, 'cancel');
+  assert.equal(parseWebhook({ data: { status: 'cancel', payment_id: 'p1' } }).paymentId, 'p1');
+  assert.equal(parseWebhook({ status: 'prepare' }).status, 'prepare');
 });

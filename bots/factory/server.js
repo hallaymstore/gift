@@ -11260,6 +11260,21 @@ async function start() {
   if (URL) {
     expressApp = express();
     expressApp.use(express.json({ limit: '20mb' }));
+    // 💳 Hamyon webhook: PREPARE_URL va COMPLETE_URL shu manzillarga qo'yiladi (oxirida maxfiy kalit).
+    expressApp.use('/api/hamyon', express.urlencoded({ extended: false }));
+    expressApp.post('/api/hamyon/:kind(prepare|complete)/:secret', async (req, res) => {
+      const secret = String(process.env.HAMYON_WEBHOOK_SECRET || '');
+      if (!secret || req.params.secret !== secret) return res.status(403).json({ ok: false });
+      if (!autoPay.enabled || !autoPay.handleWebhook) return res.status(503).json({ ok: false, error: 'autopay disabled' });
+      try {
+        const result = await autoPay.handleWebhook(req.body, { shopId: process.env.HAMYON_SHOP_ID });
+        console.log(`💳 Hamyon ${req.params.kind}:`, JSON.stringify(result));
+        return res.json({ ok: true, ...result });
+      } catch (e) {
+        console.error('Hamyon webhook xatosi:', e.message);
+        return res.status(500).json({ ok: false });
+      }
+    });
     mountWebPanel(expressApp, { secret: PANEL_SECRET, getStats: getBotStats, getTitle: (key) => activeBots.get(key)?.title });
 
     // Barcha yaratilgan botlar uchun yagona barqaror webhook router.
