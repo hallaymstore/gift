@@ -102,8 +102,8 @@ async function createPromoVideo({telegram,fileId,size,duration,width,height,user
   const srcWidth=Number(width)||720,srcHeight=Number(height)||1280;
   const isLandscape=srcWidth>srcHeight*1.12;
   const square=srcWidth/srcHeight>.88&&srcWidth/srcHeight<1.12;
-  const W=isLandscape?1280:(square?720:720);
-  const H=isLandscape?720:(square?720:1280);
+  const W=isLandscape?960:540;
+  const H=isLandscape?540:(square?540:960);
   const seconds=Math.max(1,Math.min(MAX_DURATION,Math.ceil(Number(duration)||30)));
   active=true;
   let dir='';
@@ -116,20 +116,20 @@ async function createPromoVideo({telegram,fileId,size,duration,width,height,user
     await sharp(Buffer.from(overlaySource)).png({compressionLevel:5}).toFile(overlay);
     const link=await telegram.getFileLink(fileId);
     await downloadTelegramMedia(link,input,MAX_INPUT_BYTES);
-    const filters='[0:v]fps=18,scale='+W+':'+H+':force_original_aspect_ratio=decrease:flags=fast_bilinear,'+
+    const filters='[0:v]fps=15,scale='+W+':'+H+':force_original_aspect_ratio=decrease:flags=fast_bilinear,'+
       'pad='+W+':'+H+':(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[base];'+
       '[base][1:v]overlay=0:0:shortest=1,format=yuv420p[v]';
     const args=[
       '-hide_banner','-loglevel','error','-y','-i',input,
-      '-loop','1','-framerate','18','-i',overlay,
-      '-t',String(seconds),'-filter_complex_threads','1',
+      '-loop','1','-framerate','15','-i',overlay,
+      '-t',String(seconds),'-filter_complex_threads',String(Number(process.env.PROMO_FFMPEG_THREADS||2)),
       '-filter_complex',filters,'-map','[v]','-map','0:a:0?',
-      '-r','18','-threads','1','-c:v','libx264','-preset','ultrafast',
-      '-b:v','950k','-maxrate','1100k','-bufsize','2100k',
+      '-r','15','-threads',String(Number(process.env.PROMO_FFMPEG_THREADS||2)),'-c:v','libx264','-preset','ultrafast',
+      '-b:v','700k','-maxrate','850k','-bufsize','1600k',
       '-pix_fmt','yuv420p','-c:a','aac','-b:a','72k','-movflags','+faststart',
       output
     ];
-    await renderFfmpeg(args);
+    await renderFfmpeg(args,Math.min(300000,Math.max(105000,seconds*6000)));
     const stat=await fsp.stat(output);
     if(stat.size<1024||stat.size>MAX_OUTPUT_BYTES)
       throw new Error('Tayyor video hajmi 12 MB chegarasiga mos emas.');
