@@ -28,6 +28,11 @@ const { parseSubInput, membershipAccepted, subscriptionChatRef } = require('./su
 const { makeShorts, INPUT_LIMIT: SHORTS_INPUT_LIMIT } = require('./shorts-studio');
 const { sendShortsVideo, publicUploadError } = require('./shorts-upload');
 const BOT_CONFIGS_RAW = require('./bots.config');
+const { attachMenuBuilder } = require('./menu-builder');
+const { defaultUserMenu, isPartsPurpose, visibleCategories, availablePurposes, getCategory, purposeLabel, purposeDetails } = require('./bot-catalog');
+const { installFloodGuard } = require('./flood-guard');
+const { mountWebPanel, panelLink } = require('./web-panel');
+installFloodGuard(require('telegraf').Telegram);
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
 
@@ -41,6 +46,7 @@ const NodeURL = require('url').URL;
 const URL = String(process.env.URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_webhook_secret';
 const BOT_TOKEN_SECRET = process.env.BOT_TOKEN_SECRET || WEBHOOK_SECRET;
+const PANEL_SECRET = process.env.PANEL_SECRET || BOT_TOKEN_SECRET;
 const FACTORYBOT_TOKEN = String(process.env.FACTORYBOT_TOKEN || process.env.FACTORY_BOT_TOKEN || process.env.BOTFACTORY_TOKEN || process.env.BOTFACTORY_BOT_TOKEN || process.env.BOTFACTORYBOT_TOKEN || process.env.FACTORY_TOKEN || process.env.BOT_FACTORY_TOKEN || process.env.BOTFACTORY_MAIN_TOKEN || process.env.FACTORY_MAIN_BOT_TOKEN || process.env.BOT_TOKEN_FACTORY || '').trim();
 const OWNER_USERNAME = String(process.env.OWNER_USERNAME || '@Qoryogdiyev').trim();
 const TRIAL_DAYS = Math.max(1, Number(process.env.FACTORY_TRIAL_DAYS || process.env.TRIAL_DAYS || 3));
@@ -1751,6 +1757,27 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
     })
   );
   attachGlobalSubscriptionGate(bot, config, adminIds);
+  // 🧩 Bot egasi foydalanuvchi menyusini o'zi tuzadi (nom, joy, funksiya); default yo'nalishga qarab.
+  const purposeKey = config.type_key || config.key;
+  const userMenu = attachMenuBuilder(bot, {
+    Markup,
+    botKey: config.key,
+    getBuiltins: () => ({ ...USER_BTN }),
+    defaultRows: defaultUserMenu(purposeKey),
+    isAdmin: (ctx) => isAdmin(ctx.from?.id),
+    reservedLabels: () => adminKeyboard().reply_markup.keyboard.flat().map((b) => (typeof b === 'string' ? b : b.text)).filter((l) => !Object.values(USER_BTN).includes(l)),
+    load: async (key) => (await getBotSettings(key).catch(() => ({}))).user_menu_layout || null,
+    save: (key, layout) => updateBotSettings(key, { user_menu_layout: layout }),
+    afterSave: (ctx) => ctx.reply('🏠 Admin menyu:', adminKeyboard())
+  });
+  // 🌐 Bot egasi uchun veb panel (Mini App): statistika + menyu konstruktori.
+  bot.command('panel', async (ctx) => {
+    if (!isAdmin(ctx.from?.id)) return null;
+    if (!URL) return ctx.reply('⚠️ Veb panel uchun serverda PUBLIC_URL (yoki RENDER_EXTERNAL_URL) sozlanmagan.');
+    const link = panelLink(URL, PANEL_SECRET, config.key);
+    const btn = URL.startsWith('https://') && ctx.chat?.type === 'private' ? Markup.button.webApp('🌐 Panelni ochish', link) : Markup.button.url('🌐 Panelni ochish', link);
+    return ctx.reply('🌐 Bot veb paneli (24 soat amal qiladi, hech kimga yubormang):', Markup.inlineKeyboard([[btn]]));
+  });
   bot.on('chat_join_request', async (ctx) => {
     try {
       const req = ctx.chatJoinRequest || ctx.update?.chat_join_request;
@@ -1842,14 +1869,16 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   };
 
   function adminKeyboard() {
+    // Yo'nalishga qarab: qismli (serial/anime/dorama...) botlarda qism tugmalari yuqorida.
+    const partsFirst = isPartsPurpose(purposeKey);
     return Markup.keyboard([
-      [addButton(), partButton()],
+      partsFirst ? [addButton(), partButton()] : [addButton()],
       ['🎬 Shorts Studio', '⚡ Ommaviy qo‘shish'],
       ['📣 Kanal postlari'],
       [listButton()],
       ['📊 Statistika', '✏️ Tahrirlash'],
-      ['🔒 Kontent himoyasi'],
-      [deleteButton(), '🧹 Qism oʻchirish'],
+      ['🔒 Kontent himoyasi', userMenu.openLabel],
+      partsFirst ? [deleteButton(), '🧹 Qism oʻchirish'] : [deleteButton(), partButton(), '🧹 Qism oʻchirish'],
       ['📢 Broadcast', USER_BTN.top],
       ['➕ Kanal qoʻshish', '➕ Guruh qoʻshish'],
       ['📋 Obunalar', '🧪 Obunani sinash'],
@@ -1861,11 +1890,7 @@ function createContentBot(config, tokenOverride = null, adminIdsOverride = null)
   }
 
   function userKeyboard() {
-    return Markup.keyboard([
-      [USER_BTN.top, USER_BTN.fresh],
-      [USER_BTN.random, USER_BTN.favs],
-      [USER_BTN.help]
-    ])
+    return Markup.keyboard(userMenu.keyboardRows())
       .resize()
       .oneTime(false);
   }
@@ -8690,6 +8715,7 @@ function buildManagedConfig(record) {
   return {
     ...preset,
     key: record.bot_key || `m_${String(record._id)}`,
+    type_key: record.type_key,
     title: record.title || preset.title,
     managed: true,
     ownerUserId: record.owner_user_id,
@@ -9471,6 +9497,11 @@ async function startManagedRecord(record, source = 'db') {
 function canCreatePrivateGameBot(userId) {
   const creators = parseIds(process.env.MINI_GAMES_CREATOR_IDS || String(GLOBAL_ADMIN_IDS[0] || ''));
   return creators.includes(Number(userId));
+}
+
+function categoryRows(requestingUserId = 0) {
+  return visibleCategories(TYPE_PRESETS, { isOwner: canCreatePrivateGameBot(requestingUserId) })
+    .map((c) => [Markup.button.callback(`${c.emoji} ${c.title} — ${c.hint}`.slice(0, 64), `factory:cat:${c.key}`)]);
 }
 
 function typeRows(prefix = 'factory:type', requestingUserId = 0) {
@@ -10261,24 +10292,45 @@ function createFactoryBot() {
   bot.hears('🤖 Bot tayyorlash', async (ctx) => {
     if (!(await requireMongo(ctx, 'Bot yaratish uchun maʼlumotlar bazasi kerak'))) return;
     reset(ctx);
+    ctx.session.mode = 'wait_purpose';
+    return ctx.reply('🤖 Yangi bot tayyorlash boshlandi.\n\n🧭 Avval botingiz maqsadini tanlang — keyin token so‘raladi va bot aynan shu yo‘nalish funksiyalari bilan tayyorlanadi:', Markup.inlineKeyboard(categoryRows(ctx.from?.id)));
+  });
+
+  bot.action(/^factory:cat:([a-z]+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const cat = getCategory(ctx.match[1]);
+    if (!cat) return null;
+    const rows = availablePurposes(cat.key, TYPE_PRESETS)
+      .filter((k) => k !== 'mini_games' || canCreatePrivateGameBot(ctx.from?.id))
+      .map((k) => [Markup.button.callback(purposeLabel(k, TYPE_PRESETS[k]), `factory:purpose:${k}`)]);
+    rows.push([Markup.button.callback('⬅️ Orqaga', 'factory:cats')]);
+    return ctx.editMessageText(`${cat.emoji} ${cat.title}\n\nYo‘nalishni tanlang:`, Markup.inlineKeyboard(rows));
+  });
+
+  bot.action('factory:cats', async (ctx) => {
+    await ctx.answerCbQuery();
+    return ctx.editMessageText('🧭 Bot maqsadini tanlang:', Markup.inlineKeyboard(categoryRows(ctx.from?.id)));
+  });
+
+  bot.action(/^factory:purpose:([a-z0-9_-]+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const typeKey = ctx.match[1];
+    if (!TYPE_PRESETS[typeKey]) return ctx.reply('❌ Bunday bot turi yo‘q.');
+    if (typeKey === 'mini_games' && !canCreatePrivateGameBot(ctx.from?.id)) return ctx.reply('⛔ O‘yin botini yaratish faqat Factory asosiy egasiga ruxsat etilgan.');
+    ctx.session.draft = { preselected_type: typeKey };
     ctx.session.mode = 'wait_token';
-    return ctx.reply(
-      `🤖 Yangi bot tayyorlash boshlandi.
-
-` +
-        `BotFather’dan olingan bot tokenni yuboring.
-
-` +
-        `⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token DB’da shifrlanadi.
-
-` +
-        `❌ Bekor qilish: /cancel`
+    return ctx.editMessageText(
+      `${purposeDetails(typeKey, TYPE_PRESETS[typeKey])}\n\n` +
+        `🔑 Endi BotFather’dan olingan bot tokenni yuboring.\n\n⚠️ Faqat o‘zingiz yaratgan bot tokenini yuboring. Token DB’da shifrlanadi.\n\n❌ Bekor qilish: /cancel`
     );
   });
 
   bot.action(/^factory:type:([a-z0-9_-]+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const typeKey = ctx.match[1];
+    return applyFactoryType(ctx, ctx.match[1], (text, extra) => ctx.editMessageText(text, extra));
+  });
+
+  async function applyFactoryType(ctx, typeKey, send) {
     if (typeKey === 'mini_games' && !canCreatePrivateGameBot(ctx.from?.id))
       return ctx.reply('⛔ O‘yin botini yaratish faqat Factory asosiy egasiga ruxsat etilgan.');
     if (!ctx.session.draft?.token_enc) return ctx.reply('❌ Sessiya tugagan. Qaytadan “🤖 Bot tayyorlash” bosing.');
@@ -10292,10 +10344,10 @@ function createFactoryBot() {
       ctx.session.draft.monthly_price = 0;
       ctx.session.draft.currency = 'UZS';
       ctx.session.mode = 'wait_title';
-      return ctx.editMessageText('🎮 Shaxsiy Mini Games bot tanlandi.\n\n🔒 Faqat Factory asosiy egasi uchun.\n💰 Factory oylik tarifi yo‘q.\n🪙 O‘yinlar bepul, ball pulga almashtirilmaydi.\n\nBot nomini yuboring: Mini Games UZ');
+      return send('🎮 Shaxsiy Mini Games bot tanlandi.\n\n🔒 Faqat Factory asosiy egasi uchun.\n💰 Factory oylik tarifi yo‘q.\n🪙 O‘yinlar bepul, ball pulga almashtirilmaydi.\n\nBot nomini yuboring: Mini Games UZ');
     }
     ctx.session.mode = 'wait_tariff';
-    return ctx.editMessageText(
+    return send(
       `✅ Bot turi tanlandi: ${preset.mainEmoji || '🤖'} ${preset.itemTitle || preset.title}
 
 ` +
@@ -10308,7 +10360,7 @@ function createFactoryBot() {
         `💎 Plus — bot xabarlari toza, reklamasiz bo‘ladi.`,
       Markup.inlineKeyboard(tariffRows(plan.monthly_price, plan.currency))
     );
-  });
+  }
 
   bot.action(/^factory:tariff:(standard|plus)$/, async (ctx) => {
     await ctx.answerCbQuery();
@@ -10684,6 +10736,7 @@ Qayta token yuboring yoki /cancel bosing.`);
           return ctx.reply(`ℹ️ @${me.username} bo‘yicha so‘rov/bot allaqachon mavjud. Holati: ${botStatusLabel(exists)}`, userKeyboard(ctx));
         }
 
+        const preselectedType = ctx.session.draft?.preselected_type;
         ctx.session.draft = {
           ...encryptToken(text),
           token_mask: maskToken(text),
@@ -10691,6 +10744,10 @@ Qayta token yuboring yoki /cancel bosing.`);
           telegram_username: me.username,
           telegram_first_name: me.first_name
         };
+        if (preselectedType && TYPE_PRESETS[preselectedType]) {
+          await ctx.reply(`✅ Token tekshirildi: @${me.username}`);
+          return applyFactoryType(ctx, preselectedType, (t, e) => ctx.reply(t, e));
+        }
         ctx.session.mode = 'wait_type';
         return ctx.reply(`✅ Token tekshirildi: @${me.username}\n\nEndi bot turini tanlang:`, Markup.inlineKeyboard(typeRows('factory:type', ctx.from?.id)));
       } catch (error) {
@@ -11136,6 +11193,7 @@ async function start() {
   if (URL) {
     expressApp = express();
     expressApp.use(express.json({ limit: '20mb' }));
+    mountWebPanel(expressApp, { secret: PANEL_SECRET, getStats: getBotStats, getTitle: (key) => activeBots.get(key)?.title });
 
     // Barcha yaratilgan botlar uchun yagona barqaror webhook router.
     // Oldingi versiyalardagi /webhook/:botKey/:secret yo‘li ham qo‘llab-quvvatlanadi.

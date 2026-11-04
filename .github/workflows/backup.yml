@@ -1,0 +1,24 @@
+name: MongoDB backup
+# Har kuni 03:00 (Toshkent) da MongoDB zaxirasi olinadi va 14 kun artifact sifatida saqlanadi.
+# GitHub → Settings → Secrets → Actions ichiga MONGODB_URI qo'shing.
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install mongodump
+        run: |
+          wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.10.0.deb
+          sudo apt-get install -y ./mongodb-database-tools-ubuntu2204-x86_64-100.10.0.deb
+      - name: Dump
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: mongodump --uri="$MONGODB_URI" --gzip --archive="backup-$(date +%F).gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mongodb-backup
+          path: backup-*.gz
+          retention-days: 14
