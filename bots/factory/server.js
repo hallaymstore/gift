@@ -9692,7 +9692,8 @@ function createFactoryBot() {
   // 💳 Avto to'lov: kartaga unikal summa tushsa bot 1 oyga avtomatik uzaytiriladi.
   autoPay = createAutoPay({
     mongoose,
-    provider: createHamyonProvider(),
+    // Hozircha o'chiq: to'lov admin bilan kelishiladi. Yoqish uchun ENV: AUTOPAY_ENABLED=1
+    provider: process.env.AUTOPAY_ENABLED === '1' ? createHamyonProvider() : null,
     onPaid: async (inv) => {
       const rec = await ManagedBot.findOne({ _id: inv.managed_bot_id });
       if (!rec) return;
@@ -10911,7 +10912,7 @@ Qayta token yuboring yoki /cancel bosing.`);
           `Bot hoziroq ishga tushdi. Sinov tugamasidan oldin yoki tugagach obunani tiklash/uzaytirish uchun admin bilan kelishing.`,
         Markup.inlineKeyboard([
           ...(autoPay.enabled ? [[Markup.button.callback('💳 Avto to‘lov (karta orqali)', `factory:pay:${rec._id}`)]] : []),
-          [Markup.button.url('💬 Admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
+          [Markup.button.url('💳 Toʻlov/ruxsat uchun admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
         ])
       );
       await ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
