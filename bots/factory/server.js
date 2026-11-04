@@ -32,6 +32,9 @@ const { attachMenuBuilder } = require('./menu-builder');
 const { defaultUserMenu, isPartsPurpose, visibleCategories, availablePurposes, getCategory, purposeLabel, purposeDetails } = require('./bot-catalog');
 const { installFloodGuard } = require('./flood-guard');
 const { mountWebPanel, panelLink } = require('./web-panel');
+const { createAutoPay, createHamyonProvider, INVOICE_TTL_MIN } = require('./auto-pay');
+// Barcha bot turlari uchun yagona oylik narx (default 25 000 so'm). 0 qo'yilsa eski narxlar ishlaydi.
+const FACTORY_FLAT_PRICE = Number(process.env.FACTORY_FLAT_PRICE ?? 25000);
 installFloodGuard(require('telegraf').Telegram);
 const STATIC_BOT_CONFIGS = Array.isArray(BOT_CONFIGS_RAW) ? BOT_CONFIGS_RAW : (BOT_CONFIGS_RAW.staticBots || []);
 const TYPE_PRESETS = Array.isArray(BOT_CONFIGS_RAW) ? {} : (BOT_CONFIGS_RAW.typePresets || {});
@@ -9059,12 +9062,17 @@ function addMonthsSafe(date, months = 1) {
 }
 
 function defaultPlanPrice(typeKey) {
+  if (FACTORY_FLAT_PRICE > 0) return FACTORY_FLAT_PRICE;
   return Number(process.env[`${String(typeKey || '').toUpperCase()}_MONTHLY_PRICE`] || process.env.DEFAULT_MONTHLY_PRICE || 0);
 }
 
 async function getOrCreatePlan(typeKey) {
   const preset = getPreset(typeKey);
   const existing = await BotPlan.findOne({ type_key: typeKey });
+  if (existing && FACTORY_FLAT_PRICE > 0 && Number(existing.monthly_price) !== FACTORY_FLAT_PRICE) {
+    existing.monthly_price = FACTORY_FLAT_PRICE;
+    await existing.save();
+  }
   if (existing) return existing;
   return BotPlan.create({
     type_key: typeKey,
@@ -9670,6 +9678,8 @@ async function sendBroadcastToContentBotUsers(active, payload) {
   return stats;
 }
 
+let autoPay = { enabled: false };
+
 function createFactoryBot() {
   if (!hasUsableToken(FACTORYBOT_TOKEN)) {
     console.warn('⚠️ FactoryBot ishga tushmadi: FACTORYBOT_TOKEN .env ichida bo‘sh yoki noto‘g‘ri.');
@@ -9678,6 +9688,22 @@ function createFactoryBot() {
 
   const bot = new Telegraf(FACTORYBOT_TOKEN);
   bot.use(session({ defaultSession: () => ({ mode: null, draft: {} }) }));
+
+  // 💳 Avto to'lov: kartaga unikal summa tushsa bot 1 oyga avtomatik uzaytiriladi.
+  autoPay = createAutoPay({
+    mongoose,
+    provider: createHamyonProvider(),
+    onPaid: async (inv) => {
+      const rec = await ManagedBot.findOne({ _id: inv.managed_bot_id });
+      if (!rec) return;
+      await extendManagedBot(rec, 0, 1);
+      let warn = '';
+      try { await startManagedRecord(rec, 'auto_payment'); } catch (e) { warn = `\n\n⚠️ Bot ishga tushmadi: ${e.message}`; }
+      await bot.telegram.sendMessage(rec.owner_user_id, `✅ To‘lov qabul qilindi: ${formatMoney(inv.amount, inv.currency)}\n🤖 @${rec.telegram_username} 1 oyga uzaytirildi.\n⏳ Keyingi to‘lov: ${formatDate(rec.current_period_end)}${warn}`).catch(() => null);
+      await notifyOwners(`💳 Avto to‘lov: @${rec.telegram_username} — ${formatMoney(inv.amount, inv.currency)} (tx ${inv.provider_tx_id}). 1 oyga uzaytirildi.${warn}`).catch(() => null);
+    }
+  });
+  autoPay.start();
 
   bot.use(async (ctx, next) => {
     if (ctx.from) {
@@ -10569,6 +10595,44 @@ ${preset.title}
     }
   });
 
+  bot.command('tolov', async (ctx) => {
+    if (!autoPay.enabled) return ctx.reply('ℹ️ Avto to‘lov hozircha yoqilmagan. Admin bilan bog‘laning.');
+    const bots = await ManagedBot.find({ owner_user_id: ctx.from.id, status: { $in: ['pending', 'approved', 'expired', 'disabled'] } }).limit(20);
+    if (!bots.length) return ctx.reply('Sizda hali bot yo‘q. “🤖 Bot tayyorlash” ni bosing.');
+    return ctx.reply('💳 Qaysi bot uchun to‘laysiz?', Markup.inlineKeyboard(bots.map((b) => [Markup.button.callback(`@${b.telegram_username} — ${formatDate(b.current_period_end)} gacha`, `factory:pay:${b._id}`)])));
+  });
+
+  bot.action(/^factory:pay:([a-f0-9]{24})$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!autoPay.enabled) return ctx.reply('ℹ️ Avto to‘lov hozircha yoqilmagan.');
+    const rec = await ManagedBot.findOne({ _id: ctx.match[1] });
+    if (!rec || (Number(rec.owner_user_id) !== Number(ctx.from.id) && !isOwner(ctx.from.id))) return ctx.reply('❌ Bot topilmadi.');
+    const plan = await getOrCreatePlan(rec.type_key);
+    const price = Number(tariffPrice(plan.monthly_price || rec.monthly_price || FACTORY_FLAT_PRICE, rec.tariff_key || 'standard'));
+    try {
+      const inv = await autoPay.createInvoice(rec, price, plan.currency || 'UZS');
+      const card = String(process.env.HAMYON_CARD_NUMBER || '').replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ');
+      return ctx.reply(
+        `💳 @${rec.telegram_username} uchun 1 oylik to‘lov\n\n` +
+          `Kartaga AYNAN shu summani o‘tkazing:\n💰 ${formatMoney(inv.amount, inv.currency)}\n💳 ${card || 'karta raqami sozlanmagan'}\n\n` +
+          `⚠️ Summa aniq bo‘lsin (oxiridagi so‘mlar ham) — shu orqali to‘lov aynan sizniki ekani aniqlanadi.\n` +
+          `⏳ Hisob ${INVOICE_TTL_MIN} daqiqa amal qiladi. To‘lov tushgach bot avtomatik uzaytiriladi.`,
+        Markup.inlineKeyboard([[Markup.button.callback('✅ To‘ladim, tekshirish', 'factory:paycheck')]])
+      );
+    } catch (e) {
+      return ctx.reply(`❌ ${e.message}`);
+    }
+  });
+
+  bot.action('factory:paycheck', async (ctx) => {
+    await ctx.answerCbQuery('⏳ Tekshirilmoqda...');
+    const paid = await autoPay.checkPending();
+    const mine = await autoPay.Invoice.findOne({ owner_user_id: ctx.from.id }).sort({ createdAt: -1 });
+    if (mine?.status === 'paid') return paid ? null : ctx.reply('✅ To‘lov qabul qilingan, botingiz uzaytirilgan.');
+    if (mine?.status === 'expired') return ctx.reply('⌛ Hisob muddati tugadi. /tolov orqali yangisini oling.');
+    return ctx.reply('⏳ To‘lov hali ko‘rinmadi. Bank o‘tkazmasi 1–3 daqiqa olishi mumkin, birozdan keyin qayta bosing.');
+  });
+
   bot.action(/^factory:extend:([a-f0-9]{24})$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!isOwner(ctx.from.id)) return ctx.reply('⛔ Faqat asosiy admin uzaytira oladi.');
@@ -10845,7 +10909,10 @@ Qayta token yuboring yoki /cancel bosing.`);
 
 ` +
           `Bot hoziroq ishga tushdi. Sinov tugamasidan oldin yoki tugagach obunani tiklash/uzaytirish uchun admin bilan kelishing.`,
-        Markup.inlineKeyboard([[Markup.button.url('💳 Toʻlov/ruxsat uchun admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]])
+        Markup.inlineKeyboard([
+          ...(autoPay.enabled ? [[Markup.button.callback('💳 Avto to‘lov (karta orqali)', `factory:pay:${rec._id}`)]] : []),
+          [Markup.button.url('💬 Admin bilan kelishish', `https://t.me/${String(OWNER_USERNAME).replace('@', '')}`)]
+        ])
       );
       await ctx.reply('🏠 Bosh menyu:', userKeyboard(ctx));
 
