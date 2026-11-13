@@ -28,7 +28,7 @@ function isProtected(message) {
 }
 function mediaKind(message) {
   const media = message?.media;
-  if (!media) return 'text';
+  if (!media || media.className==='MessageMediaWebPage' || media.className==='MessageMediaEmpty') return 'text';
   if (media?.photo || media?.className === 'MessageMediaPhoto') return 'photo';
   const doc = media?.document;
   if (doc) {
