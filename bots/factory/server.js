@@ -20,7 +20,7 @@ const {createChannelCloneBot}=require('./channel-clone-bot');
 const {describeRelayError}=require('./channel-clone-errors');
 const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
 const {createOrReuseInvite}=require('./channel-clone-invite');
-const {relayCloneAlbum}=require('./channel-clone-albums');
+const {relayCloneAlbum,adminContactCaption}=require('./channel-clone-albums');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
 const { telegramHandle, telegramChatRef, linkedBots, originalSource, messageKind, buildChannelCaption, candidateCode } = require('./channel-publisher');
 const {sessionConfigured, publicMessageData, launchPublicChannelWatcher} = require('./public-channel-watcher');
@@ -11143,12 +11143,15 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
     const cloneEngine=active?.config?.engine === 'channel_clone' || cfg.bot_key === 'channel_clone';
     const originalFormat=cloneEngine && cfg.clone_format==='original';
     const sourceText=String(message.message||'');
+    const addedContact=cloneEngine && kind==='photo' && !sourceText.trim()
+      ? adminContactCaption(cfg) : '';
+    const keepOriginal=originalFormat && !addedContact;
     // Only issue a Telegram createChatInviteLink request for Branded posts
     // which actually contain a source-channel URL that needs replacing.
     const destinationLink=cloneEngine && !originalFormat && hasSourcePromotionLink(sourceText)
       ? await createOrReuseInvite({cfg,telegram:botTelegram,Config:ChannelRelayConfig})
       : '';
-    const branded = cloneEngine
+    const branded = addedContact || (cloneEngine
       ? buildClonePostText(sourceText,
           destinationLink?{...cfg,target_post_link:destinationLink}:cfg,
           kind==='text'?4096:1024)
@@ -11156,7 +11159,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
           message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
             title:cfg.target_title}, botUsername:username,
           otherBots:cfg.linked_bots||[],localContent:local
-        });
+        }));
     let sent;
     if (kind === 'text' && !originalFormat) {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
@@ -11167,7 +11170,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
       try {
         sent = await botTelegram.copyMessage(
           cfg.target_chat_id, cfg.source_username?'@'+cfg.source_username:cfg.source_chat_id, Number(message.id),
-          originalFormat ? {} : {caption:branded}
+          keepOriginal ? {} : {caption:branded}
         );
       } catch (botCopyError) {
         // The user-session account may post only where it has its own write rights.
@@ -11193,7 +11196,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
                 originalFormat?String(message.message||''):branded,{disable_web_page_preview:true});
             } else sent=await uploadSourceMedia({
               client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,
-              caption:originalFormat?String(message.message||''):branded
+              caption:keepOriginal?sourceText:branded
             });
           } catch(uploadError) {
             const uploadReason=describeRelayError(uploadError,165);
@@ -11204,7 +11207,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
         }
         if(copied){
           try {
-            if (!originalFormat) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
+            if (!keepOriginal) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
           } catch (editError) {
             await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
             throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
