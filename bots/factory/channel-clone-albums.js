@@ -1,4 +1,5 @@
 'use strict';
+const {feedbackEdits}=require('./channel-clone-branding');
 
 const {normalizePhone,normalizeUsername,replaceApprovedPhoneContacts,sourceAdminUsernameSet}=require('./channel-clone-contacts');
 
@@ -61,15 +62,17 @@ function adminContactCaption(cfg){
 }
 
 function albumCaptions(messages,cfg){
-  const captions=messages.map(message=>albumCaption(message,cfg));
+  const first=messages.findIndex(message=>String(message.message||'').trim());
+  const captions=messages.map((message,index)=>albumCaption(message,cfg,index===first));
   if(captions.every(item=>!item.caption.trim())){
     const caption=adminContactCaption(cfg);
-    if(caption)captions[0]={caption,entities:[],changed:true};
+    const combined=caption+feedbackEdits(caption,cfg).map(edit=>edit.value).join('');
+    if(combined)captions[0]={caption:combined,entities:[],changed:true};
   }
   return captions;
 }
 
-function albumCaption(message,cfg){
+function albumCaption(message,cfg,includeFeedback=true){
   const original=String(message.message||'');
   const approvedUsers=sourceAdminUsernameSet(cfg.source_admin_usernames);
   const admin=normalizeUsername(cfg.promo_admin_username);
@@ -89,25 +92,31 @@ function albumCaption(message,cfg){
     return url.replace(/^((?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/)([a-z][a-z0-9_]{4,31})(?=$|[?#])/i,
       (match,prefix,name)=>prefix+replaceUsername(name,offset));
   }
-  const edits=[];
-  const caption=original.replace(CONTACT_TOKEN,(value,offset)=>{
+  const feedback=original.trim()?feedbackEdits(original,includeFeedback?cfg:{...cfg,feedback_mode:cfg.feedback_mode==='replace'?'remove':cfg.feedback_mode}):[];
+  const edits=[...feedback];
+  original.replace(CONTACT_TOKEN,(value,offset)=>{
+    if(feedback.some(edit=>offset>=edit.start&&offset<edit.end))return value;
     const replacement=value.startsWith('@')?'@'+replaceUsername(value.slice(1),offset):
       /^(?:\+?998)/.test(value)?replaceApprovedPhoneContacts(value,phoneOptions):replaceLink(value,offset);
-    if(value!==replacement)edits.push({start:offset,end:offset+value.length,length:replacement.length});
+    if(value!==replacement)edits.push({start:offset,end:offset+value.length,value:replacement});
     return replacement;
   });
+  edits.sort((a,b)=>a.start-b.start);
+  let caption=original;
+  for(const edit of [...edits].reverse())caption=caption.slice(0,edit.start)+edit.value+caption.slice(edit.end);
   function mapOffset(offset,isEnd){
     let shift=0;
     for(const edit of edits){
       if(offset<=edit.start)break;
-      if(offset<edit.end)return edit.start+shift+(isEnd?edit.length:0);
-      shift+=edit.length-(edit.end-edit.start);
+      if(offset<edit.end)return edit.start+shift+(isEnd?edit.value.length:0);
+      shift+=edit.value.length-(edit.end-edit.start);
     }
     return offset+shift;
   }
   const entities=[];
   let linksChanged=false;
   for(const entity of message.entities||[]){
+    if(feedback.some(edit=>entity.offset<edit.end&&entity.offset+entity.length>edit.start))continue;
     const type=ENTITY_TYPES[String(entity.className||'').replace(/^MessageEntity/,'')];
     if(!type)continue;
     const offset=mapOffset(entity.offset,false);
