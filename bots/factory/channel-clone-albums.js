@@ -1,7 +1,6 @@
 'use strict';
 
-const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
-const {createOrReuseInvite}=require('./channel-clone-invite');
+const {normalizePhone,normalizeUsername,replaceApprovedPhoneContacts,sourceAdminUsernameSet}=require('./channel-clone-contacts');
 
 const MAX_ALBUM_ITEMS=10;
 const MAX_ALBUM_BYTES=45*1024*1024;
@@ -45,14 +44,90 @@ async function collectAlbumMembers(client,peer,message){
   return [...unique.values()].sort((a,b)=>a.id-b.id).slice(0,MAX_ALBUM_ITEMS);
 }
 
-async function uploadMediaAlbum({client,telegram,chatId,messages,caption}){
+const CONTACT_TOKEN=/(?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/[A-Za-z][A-Za-z0-9_]{4,31}(?![A-Za-z0-9_]|\/\d)|(?<![\w@])@[A-Za-z][A-Za-z0-9_]{4,31}|(?<!\d)\+?998(?:[\s().-]*\d){9}(?!\d)/gi;
+const ENTITY_TYPES={
+  Mention:'mention',Hashtag:'hashtag',Cashtag:'cashtag',BotCommand:'bot_command',
+  Url:'url',Email:'email',Phone:'phone_number',Bold:'bold',Italic:'italic',
+  Underline:'underline',Strike:'strikethrough',Spoiler:'spoiler',Code:'code',
+  Pre:'pre',TextUrl:'text_link',MentionName:'text_mention',CustomEmoji:'custom_emoji',
+  Blockquote:'blockquote'
+};
+
+function adminContactCaption(cfg){
+  const admin=normalizeUsername(cfg.promo_admin_username);
+  const phone=normalizePhone(cfg.promo_admin_phone);
+  return [admin?'👤 Admin: @'+admin:'',phone?'☎️ Admin telefoni: '+phone:'']
+    .filter(Boolean).join('\n');
+}
+
+function albumCaptions(messages,cfg){
+  const captions=messages.map(message=>albumCaption(message,cfg));
+  if(captions.every(item=>!item.caption.trim())){
+    const caption=adminContactCaption(cfg);
+    if(caption)captions[0]={caption,entities:[],changed:true};
+  }
+  return captions;
+}
+
+function albumCaption(message,cfg){
+  const original=String(message.message||'');
+  const approvedUsers=sourceAdminUsernameSet(cfg.source_admin_usernames);
+  const admin=normalizeUsername(cfg.promo_admin_username);
+  const phoneOptions={adminPhone:normalizePhone(cfg.promo_admin_phone),
+    sourceAdminPhones:cfg.source_admin_phones};
+  function replaceUsername(value){
+    return admin&&approvedUsers.has(value.toLowerCase())?admin:value;
+  }
+  function replaceLink(url){
+    return url.replace(/^((?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/)([a-z][a-z0-9_]{4,31})(?=$|[?#])/i,
+      (match,prefix,name)=>prefix+replaceUsername(name));
+  }
+  const edits=[];
+  const caption=original.replace(CONTACT_TOKEN,(value,offset)=>{
+    const replacement=value.startsWith('@')?'@'+replaceUsername(value.slice(1)):
+      /^(?:\+?998)/.test(value)?replaceApprovedPhoneContacts(value,phoneOptions):replaceLink(value);
+    if(value!==replacement)edits.push({start:offset,end:offset+value.length,length:replacement.length});
+    return replacement;
+  });
+  function mapOffset(offset,isEnd){
+    let shift=0;
+    for(const edit of edits){
+      if(offset<=edit.start)break;
+      if(offset<edit.end)return edit.start+shift+(isEnd?edit.length:0);
+      shift+=edit.length-(edit.end-edit.start);
+    }
+    return offset+shift;
+  }
+  const entities=[];
+  let linksChanged=false;
+  for(const entity of message.entities||[]){
+    const type=ENTITY_TYPES[String(entity.className||'').replace(/^MessageEntity/,'')];
+    if(!type)continue;
+    const offset=mapOffset(entity.offset,false);
+    const length=mapOffset(entity.offset+entity.length,true)-offset;
+    if(length<=0)continue;
+    const output={type,offset,length};
+    if(type==='pre')output.language=entity.language;
+    if(type==='text_link'){
+      output.url=replaceLink(String(entity.url||''));
+      linksChanged ||= output.url!==entity.url;
+    }
+    if(type==='custom_emoji')output.custom_emoji_id=String(entity.documentId);
+    if(type==='text_mention')output.user={id:Number(entity.userId),is_bot:false,first_name:''};
+    if(type==='blockquote'&&entity.collapsed)output.type='expandable_blockquote';
+    entities.push(output);
+  }
+  return {caption,entities,changed:caption!==original||linksChanged};
+}
+
+async function uploadMediaAlbum({client,telegram,chatId,messages,captions,caption:legacyCaption}){
   const {Input}=require('telegraf');
   const {MAX_UPLOAD_BYTES}=require('./channel-clone-media');
   if(messages.length<2||messages.length>MAX_ALBUM_ITEMS)
     throw new Error('Album uchun 2–10 ta foto/video kerak.');
   let bytes=0;
   const media=[];
-  for(const m of messages){
+  for(const [index,m] of messages.entries()){
     const type=albumType(m);
     if(!type)throw new Error('Bu albomda Telegram sendMediaGroup qo‘llamaydigan media turi bor.');
     const reported=Number(m.media?.document?.size||m.file?.size||0);
@@ -64,17 +139,23 @@ async function uploadMediaAlbum({client,telegram,chatId,messages,caption}){
     bytes+=data.length;
     if(data.length>MAX_UPLOAD_BYTES||bytes>MAX_ALBUM_BYTES)
       throw new Error('Albom umumiy hajmi 45 MB dan oshadi; avtomatik bo‘lib yuborilmadi.');
-    media.push({type,media:Input.fromBuffer(data,type==='photo'?'photo.jpg':'video.mp4')});
+    const item={type,media:Input.fromBuffer(data,type==='photo'?'photo.jpg':'video.mp4')};
+    const {caption,entities=[]}=captions?.[index]||{caption:index===0?legacyCaption:''};
+    if(caption){
+      item.caption=caption;
+      if(entities.length)item.caption_entities=entities;
+    }
+    if(m.media?.spoiler)item.has_spoiler=true;
+    if(m.invertMedia)item.show_caption_above_media=true;
+    media.push(item);
   }
-  // One album message carries the caption, not every individual photograph.
-  if(caption)media[0].caption=String(caption).slice(0,1024);
   const sent=await telegram.sendMediaGroup(chatId,media);
   if(!Array.isArray(sent)||sent.length!==media.length)
     throw new Error('Telegram albomni to‘liq yuborganini tasdiqlamadi; qo‘lda tekshiring.');
   return sent;
 }
 
-async function relayCloneAlbum({cfg,messages,client,telegram,Log,Config}){
+async function relayCloneAlbum({cfg,messages,client,telegram,Log}){
   const sorted=[...messages].sort((a,b)=>Number(a.id)-Number(b.id));
   const albumId=groupedId(sorted[0]);
   if(!albumId||sorted.length<2)return {status:'failed',error:'Telegram albom ID yoki rasmlar yetarli emas.'};
@@ -106,13 +187,14 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log,Config}){
     claimed=Boolean(updated?.modifiedCount);
     if(!claimed)return {status:'failed',error:'Albom xatoligi bo‘yicha tekshiruv kerak.'};
   }
+  let delivered=false;
   try{
-    const original=cfg.clone_format==='original';
-    const captionMessage=albumCaptionMessage(sorted);
+    const captions=albumCaptions(sorted,cfg);
+    const sourceChat=cfg.source_username?'@'+cfg.source_username:cfg.source_chat_id;
     let sent;
-    if(original && typeof telegram.copyMessages==='function' && cfg.source_username){
+    if(captions.every(item=>!item.changed) && sourceChat && typeof telegram.copyMessages==='function'){
       try{
-        sent=await telegram.copyMessages(target,'@'+cfg.source_username,
+        sent=await telegram.copyMessages(target,sourceChat,
           sorted.map(m=>Number(m.id)));
       }catch(error){
         const reason=String(error?.description||error?.message||error);
@@ -120,16 +202,8 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log,Config}){
           throw new Error('SOURCE_PROTECTED: manbada nusxalash cheklangan.');
       }
     }
-    if(!sent){
-      let caption=String(captionMessage?.message||'');
-      if(!original){
-        const destinationLink=hasSourcePromotionLink(caption)?
-          await createOrReuseInvite({cfg,telegram,Config}):'';
-        caption=buildClonePostText(caption,destinationLink?
-          {...cfg,target_post_link:destinationLink}:cfg,1024);
-      }
-      sent=await uploadMediaAlbum({client,telegram,chatId:target,messages:sorted,caption});
-    }
+    if(!sent||(Array.isArray(sent)&&!sent.length))sent=await uploadMediaAlbum({client,telegram,chatId:target,messages:sorted,captions});
+    delivered=Array.isArray(sent)&&sent.length>0;
     const ids=(Array.isArray(sent)?sent:[]).map(x=>Number(x?.message_id||0));
     if(ids.length!==sorted.length||ids.some(x=>x<=0))
       throw new Error('Telegram albomga yuborilgan xabar IDlarini qaytarmadi; qo‘lda tekshiring.');
@@ -139,10 +213,10 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log,Config}){
   }catch(error){
     const {describeRelayError}=require('./channel-clone-errors');
     const reason=describeRelayError(error,180);
-    if(claimed)await Log.updateOne({bot_key:cfg.bot_key,source_key:key},
+    if(claimed&&!delivered)await Log.updateOne({bot_key:cfg.bot_key,source_key:key},
       {$set:{status:'failed',error:reason}}).catch(()=>{});
     return {status:'failed',error:reason};
   }
 }
-module.exports={groupedId,albumType,albumCaptionMessage,albumYoung,
+module.exports={groupedId,albumType,albumCaptionMessage,albumCaption,adminContactCaption,albumCaptions,albumYoung,
   collectAlbumMembers,uploadMediaAlbum,relayCloneAlbum,MAX_ALBUM_ITEMS,MAX_ALBUM_BYTES};
