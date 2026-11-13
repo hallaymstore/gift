@@ -11101,8 +11101,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
   const botTelegram = active.bot.telegram;
   if(type==='album'){
     return relayCloneAlbum({
-      cfg,messages,client,telegram:botTelegram,Log:ChannelRelayLog,
-      Config:ChannelRelayConfig
+      cfg,messages,client,telegram:botTelegram,Log:ChannelRelayLog
     });
   }
   const legacySourceKey='public:'+String(sourceUsername).toLowerCase()+':'+message.id;
@@ -11245,6 +11244,8 @@ async function launchPublicSourceMonitor() {
           target_chat_id:{$exists:true,$ne:''}})
           .sort({bot_key:1}).limit(200).lean();
       },
+      isClonerRoute:cfg=>cfg.bot_key==='channel_clone'||cfg.owner_bot_key==='channel_clone'||
+        activeBots.get(cfg.owner_bot_key||cfg.bot_key)?.config?.engine==='channel_clone',
       deliver:routeExternalPublicPost
     });
     console.info('Public channel MTProto monitor',
