@@ -3,7 +3,8 @@ const {Telegraf,Markup,session}=require('telegraf');
 const {telegramChatRef,telegramHandle}=require('./channel-publisher');
 const {countSourcePosts}=require('./channel-clone-count');
 const {describeRelayError}=require('./channel-clone-errors');
-const {feedbackLink,contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
+const {albumCaption,groupedId,collectAlbumMembers}=require('./channel-clone-albums');
+const {feedbackEdits,feedbackLink,contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
 const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
 const {parsePeerReference,sourceRefLabel,sourceKey,resolveSourcePeer,listJoinedGroups,validateSourceReference}=require('./channel-clone-peers');
 const {normalizePhone,normalizeUsername,detectSourceAdminCandidates}=require('./channel-clone-contacts');
@@ -37,6 +38,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['🤖 Reklama botini ulash','👤 Admin username'],
     ['🪪 Admin kontaktlari'],
     ['💬 Fikrlar kanalini ulash','🗑 Fikrlar havolasini olib tashlash'],
+    ['💬 Eski postlardagi fikrlar havolasi'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
@@ -681,19 +683,38 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     bot_key:key,target_chat_id:target,status:'sent',target_message_id:{$gt:0}
   });
   const brief=(text,max=440)=>String(text||'').trim().slice(0,max);
-  async function previewOldPostRepair(ctx){
+  function feedbackRepair(post,cfg){
+    const before=String(post.message||'');
+    const result=before.trim()
+      ? albumCaption(post,{feedback_mode:cfg.feedback_mode,feedback_link:cfg.feedback_link})
+      : {caption:feedbackEdits(before,cfg).map(edit=>edit.value).join(''),entities:[]};
+    const media=Boolean(post.media && !['MessageMediaWebPage','MessageMediaEmpty'].includes(post.media.className));
+    if(!feedbackEdits(before,cfg).length || result.caption===before)return null;
+    if(result.caption.length>(media?1024:4096))throw new Error('Fikrlar havolasi bilan matn Telegram limitidan oshdi.');
+    return {...result,media};
+  }
+  async function oldPost(client,target,id,feedbackOnly){
+    const found=await client.getMessages(target,{ids:Number(id)});
+    const post=Array.isArray(found)?found[0]:found;
+    if(!post?.id||!feedbackOnly||!groupedId(post)||String(post.message||'').trim())return post;
+    const members=await collectAlbumMembers(client,target,post);
+    return members.find(item=>String(item.message||'').trim())||post;
+  }
+  async function previewOldPostRepair(ctx,feedbackOnly=false){
     if(!permitted(ctx))return;
     if(repairing)return ctx.reply('🔄 Boshqa tahrirlash davom etmoqda.',menu());
     const cfg=await load(ctx);
     if(!cfg?.target_chat_id||!sessionReady())
       return ctx.reply('❌ Oldingi xabarlarni tekshirish uchun maqsad kanal/guruh va Telegram sessiyasi kerak.',menu());
-    if((cfg.clone_format||'branded')!=='branded')
+    if(feedbackOnly&&!['replace','remove'].includes(cfg.feedback_mode))
+      return ctx.reply('Avval fikrlar kanalini ulang yoki olib tashlashni tanlang.',menu());
+    if(!feedbackOnly&&(cfg.clone_format||'branded')!=='branded')
       return ctx.reply('⚠️ Avval 🎨 Post formati orqali Branded rejimini tanlang.',menu());
     try{
       const key=routeKey(ctx);
       const total=await Log.countDocuments(repairQuery(key,cfg.target_chat_id));
       if(!total)return ctx.reply('📭 Ushbu yo‘nalish orqali yuborilgan va tahrirlashga mos postlar topilmadi.',menu());
-      cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
+      if(!feedbackOnly)cfg.target_post_link=await createOrReuseInvite({cfg,telegram:ctx.telegram,Config});
       const recent=await Log.find(repairQuery(key,cfg.target_chat_id))
         .sort({_id:-1}).limit(12).lean();
       const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
@@ -701,12 +722,11 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       try{
         await withUserSession(async client=>{
           for(const log of recent){
-            const found=await client.getMessages(target,{ids:Number(log.target_message_id)});
-            const post=Array.isArray(found)?found[0]:found;
+            const post=await oldPost(client,target,log.target_message_id,feedbackOnly);
             if(!post)continue;
             const before=String(post.message||'');
-            const after=refreshClonePostText(before,cfg,post.media?1024:4096);
-            if(after&&after!==before.trim()){
+            const after=feedbackOnly?feedbackRepair(post,cfg)?.caption:refreshClonePostText(before,cfg,post.media?1024:4096);
+            if(after!==undefined&&after!==before){
               sample={before,after};
               break;
             }
@@ -716,6 +736,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         return ctx.reply('❌ Oldingi postlar namunasini o‘qib bo‘lmadi: '+
           describeRelayError(error,170)+'\nBotingiz yoki MTProto akkauntingiz guruh/kanal xabarlarini o‘qiy olishini tekshiring.',menu());
       }
+      ctx.session.feedbackOnly=feedbackOnly;
       ctx.session.repairRouteKey=key;
       ctx.session.repairTarget=String(cfg.target_chat_id);
       let description='🔎 ESKI XABARLARDAGI USERNAME VA HAVOLALARNI ALMASHTIRISH\n\n'+
@@ -725,6 +746,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
         '👤 Manba admini → @'+(cfg.promo_admin_username||'sozlanmagan')+
         '\n🤖 Manba bot → '+(cfg.promo_bot_username?'@'+cfg.promo_bot_username:'o‘z kanalimiz')+
         '\n\nCloner yuborgan xabarlar matni/captioni tahrirlanadi; media qayta yuklanmaydi.';
+      if(feedbackOnly)description='💬 Eski postlardagi fikrlar havolasi\n📤 '+(cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id)+
+        '\n📚 Tekshiriladigan postlar: '+total+'\n'+(cfg.feedback_mode==='remove'?'Havola olib tashlanadi.':'Havola: '+cfg.feedback_link);
       if(sample)description+='\n\nOLDIN:\n'+brief(sample.before)+
         '\n\nKEYIN:\n'+brief(sample.after);
       else description+='\n\nℹ️ So‘nggi 12 ta postda o‘zgarish topilmadi; eski xabarlar tekshirilishi mumkin.';
@@ -736,7 +759,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       return ctx.reply('❌ Tekshiruv xatosi: '+describeRelayError(error,175),menu());
     }
   }
-  bot.hears(repairLabels,previewOldPostRepair);
+  bot.hears(repairLabels,ctx=>previewOldPostRepair(ctx));
+  bot.hears('💬 Eski postlardagi fikrlar havolasi',ctx=>previewOldPostRepair(ctx,true));
   bot.action('clone:repair:cancel',async ctx=>{
     if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
     await ctx.answerCbQuery();
@@ -746,6 +770,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
   bot.action('clone:repair:confirm',async ctx=>{
     if(!permitted(ctx))return ctx.answerCbQuery('Ruxsat yo‘q');
     await ctx.answerCbQuery();
+    const feedbackOnly=ctx.session.feedbackOnly===true;
     const key=ctx.session.repairRouteKey;
     const targetId=ctx.session.repairTarget;
     ctx.session.repairRouteKey=null;ctx.session.repairTarget=null;
@@ -755,7 +780,8 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const cfg=await Config.findOne({bot_key:key}).lean();
     if(!cfg?.target_chat_id||String(cfg.target_chat_id)!==targetId)
       return ctx.reply('❌ Maqsad kanali o‘zgargan. Tahrirlashni qayta tekshiring.',menu());
-    if((cfg.clone_format||'branded')!=='branded'||!sessionReady())
+    if(feedbackOnly&&!['replace','remove'].includes(cfg.feedback_mode))return ctx.reply('Avval fikrlar havolasini sozlang.',menu());
+    if((!feedbackOnly&&(cfg.clone_format||'branded')!=='branded')||!sessionReady())
       return ctx.reply('⚠️ Branded rejimi va MTProto sessiyasi kerak.',menu());
     repairing=true;
     try{
@@ -784,10 +810,20 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
           for(const item of items){
             after=item._id;checked++;
             try{
-              const found=await client.getMessages(target,{ids:Number(item.target_message_id)});
-              const post=Array.isArray(found)?found[0]:found;
+              const post=await oldPost(client,target,item.target_message_id,feedbackOnly);
               if(!post){failed++;continue;}
               const before=String(post.message||'');
+              if(feedbackOnly){
+                const change=feedbackRepair(post,cfg);
+                if(!change){unchanged++;continue;}
+                const options=change.media?{caption_entities:change.entities}:{entities:change.entities,disable_web_page_preview:true};
+                if(change.media)await ctx.telegram.editMessageCaption(cfg.target_chat_id,post.id,undefined,change.caption,options);
+                else if(change.caption.trim())await ctx.telegram.editMessageText(cfg.target_chat_id,post.id,undefined,change.caption,options);
+                else {unchanged++;continue;}
+                edited++;
+                await new Promise(resolve=>setTimeout(resolve,400));
+                continue;
+              }
               const updated=refreshClonePostText(before,cfg,post.media?1024:4096);
               if(!updated||updated===before.trim()){unchanged++;continue;}
               try{
