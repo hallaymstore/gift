@@ -72,12 +72,12 @@ function isCloneRoute(cfg){
   return cfg?.bot_key==='channel_clone'||cfg?.owner_bot_key==='channel_clone'||
     String(cfg?.bot_key||'').startsWith('channel_clone:');
 }
-async function prepareAlbum({client,entity,message,cfg,phase,cursor}){
-  if(!isCloneRoute(cfg)||!groupedId(message)||!albumType(message))
+async function prepareAlbum({client,entity,message,isClone,phase,cursor}){
+  if(!isClone||!groupedId(message))
     return {isAlbum:false,messages:[message]};
   const all=await collectAlbumMembers(client,entity,message);
   if(phase==='live'&&albumYoung(all))return {isAlbum:true,defer:true,messages:all};
-  if(all.length<2)return {isAlbum:false,messages:[message]};
+  if(all.length<2)throw new Error('Telegram albomining qolgan rasmlari hali olinmadi.');
   // Never repeat a partly processed album from an older deployed version.
   if(all.some(m=>Number(m.id)<=Number(cursor||0)))
     return {isAlbum:true,partial:true,messages:all};
@@ -88,7 +88,7 @@ async function prepareAlbum({client,entity,message,cfg,phase,cursor}){
 // Track independently: (1) the newest post ID already seen, and
 // (2) an oldest-to-newest historic cursor, bounded by the source's snapshot
 // ID taken when the historic sync starts. New posts are never blocked by backfill.
-async function scanLive({client,cfg,deliver,log=console}) {
+async function scanLive({client,cfg,deliver,log=console,isClone=isCloneRoute(cfg)}) {
   if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
   const handle=sourceKey(cfg);
   if(!handle)return;
@@ -115,7 +115,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
   }
   for(const message of ordered){
     if(Number(message.id)<=Number(cfg.source_cursor||0))continue;
-    const album=await prepareAlbum({client,entity,message,cfg,phase:'live',cursor:cfg.source_cursor});
+    const album=await prepareAlbum({client,entity,message,isClone,phase:'live',cursor:cfg.source_cursor});
     if(album.defer)break; // allow Telegram to finish assembling a freshly posted album
     const lastId=album.isAlbum?Math.max(...album.messages.map(m=>Number(m.id))):Number(message.id);
     let result={status:'skipped'};
@@ -151,7 +151,7 @@ async function scanLive({client,cfg,deliver,log=console}) {
     }
   }
 }
-async function scanHistory({client,cfg,deliver,log=console}){
+async function scanHistory({client,cfg,deliver,log=console,isClone=isCloneRoute(cfg)}){
   if(cfg.history_enabled!==true || cfg.history_completed===true)return;
   if(cfg.history_retry_at && new Date(cfg.history_retry_at).getTime()>Date.now())return;
   if(Number(cfg.publish_interval_minutes)>0 && cfg.next_publish_at && new Date(cfg.next_publish_at).getTime()>Date.now())return;
@@ -177,7 +177,7 @@ async function scanHistory({client,cfg,deliver,log=console}){
   for(const message of batch){
     if(message.id<=Number(cfg.history_cursor||before))continue;
     if(message.id>ceiling){ended=true;break;}
-    const album=await prepareAlbum({client,entity,message,cfg,phase:'history',cursor:cfg.history_cursor||before});
+    const album=await prepareAlbum({client,entity,message,isClone,phase:'history',cursor:cfg.history_cursor||before});
     const lastId=album.isAlbum?Math.max(...album.messages.map(m=>Number(m.id))):Number(message.id);
     let result={status:'skipped'};
     if(album.partial){
@@ -214,7 +214,7 @@ async function scanHistory({client,cfg,deliver,log=console}){
   }
 }
 
-async function launchPublicChannelWatcher({env=process.env,listSources,deliver,log=console,client:injectedClient}){
+async function launchPublicChannelWatcher({env=process.env,listSources,deliver,log=console,client:injectedClient,isClonerRoute=isCloneRoute}){
   if(!injectedClient && !sessionConfigured(env))
     return {enabled:false,reason:'missing_user_session',stop:async()=>{}};
   let client=injectedClient;
@@ -252,7 +252,7 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
       const sources=await listSources();
       for(const cfg of nextBatch(sources,'live')){
         if(stopped)break;
-        try{await scanLive({client,cfg,deliver,log});}
+        try{await scanLive({client,cfg,deliver,log,isClone:isClonerRoute(cfg)});}
         catch(e){log.warn('[channel sync] live failed',cfg.bot_key,describeRelayError(e,160));}
       }
     }catch(e){log.warn('[channel sync] source listing failed',String(e.message||e).slice(0,160));}
@@ -265,7 +265,7 @@ async function launchPublicChannelWatcher({env=process.env,listSources,deliver,l
       const sources=await listSources();
       for(const cfg of nextBatch(sources,'history')){
         if(stopped)break;
-        try{await scanHistory({client,cfg,deliver,log});}
+        try{await scanHistory({client,cfg,deliver,log,isClone:isClonerRoute(cfg)});}
         catch(e){
           log.warn('[channel sync] history failed',cfg.bot_key,describeRelayError(e,150));
           await deliver({type:'history_error',cfg,error:String(e.message||e).slice(0,160)})
