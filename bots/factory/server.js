@@ -11058,6 +11058,9 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
   }
   if(type==='history_cursor'){
     const status=String(result?.status||'skipped');
+    if(status==='sent' && Number(cfg.history_sent||0)===0)
+      console.info('[channel sync] first history delivery',cfg.bot_key,sourceUsername||cfg.source_username,cfg.target_username,Number(cursor));
+    if(status==='sent')cfg.history_sent=Number(cfg.history_sent||0)+1;
     await ChannelRelayConfig.updateOne({...selector,history_enabled:true},
       {$set:{history_cursor:Number(cursor),history_last_error:'',history_retry_at:null,history_error_count:0},
        $inc:status==='sent'?{history_sent:1}:{history_skipped:1}});
@@ -11086,7 +11089,7 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
       await ChannelRelayConfig.updateOne(selector,{$set:{
         history_last_error:reason,history_retry_at:new Date(Date.now()+delayMs)
       },$inc:{history_error_count:1}});
-      console.warn('[channel sync] retry scheduled',cfg.bot_key,delayMs,reason.slice(0,100));
+      console.warn('[channel sync] retry scheduled',cfg.bot_key,cfg.source_username||cfg.source_chat_id,cfg.target_username||cfg.target_chat_id,delayMs,reason.slice(0,100));
     }
     return;
   }
