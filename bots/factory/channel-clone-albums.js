@@ -75,17 +75,24 @@ function albumCaption(message,cfg){
   const admin=normalizeUsername(cfg.promo_admin_username);
   const phoneOptions={adminPhone:normalizePhone(cfg.promo_admin_phone),
     sourceAdminPhones:cfg.source_admin_phones};
-  function replaceUsername(value){
-    return admin&&approvedUsers.has(value.toLowerCase())?admin:value;
+  const source=normalizeUsername(cfg.source_username).toLowerCase();
+  const target=normalizeUsername(cfg.target_username);
+  function replaceUsername(value,offset){
+    const start=original.lastIndexOf('\n',offset-1)+1;
+    const prefix=original.slice(start,offset).trim();
+    if(/(?:kanal\s+egasi|sotuvchi|seller|muallif|продавец|владелец)\s*[:：–—-]?\s*$/iu.test(prefix))return value;
+    if(admin&&(approvedUsers.has(value.toLowerCase())||
+       /(?:^|[^\p{L}])(?:admin(?:istrator)?|админ|администратор)\s*[:：–—-]?\s*$/iu.test(prefix)))return admin;
+    return source&&target&&value.toLowerCase()===source?target:value;
   }
-  function replaceLink(url){
+  function replaceLink(url,offset){
     return url.replace(/^((?:https?:\/\/)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\/)([a-z][a-z0-9_]{4,31})(?=$|[?#])/i,
-      (match,prefix,name)=>prefix+replaceUsername(name));
+      (match,prefix,name)=>prefix+replaceUsername(name,offset));
   }
   const edits=[];
   const caption=original.replace(CONTACT_TOKEN,(value,offset)=>{
-    const replacement=value.startsWith('@')?'@'+replaceUsername(value.slice(1)):
-      /^(?:\+?998)/.test(value)?replaceApprovedPhoneContacts(value,phoneOptions):replaceLink(value);
+    const replacement=value.startsWith('@')?'@'+replaceUsername(value.slice(1),offset):
+      /^(?:\+?998)/.test(value)?replaceApprovedPhoneContacts(value,phoneOptions):replaceLink(value,offset);
     if(value!==replacement)edits.push({start:offset,end:offset+value.length,length:replacement.length});
     return replacement;
   });
@@ -109,7 +116,7 @@ function albumCaption(message,cfg){
     const output={type,offset,length};
     if(type==='pre')output.language=entity.language;
     if(type==='text_link'){
-      output.url=replaceLink(String(entity.url||''));
+      output.url=replaceLink(String(entity.url||''),entity.offset);
       linksChanged ||= output.url!==entity.url;
     }
     if(type==='custom_emoji')output.custom_emoji_id=String(entity.documentId);
