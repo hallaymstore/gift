@@ -11184,22 +11184,13 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
           // use MTProto re-send or media downloading as a bypass.
           throw new Error('SOURCE_PROTECTED: manba postini nusxalash cheklangan');
         }
-        if(cloneEngine && !keepOriginal){
-          const {uploadSourceMedia}=require('./channel-clone-media');
+        if(cloneEngine){
           const peer=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
-          try{
-            const posted=await client.sendFile(peer,{
-              file:message.media,caption:branded,parseMode:undefined
-            });
-            if(!posted?.id)throw new Error('MTProto media delivery returned no message ID');
-            sent={message_id:posted.id};
-          }catch(error){
-            const reason=String(error?.message||error);
-            if(!/CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL|CHANNEL_PRIVATE|FILE_REFERENCE|Could not find the input entity|PEER_ID_INVALID/i.test(reason))throw error;
-            sent=await uploadSourceMedia({
-              client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,caption:branded
-            });
-          }
+          const posted=keepOriginal
+            ? await client.sendMessage(peer,{message})
+            : await client.sendFile(peer,{file:message.media,caption:branded,parseMode:null});
+          if(!posted?.id)throw new Error('MTProto delivery returned no message ID');
+          sent={message_id:posted.id};
         } else {
           const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
           let copied;
