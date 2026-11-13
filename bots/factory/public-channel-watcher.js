@@ -76,8 +76,8 @@ async function prepareAlbum({client,entity,message,isClone,phase,cursor}){
   if(!isClone||!groupedId(message))
     return {isAlbum:false,messages:[message]};
   const all=await collectAlbumMembers(client,entity,message);
-  if(phase==='live'&&albumYoung(all))return {isAlbum:true,defer:true,messages:all};
-  if(all.length<2)throw new Error('Telegram albomining qolgan rasmlari hali olinmadi.');
+  if(albumYoung(all))return {isAlbum:true,defer:true,messages:all};
+  if(all.length<2)return {isAlbum:false,messages:[message]};
   // Never repeat a partly processed album from an older deployed version.
   if(all.some(m=>Number(m.id)<=Number(cursor||0)))
     return {isAlbum:true,partial:true,messages:all};
@@ -178,6 +178,7 @@ async function scanHistory({client,cfg,deliver,log=console,isClone=isCloneRoute(
     if(message.id<=Number(cfg.history_cursor||before))continue;
     if(message.id>ceiling){ended=true;break;}
     const album=await prepareAlbum({client,entity,message,isClone,phase:'history',cursor:cfg.history_cursor||before});
+    if(album.defer)return;
     const lastId=album.isAlbum?Math.max(...album.messages.map(m=>Number(m.id))):Number(message.id);
     let result={status:'skipped'};
     if(album.partial){
