@@ -192,43 +192,40 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log}){
     const captions=albumCaptions(sorted,cfg);
     const sourceChat=cfg.source_username?'@'+cfg.source_username:cfg.source_chat_id;
     let sent;
-    if(captions.every(item=>!item.changed) && sourceChat && typeof telegram.copyMessages==='function'){
+    if(sourceChat){
       try{
-        sent=await telegram.copyMessages(target,sourceChat,
-          sorted.map(m=>Number(m.id)));
+        sent=await telegram.callApi('copyMessages',{
+          chat_id:target,from_chat_id:sourceChat,message_ids:sorted.map(m=>Number(m.id))
+        });
       }catch(error){
         const reason=String(error?.description||error?.message||error);
         if(/CHAT_FORWARDS_RESTRICTED|protected content|copying is not allowed/i.test(reason))
           throw new Error('SOURCE_PROTECTED: manbada nusxalash cheklangan.');
+        if(Number(error?.code||error?.response?.error_code)!==400)throw error;
       }
     }
-    if(!sent||(Array.isArray(sent)&&!sent.length)){
-      if(typeof client.sendFile==='function' && captions.every(item=>!item.entities.length)){
-        const peer=cfg.target_username?'@'+cfg.target_username:target;
-        try{
-          const posted=await client.sendFile(peer,{
-            file:sorted.map(item=>item.media),
-            caption:captions.map(item=>item.caption),
-            parseMode:undefined
-          });
-          sent=(Array.isArray(posted)?posted:[]).map(item=>({message_id:item.id}));
-        }catch(error){
-          const reason=String(error?.message||error);
-          if(!/CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL|CHANNEL_PRIVATE|FILE_REFERENCE|Could not find the input entity|PEER_ID_INVALID/i.test(reason))throw error;
-        }
-      }
-      try{
-        if(!sent)sent=await uploadMediaAlbum({client,telegram,chatId:target,messages:sorted,captions});
-      }catch(error){
-        console.warn('[channel sync] album upload failed',source,cfg.target_username||target,
-          sorted[0].id,sorted.length,require('./channel-clone-errors').redactTelegramSecrets(error.message||error).slice(0,220));
-        throw error;
-      }
+    const copied=Array.isArray(sent)&&sent.length>0;
+    if(!copied){
+      const peer=cfg.target_username?'@'+cfg.target_username:target;
+      const posted=await client.sendFile(peer,{
+        file:sorted.map(item=>item.media),
+        caption:captions.map(item=>item.caption),
+        parseMode:null
+      });
+      sent=(Array.isArray(posted)?posted:[]).map(item=>({message_id:item.id}));
     }
     delivered=Array.isArray(sent)&&sent.length>0;
     const ids=(Array.isArray(sent)?sent:[]).map(x=>Number(x?.message_id||0));
     if(ids.length!==sorted.length||ids.some(x=>x<=0))
       throw new Error('Telegram albomga yuborilgan xabar IDlarini qaytarmadi; qo‘lda tekshiring.');
+    if(copied){
+      for(const [index,item] of captions.entries()){
+        if(!item.changed)continue;
+        await telegram.editMessageCaption(target,ids[index],undefined,item.caption,{
+          caption_entities:item.entities
+        });
+      }
+    }
     await Log.updateOne({bot_key:cfg.bot_key,source_key:key},
       {$set:{status:'sent',target_message_id:ids[0],error:''}});
     return {status:'sent',message_ids:ids};
