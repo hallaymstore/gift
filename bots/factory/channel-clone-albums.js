@@ -53,6 +53,22 @@ const ENTITY_TYPES={
   Blockquote:'blockquote'
 };
 
+function adminContactCaption(cfg){
+  const admin=normalizeUsername(cfg.promo_admin_username);
+  const phone=normalizePhone(cfg.promo_admin_phone);
+  return [admin?'👤 Admin: @'+admin:'',phone?'☎️ Admin telefoni: '+phone:'']
+    .filter(Boolean).join('\n');
+}
+
+function albumCaptions(messages,cfg){
+  const captions=messages.map(message=>albumCaption(message,cfg));
+  if(captions.every(item=>!item.caption.trim())){
+    const caption=adminContactCaption(cfg);
+    if(caption)captions[0]={caption,entities:[],changed:true};
+  }
+  return captions;
+}
+
 function albumCaption(message,cfg){
   const original=String(message.message||'');
   const approvedUsers=sourceAdminUsernameSet(cfg.source_admin_usernames);
@@ -173,7 +189,7 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log}){
   }
   let delivered=false;
   try{
-    const captions=sorted.map(message=>albumCaption(message,cfg));
+    const captions=albumCaptions(sorted,cfg);
     const sourceChat=cfg.source_username?'@'+cfg.source_username:cfg.source_chat_id;
     let sent;
     if(captions.every(item=>!item.changed) && sourceChat && typeof telegram.copyMessages==='function'){
@@ -202,5 +218,5 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log}){
     return {status:'failed',error:reason};
   }
 }
-module.exports={groupedId,albumType,albumCaptionMessage,albumCaption,albumYoung,
+module.exports={groupedId,albumType,albumCaptionMessage,albumCaption,adminContactCaption,albumCaptions,albumYoung,
   collectAlbumMembers,uploadMediaAlbum,relayCloneAlbum,MAX_ALBUM_ITEMS,MAX_ALBUM_BYTES};
