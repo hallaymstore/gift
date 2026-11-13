@@ -3,7 +3,7 @@ const {Telegraf,Markup,session}=require('telegraf');
 const {telegramChatRef,telegramHandle}=require('./channel-publisher');
 const {countSourcePosts}=require('./channel-clone-count');
 const {describeRelayError}=require('./channel-clone-errors');
-const {contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
+const {feedbackLink,contactUsername,adFooter,getTargetPostLink,refreshClonePostText}=require('./channel-clone-branding');
 const {createOrReuseInvite,forgetRouteInvite}=require('./channel-clone-invite');
 const {parsePeerReference,sourceRefLabel,sourceKey,resolveSourcePeer,listJoinedGroups,validateSourceReference}=require('./channel-clone-peers');
 const {normalizePhone,normalizeUsername,detectSourceAdminCandidates}=require('./channel-clone-contacts');
@@ -36,6 +36,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ['👥 Aʼzo bo‘lgan guruhlar'],
     ['🤖 Reklama botini ulash','👤 Admin username'],
     ['🪪 Admin kontaktlari'],
+    ['💬 Fikrlar kanalini ulash','🗑 Fikrlar havolasini olib tashlash'],
     ['🔗 Bot havolasini uzish','🗑 Admin havolasini uzish'],
     ['🔌 Ulangan kanallar','❌ Kanallarni uzish'],
     ['▶️ Sinxronlash','⏸ To‘xtatish'],
@@ -153,6 +154,17 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     ctx.session.step=null;
     await Config.updateOne({bot_key:routeKey(ctx)},{$set:{promo_bot_username:''}},{upsert:true});
     return ctx.reply('✅ Reklama boti havolasi uzildi. Yangi postlarda kloner bot havolasi chiqmaydi.',menu());
+  });
+  bot.hears('💬 Fikrlar kanalini ulash',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step='feedback_link';
+    return ctx.reply('💬 Shu yo‘nalish uchun fikrlar kanali @username yoki https://t.me/... havolasini yuboring.',menu());
+  });
+  bot.hears('🗑 Fikrlar havolasini olib tashlash',async ctx=>{
+    if(!permitted(ctx))return;
+    ctx.session.step=null;
+    await Config.updateOne({bot_key:routeKey(ctx)},{$set:{feedback_mode:'remove',feedback_link:''}});
+    return ctx.reply('✅ Yangi postlardan fikrlar havolasi olib tashlanadi.',menu());
   });
   bot.hears(['👤 Admin username','📩 Reklama admini'],async ctx=>{
     if(!permitted(ctx))return;
@@ -846,6 +858,15 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     const raw=String(ctx.message.text||'').trim();
     if(raw.startsWith('/') || /^(?:📥|📤|▶️|⏸|🔄|📊|🧪|🧹|🔌|❌|🏠|🎨|🔢|⏱|🏆|🤖|🔗|➕|🗂|📩|🗑|📋|👥|🧭|🪪)/u.test(raw))return;
     const step=ctx.session.step;ctx.session.step=null;
+    if(step==='feedback_link'){
+      const link=feedbackLink(raw);
+      if(!link){
+        ctx.session.step=step;
+        return ctx.reply('❌ @username yoki https://t.me/... havolasini yuboring.',menu());
+      }
+      await Config.updateOne({bot_key:routeKey(ctx)},{$set:{feedback_mode:'replace',feedback_link:link}});
+      return ctx.reply('✅ Shu yo‘nalish uchun fikrlar havolasi saqlandi.\n'+link,menu());
+    }
     if(step==='interval_custom'){
       const selected=ctx.session.intervalRoute||routeKey(ctx);
       ctx.session.intervalRoute=null;
