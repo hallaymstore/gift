@@ -11181,38 +11181,45 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
           // use MTProto re-send or media downloading as a bypass.
           throw new Error('SOURCE_PROTECTED: manba postini nusxalash cheklangan');
         }
-        const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
-        let copied;
-        try {
-          copied=await client.sendMessage(target,{message});
-        } catch (userCopyError) {
-          // For customer-owned destination channels, the shared MTProto account
-          // is NOT an admin. Upload media via the customer's authorized bot.
-          // This avoids adding the shared account to every customer's channel.
+        if(cloneEngine && !keepOriginal){
           const {uploadSourceMedia}=require('./channel-clone-media');
+          sent=await uploadSourceMedia({
+            client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,caption:branded
+          });
+        } else {
+          const target=cfg.target_username?'@'+cfg.target_username:cfg.target_chat_id;
+          let copied;
           try {
-            if(kind==='text'){
-              sent=await botTelegram.sendMessage(cfg.target_chat_id,
-                originalFormat?String(message.message||''):branded,{disable_web_page_preview:true});
-            } else sent=await uploadSourceMedia({
-              client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,
-              caption:keepOriginal?sourceText:branded
-            });
-          } catch(uploadError) {
-            const uploadReason=describeRelayError(uploadError,165);
-            const userReason=describeRelayError(userCopyError,85);
-            throw new Error('Media upload: '+uploadReason+
-              '; MTProto: '+userReason+'; copyMessage: '+botErrorText);
+            copied=await client.sendMessage(target,{message});
+          } catch (userCopyError) {
+            // For customer-owned destination channels, the shared MTProto account
+            // is NOT an admin. Upload media via the customer's authorized bot.
+            // This avoids adding the shared account to every customer's channel.
+            const {uploadSourceMedia}=require('./channel-clone-media');
+            try {
+              if(kind==='text'){
+                sent=await botTelegram.sendMessage(cfg.target_chat_id,
+                  originalFormat?String(message.message||''):branded,{disable_web_page_preview:true});
+              } else sent=await uploadSourceMedia({
+                client,telegram:botTelegram,chatId:cfg.target_chat_id,message,kind,
+                caption:keepOriginal?sourceText:branded
+              });
+            } catch(uploadError) {
+              const uploadReason=describeRelayError(uploadError,165);
+              const userReason=describeRelayError(userCopyError,85);
+              throw new Error('Media upload: '+uploadReason+
+                '; MTProto: '+userReason+'; copyMessage: '+botErrorText);
+            }
           }
-        }
-        if(copied){
-          try {
-            if (!keepOriginal) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
-          } catch (editError) {
-            await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
-            throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
+          if(copied){
+            try {
+              if (!keepOriginal) await client.editMessage(target,{message:copied.id,text:branded,parseMode:undefined});
+            } catch (editError) {
+              await client.deleteMessages(target,[copied.id],{revoke:true}).catch(()=>{});
+              throw new Error('MTProto copied but caption edit failed: '+String(editError.message||editError));
+            }
+            sent={message_id:copied.id};
           }
-          sent={message_id:copied.id};
         }
       }
     }
