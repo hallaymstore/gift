@@ -527,7 +527,13 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
     if(!permitted(ctx))return;const c=await load(ctx);
     if(!c?.target_chat_id||!sourceKey(c))return ctx.reply('Avval manba va maqsadni ulang.',menu());
     if(!sessionReady())return ctx.reply('Telegram sessiyasi mavjud emas.',menu());
-    if(c.history_enabled&&!c.history_completed&&c.auto_enabled)return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
+    if(c.history_enabled&&!c.history_completed&&c.auto_enabled){
+      if(c.source_mode!=='mtproto'){
+        await Config.updateOne({bot_key:routeKey(ctx),auto_enabled:true},{$set:{source_mode:'mtproto'}});
+        return ctx.reply('✅ Sinxronlash Telegram sessiyasiga qayta ulandi.',menu());
+      }
+      return ctx.reply('🔄 Sinxronlash avvaldan ishlamoqda.',menu());
+    }
     if(counting)return ctx.reply('🔄 Postlar sanalayotgan paytda boshqa yo‘nalishni boshlash mumkin emas. Birozdan so‘ng qayta bosing.',menu());
     const selectedKey=routeKey(ctx);
     const chatId=ctx.chat.id;
@@ -538,7 +544,7 @@ function createChannelCloneBot({token,adminIds,Config,Log,sessionReady,config={k
       if(!stats)return;
       const saved=await Config.updateOne({
         bot_key:selectedKey,source_username:c.source_username||'',source_chat_id:c.source_chat_id||'',target_chat_id:c.target_chat_id
-      },{$set:{auto_enabled:true,history_enabled:true,history_completed:false,
+      },{$set:{source_mode:'mtproto',auto_enabled:true,history_enabled:true,history_completed:false,
         history_last_error:'',history_retry_at:null,history_error_count:0}});
       if(!saved.matchedCount)return ctx.telegram.sendMessage(chatId,'⚠️ Kanal sozlamasi o‘zgargan, sinxronlash boshlanmadi.');
       await ctx.telegram.sendMessage(chatId,
