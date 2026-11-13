@@ -18,7 +18,7 @@ const { attachMiniGames } = require('./mini-games-engine');
 const {attachGroupAnnouncer}=require('./group-announcements-bot');
 const {createChannelCloneBot}=require('./channel-clone-bot');
 const {describeRelayError}=require('./channel-clone-errors');
-const {buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
+const {applyFeedbackLink,buildClonePostText,hasSourcePromotionLink}=require('./channel-clone-branding');
 const {createOrReuseInvite}=require('./channel-clone-invite');
 const {relayCloneAlbum,adminContactCaption}=require('./channel-clone-albums');
 const {runGroupAnnouncementTick}=require('./group-announcements-runner');
@@ -423,6 +423,8 @@ const relayConfigSchema = new mongoose.Schema({
   source_stats: {type:mongoose.Schema.Types.Mixed,default:null},
   promo_bot_username: {type:String,default:''},
   promo_admin_username: {type:String,default:''},
+  feedback_mode: {type:String,enum:['replace','remove']},
+  feedback_link: {type:String,default:''},
   promo_admin_phone: {type:String,default:''},
   source_admin_phones: {type:[String],default:[]},
   source_admin_usernames: {type:[String],default:[]},
@@ -11148,13 +11150,14 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
     const sourceText=String(message.message||'');
     const addedContact=cloneEngine && kind==='photo' && !sourceText.trim()
       ? adminContactCaption(cfg) : '';
-    const keepOriginal=originalFormat && !addedContact;
+    const originalWithFeedback=originalFormat?applyFeedbackLink(addedContact||sourceText,cfg):sourceText;
+    const keepOriginal=originalFormat && originalWithFeedback===sourceText;
     // Only issue a Telegram createChatInviteLink request for Branded posts
     // which actually contain a source-channel URL that needs replacing.
     const destinationLink=cloneEngine && !originalFormat && hasSourcePromotionLink(sourceText)
       ? await createOrReuseInvite({cfg,telegram:botTelegram,Config:ChannelRelayConfig})
       : '';
-    const branded = addedContact || (cloneEngine
+    const branded = originalFormat ? originalWithFeedback : (addedContact ? applyFeedbackLink(addedContact,cfg) : (cloneEngine
       ? buildClonePostText(sourceText,
           destinationLink?{...cfg,target_post_link:destinationLink}:cfg,
           kind==='text'?4096:1024)
@@ -11162,9 +11165,9 @@ async function routeExternalPublicPost({type,cfg,cursor,message,messages,client,
           message:caption, destination:{id:cfg.target_chat_id,username:cfg.target_username,
             title:cfg.target_title}, botUsername:username,
           otherBots:cfg.linked_bots||[],localContent:local
-        }));
+        })));
     let sent;
-    if (kind === 'text' && !originalFormat) {
+    if (kind === 'text' && !keepOriginal) {
       sent = await botTelegram.sendMessage(cfg.target_chat_id,branded,
         {disable_web_page_preview:true});
     } else {
