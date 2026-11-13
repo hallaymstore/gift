@@ -202,7 +202,29 @@ async function relayCloneAlbum({cfg,messages,client,telegram,Log}){
           throw new Error('SOURCE_PROTECTED: manbada nusxalash cheklangan.');
       }
     }
-    if(!sent||(Array.isArray(sent)&&!sent.length))sent=await uploadMediaAlbum({client,telegram,chatId:target,messages:sorted,captions});
+    if(!sent||(Array.isArray(sent)&&!sent.length)){
+      if(typeof client.sendFile==='function' && captions.every(item=>!item.entities.length)){
+        const peer=cfg.target_username?'@'+cfg.target_username:target;
+        try{
+          const posted=await client.sendFile(peer,{
+            file:sorted.map(item=>item.media),
+            caption:captions.map(item=>item.caption),
+            parseMode:undefined
+          });
+          sent=(Array.isArray(posted)?posted:[]).map(item=>({message_id:item.id}));
+        }catch(error){
+          const reason=String(error?.message||error);
+          if(!/CHAT_WRITE_FORBIDDEN|CHAT_ADMIN_REQUIRED|USER_BANNED_IN_CHANNEL|CHANNEL_PRIVATE|FILE_REFERENCE|Could not find the input entity|PEER_ID_INVALID/i.test(reason))throw error;
+        }
+      }
+      try{
+        if(!sent)sent=await uploadMediaAlbum({client,telegram,chatId:target,messages:sorted,captions});
+      }catch(error){
+        console.warn('[channel sync] album upload failed',source,cfg.target_username||target,
+          sorted[0].id,sorted.length,require('./channel-clone-errors').redactTelegramSecrets(error.message||error).slice(0,220));
+        throw error;
+      }
+    }
     delivered=Array.isArray(sent)&&sent.length>0;
     const ids=(Array.isArray(sent)?sent:[]).map(x=>Number(x?.message_id||0));
     if(ids.length!==sorted.length||ids.some(x=>x<=0))
