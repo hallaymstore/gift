@@ -131,8 +131,34 @@ function cleanSourceAdvertising(original,cfg={}){
   });
 }
 
+function feedbackLink(value){
+  const input=String(value||'').trim();
+  if(/^https:\/\/t\.me\/(?:\+[\w-]+|joinchat\/[\w-]+)$/i.test(input))return input;
+  const handle=input.match(/^(?:@|https:\/\/t\.me\/)([a-z][a-z0-9_]{4,31})$/i);
+  return handle?'https://t.me/'+handle[1]:'';
+}
+
+function feedbackEdits(text,cfg){
+  if(cfg.feedback_mode!=='replace'&&cfg.feedback_mode!=='remove')return [];
+  const link=cfg.feedback_mode==='replace'?feedbackLink(cfg.feedback_link):'';
+  const lines=/(?:^[ \t]*(?:[^\p{L}\p{N}\s]+\s*)?(?:otviz|otziv(?:lar)?|otzyv(?:lar)?|feedback|fikrlar|отзыв(?:ы)?)[ \t]*[:：—–-]?[ \t]*(?:@[a-z][a-z0-9_]{4,31}|(?:https?:\/\/)?t\.me\/(?:\+[\w-]+|joinchat\/[\w-]+|[a-z][a-z0-9_]{4,31}))?[ \t]*(?:\r?\n|$))/gimu;
+  const matches=[...text.matchAll(lines)];
+  if(!matches.length)return link?[{start:text.length,end:text.length,value:(text.trim()?'\n\n':'')+'💬 Fikrlar: '+link}]:[];
+  return matches.map((match,index)=>({start:match.index,end:match.index+match[0].length,
+    value:link&&index===0?'💬 Fikrlar: '+link+(match[0].endsWith('\n')?'\n':''):''}));
+}
+
+function applyFeedbackLink(text,cfg){
+  const edits=feedbackEdits(text,cfg);
+  for(const {start,end,value} of edits.reverse())text=text.slice(0,start)+value+text.slice(end);
+  return text;
+}
+
 function buildClonePostText(original,cfg,limit=1024){
-  return joinWithFooter(cleanSourceAdvertising(original,cfg),adFooter(cfg),limit);
+  const body=cfg.feedback_mode==='replace'||cfg.feedback_mode==='remove'
+    ? applyFeedbackLink(cleanSourceAdvertising(applyFeedbackLink(String(original||''),{feedback_mode:'remove'}),cfg),cfg)
+    : cleanSourceAdvertising(original,cfg);
+  return joinWithFooter(body,adFooter(cfg),limit);
 }
 
 function refreshClonePostText(existing,cfg,limit=1024){
@@ -141,4 +167,4 @@ function refreshClonePostText(existing,cfg,limit=1024){
   return buildClonePostText(existing,cfg,limit);
 }
 
-module.exports={contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,isSourceContactOnly,stripSourceContactPromotions,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
+module.exports={feedbackLink,feedbackEdits,applyFeedbackLink,contactUsername,adFooter,getTargetPostLink,hasSourcePromotionLink,isSourceContactOnly,stripSourceContactPromotions,cleanSourceAdvertising,buildClonePostText,refreshClonePostText};
